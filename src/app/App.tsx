@@ -1,31 +1,105 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Album, AudioWaveform, ChevronDown, CircleHelp, Disc3,
-  Headphones, Heart, Home, Library, ListMusic, Music2, Search, Settings2,
-  ShieldCheck, SlidersHorizontal, Sparkles, WifiOff,
+  Album,
+  AudioWaveform,
+  ChevronDown,
+  CircleHelp,
+  Disc3,
+  Heart,
+  Home,
+  Library,
+  ListMusic,
+  Search,
+  Settings2,
+  ShieldCheck,
 } from 'lucide-react';
-import { getLibrarySummary, getPlatformHealth, isNativeApp, type LibrarySummary, type PlatformHealth } from '../lib/platform';
+import {
+  getLibrarySummary,
+  getPlatformHealth,
+  isNativeApp,
+  type LibrarySummary,
+  type PlatformHealth,
+} from '../lib/platform';
+import type { Page, PlaybackState, Playlist, Track } from '../lib/types';
 import { IconButton } from '../components/IconButton';
-import { EmptyLibrary } from '../features/library/EmptyLibrary';
+import { LibraryView } from '../features/library/LibraryView';
+import { TracksView } from '../features/library/TracksView';
+import { PlaylistsView } from '../features/library/PlaylistsView';
+import { AlbumsView } from '../features/library/AlbumsView';
+import { ArtistsView } from '../features/library/ArtistsView';
+import { LikedTracksView } from '../features/library/LikedTracksView';
 import { SearchView } from '../features/search/SearchView';
 import { SettingsView } from '../features/settings/SettingsView';
-
-type Page = 'library' | 'search' | 'playlists' | 'albums' | 'artists' | 'liked' | 'settings';
+import { PlayerDock } from '../features/player/PlayerDock';
+import { ExpandedPlayer } from '../features/player/ExpandedPlayer';
+import { QueueDrawer } from '../features/player/QueueDrawer';
+import { LyricsDrawer } from '../features/player/LyricsDrawer';
 
 const pageLabels: Record<Page, string> = {
-  library: 'Your library', search: 'Search', playlists: 'Playlists', albums: 'Albums',
-  artists: 'Artists', liked: 'Liked tracks', settings: 'Settings',
+  library: 'Personal Archive',
+  tracks: 'Tracks',
+  playlists: 'Playlists',
+  albums: 'Albums',
+  artists: 'Artists',
+  liked: 'Liked Songs',
+  search: 'Search & Discovery',
+  settings: 'Settings & System',
+};
+
+const getInitialPage = (): Page => {
+  const hash = window.location.hash.replace('#', '') as Page;
+  if (['library', 'tracks', 'playlists', 'albums', 'artists', 'liked', 'search', 'settings'].includes(hash)) {
+    return hash;
+  }
+  const params = new URLSearchParams(window.location.search);
+  const v = params.get('view') as Page;
+  if (['library', 'tracks', 'playlists', 'albums', 'artists', 'liked', 'search', 'settings'].includes(v)) {
+    return v;
+  }
+  return 'library';
 };
 
 export function App() {
-  const [page, setPage] = useState<Page>('library');
+  const [page, setPage] = useState<Page>(getInitialPage);
   const [health, setHealth] = useState<PlatformHealth | null>(null);
   const [summary, setSummary] = useState<LibrarySummary | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
+  // UI Drawer & Modal States
+  const urlParams = useMemo(() => new URLSearchParams(window.location.search), []);
+  const [isExpandedPlayerOpen, setIsExpandedPlayerOpen] = useState(urlParams.get('expanded') === 'true');
+  const [isQueueOpen, setIsQueueOpen] = useState(urlParams.get('queue') === 'true');
+  const [isLyricsOpen, setIsLyricsOpen] = useState(urlParams.get('lyrics') === 'true');
+
+  // Appearance preferences
+  const [density, setDensity] = useState<'standard' | 'compact'>('standard');
+  const [showKanji, setShowKanji] = useState(true);
+
+  // Playback state (honest initial state: audio backend is standby)
+  const [playback, setPlayback] = useState<PlaybackState>({
+    status: 'idle',
+    currentTrack: null,
+    positionMs: 0,
+    durationMs: 0,
+    volume: 85,
+    isMuted: false,
+    repeatMode: 'off',
+    isShuffle: false,
+    playbackSpeed: 1.0,
+    queue: [],
+  });
+
+  // Local playlists (can be created by the user)
+  const [playlists, setPlaylists] = useState<Playlist[]>([]);
+
+  // Tracks, albums, artists from real state
+  const tracks: Track[] = useMemo(() => [], []);
+  const likedTracks: Track[] = useMemo(() => tracks.filter((t) => t.isLiked), [tracks]);
+
   useEffect(() => {
     let active = true;
     if (!isNativeApp()) return;
+
     Promise.all([getPlatformHealth(), getLibrarySummary()])
       .then(([nextHealth, nextSummary]) => {
         if (!active) return;
@@ -36,8 +110,13 @@ export function App() {
         if (!active) return;
         setConnectionError(error instanceof Error ? error.message : String(error));
       });
-    return () => { active = false; };
+
+    return () => {
+      active = false;
+    };
   }, []);
+
+  const isBackendReady = health?.audio_backend === 'ready';
 
   const statusLabel = useMemo(() => {
     if (!isNativeApp()) return 'DESIGN PREVIEW';
@@ -46,109 +125,277 @@ export function App() {
     return health.database_connected ? 'LOCAL CORE READY' : 'DATABASE OFFLINE';
   }, [connectionError, health]);
 
+  const handleCreatePlaylist = (name: string, description: string) => {
+    const newPl: Playlist = {
+      id: `pl-${Date.now()}`,
+      name,
+      description,
+      trackCount: 0,
+      createdAt: new Date().toISOString(),
+      tracks: [],
+    };
+    setPlaylists((prev) => [newPl, ...prev]);
+  };
+
   const nav = [
-    { label: 'Library', page: 'library' as const, icon: Library },
+    { label: 'Archive', page: 'library' as const, icon: Library },
     { label: 'Search', page: 'search' as const, icon: Search },
   ];
+
   const collections = [
-    { label: 'Playlists', page: 'playlists' as const, icon: ListMusic },
-    { label: 'Albums', page: 'albums' as const, icon: Disc3 },
+    { label: 'Tracks', page: 'tracks' as const, icon: Disc3, count: summary?.tracks ?? 0 },
+    { label: 'Playlists', page: 'playlists' as const, icon: ListMusic, count: playlists.length },
+    { label: 'Albums', page: 'albums' as const, icon: Album },
     { label: 'Artists', page: 'artists' as const, icon: AudioWaveform },
-    { label: 'Liked tracks', page: 'liked' as const, icon: Heart },
+    { label: 'Liked Tracks', page: 'liked' as const, icon: Heart, count: summary?.liked_tracks ?? 0 },
   ];
 
   return (
-    <div className="app-frame">
-      <aside className="sidebar">
+    <div className={`cavia-app-frame ${density === 'compact' ? 'density-compact' : ''} ${showKanji ? 'show-kanji' : 'hide-kanji'}`}>
+      {/* Desktop Sidebar Navigation */}
+      <aside className="cavia-sidebar" aria-label="Main Navigation">
         <div className="brand-lockup">
-          <div className="brand-mark"><AudioWaveform size={21} strokeWidth={1.7} /></div>
-          <div className="brand-copy"><span className="brand-name">cavia<span>.</span></span><span className="brand-edition">MUSIC / 02</span></div>
+          <div className="brand-mark" aria-hidden="true">
+            <AudioWaveform size={22} strokeWidth={1.8} />
+          </div>
+          <div className="brand-copy">
+            <span className="brand-name">
+              cavia<span>.</span>
+            </span>
+            <span className="brand-edition">MUSIC / 02</span>
+          </div>
         </div>
 
-        <div className="sidebar-scroll">
+        <div className="sidebar-scrollable-content">
           <div className="nav-group">
             <div className="nav-caption">WORKSPACE</div>
             {nav.map((item) => {
               const Icon = item.icon;
-              return <button key={item.page} className={`nav-item ${page === item.page ? 'active' : ''}`} onClick={() => setPage(item.page)}>
-                <Icon size={17} strokeWidth={1.8} /><span>{item.label}</span>{page === item.page && <span className="active-marker" />}
-              </button>;
+              const isActive = page === item.page;
+              return (
+                <button
+                  key={item.page}
+                  type="button"
+                  className={`nav-item ${isActive ? 'active' : ''}`}
+                  onClick={() => setPage(item.page)}
+                >
+                  <Icon size={17} strokeWidth={1.8} />
+                  <span>{item.label}</span>
+                  {isActive && <span className="active-marker" />}
+                </button>
+              );
             })}
           </div>
 
           <div className="nav-group collection-group">
-            <div className="nav-caption nav-caption-row"><span>YOUR COLLECTION</span><span className="nav-count">{summary?.tracks ?? '—'}</span></div>
+            <div className="nav-caption nav-caption-row">
+              <span>YOUR COLLECTION</span>
+              <span className="nav-count">{summary?.tracks ?? '0'}</span>
+            </div>
             {collections.map((item) => {
               const Icon = item.icon;
-              return <button key={item.page} className={`nav-item ${page === item.page ? 'active' : ''}`} onClick={() => setPage(item.page)}>
-                <Icon size={17} strokeWidth={1.8} /><span>{item.label}</span>{page === item.page && <span className="active-marker" />}
-              </button>;
+              const isActive = page === item.page;
+              return (
+                <button
+                  key={item.page}
+                  type="button"
+                  className={`nav-item ${isActive ? 'active' : ''}`}
+                  onClick={() => setPage(item.page)}
+                >
+                  <Icon size={17} strokeWidth={1.8} />
+                  <span>{item.label}</span>
+                  {item.count !== undefined && item.count > 0 && (
+                    <span className="nav-badge-count">{item.count}</span>
+                  )}
+                  {isActive && <span className="active-marker" />}
+                </button>
+              );
             })}
           </div>
         </div>
 
-        <div className="sidebar-bottom">
+        <div className="sidebar-bottom-tray">
           <div className="integrity-card">
-            <div className="integrity-icon"><ShieldCheck size={15} /></div>
-            <div><strong>Local-first by design</strong><span>Your library stays yours.</span></div>
+            <div className="integrity-icon" aria-hidden="true">
+              <ShieldCheck size={16} />
+            </div>
+            <div className="integrity-copy">
+              <strong>Local-first by design</strong>
+              <span>Your library stays yours.</span>
+            </div>
           </div>
-          <button className={`nav-item ${page === 'settings' ? 'active' : ''}`} onClick={() => setPage('settings')}>
-            <Settings2 size={17} /><span>Settings</span>{page === 'settings' && <span className="active-marker" />}
+
+          <button
+            type="button"
+            className={`nav-item ${page === 'settings' ? 'active' : ''}`}
+            onClick={() => setPage('settings')}
+          >
+            <Settings2 size={17} strokeWidth={1.8} />
+            <span>Settings</span>
+            {page === 'settings' && <span className="active-marker" />}
           </button>
-          <div className="sidebar-version">CAVIA MUSIC <span>2.0.0 FOUNDATION</span></div>
+
+          <div className="sidebar-version-tag">
+            CAVIA MUSIC <span>2.0.0 FOUNDATION</span>
+          </div>
         </div>
       </aside>
 
-      <main className="main-shell">
-        <header className="topbar">
-          <div className="breadcrumbs"><span> CAVIA </span><span className="crumb-slash">/</span><strong>{pageLabels[page].toUpperCase()}</strong></div>
+      {/* Main Content Shell */}
+      <main className="cavia-main-shell">
+        <header className="cavia-topbar" role="banner">
+          <div className="breadcrumbs">
+            <span className="crumb-brand">CAVIA</span>
+            <span className="crumb-slash">/</span>
+            <strong className="crumb-current">{pageLabels[page].toUpperCase()}</strong>
+          </div>
+
           <div className="topbar-actions">
-            <div className={`core-status ${connectionError ? 'status-error' : ''}`}><span className="status-dot" />{statusLabel}</div>
+            <div
+              className={`core-status-pill ${connectionError ? 'status-error' : ''}`}
+              title="Native SQLite Core Connection State"
+            >
+              <span className="status-dot-pulse" />
+              <span>{statusLabel}</span>
+            </div>
+
             <span className="topbar-divider" />
-            <IconButton label="Help and project status" icon={<CircleHelp size={17} />} disabled title="Project documentation is being prepared" />
-            <button className="profile-button" aria-label="Guest profile"><span className="profile-avatar">G</span><span className="profile-name">GUEST</span><ChevronDown size={13} /></button>
+
+            <IconButton
+              label="Help and project status"
+              icon={<CircleHelp size={17} />}
+              disabled
+              title="Documentation is in docs/architecture.md"
+            />
+
+            <button
+              type="button"
+              className="profile-button"
+              aria-label="Guest session profile"
+              title="Local session · No account required"
+            >
+              <span className="profile-avatar">C</span>
+              <span className="profile-name">LOCAL</span>
+              <ChevronDown size={13} />
+            </button>
           </div>
         </header>
 
-        <div className="page-scroll" key={page}>
-          {page === 'library' && <>
-            <section className="page-heading">
-              <div><div className="eyebrow"><span className="eyebrow-line" />THE PERSONAL ARCHIVE</div><h1>Your sound.<br /><em>Your space.</em></h1><p className="heading-description">A quieter place for the music that stays with you.</p></div>
-              <div className="heading-kanji" aria-hidden="true">藏</div>
-            </section>
-            <section className="library-summary">
-              <div className="summary-main"><div className="summary-icon"><Library size={19} /></div><div><span className="summary-label">YOUR COLLECTION</span><strong>{summary ? summary.tracks.toLocaleString() : '—'} <small>tracks</small></strong></div></div>
-              <div className="summary-separator" />
-              <div className="summary-stat"><span>PLAYLISTS</span><strong>{summary?.playlists ?? '—'}</strong></div>
-              <div className="summary-stat"><span>LIKED TRACKS</span><strong>{summary?.liked_tracks ?? '—'}</strong></div>
-              <div className="summary-note"><Sparkles size={14} /><span>Made for listening, not scrolling.</span></div>
-            </section>
-            {connectionError && <div className="inline-error"><WifiOff size={15} /><span>Could not connect to the local core: {connectionError}</span></div>}
-            <EmptyLibrary />
-          </>}
+        {/* Dynamic Page Scroll Area */}
+        <div className="cavia-page-scroll" key={page} tabIndex={-1}>
+          {page === 'library' && (
+            <LibraryView
+              summary={summary}
+              health={health}
+              connectionError={connectionError}
+              playlists={playlists}
+              onNavigate={setPage}
+              onOpenCreatePlaylist={() => setPage('playlists')}
+            />
+          )}
+
+          {page === 'tracks' && (
+            <TracksView tracks={tracks} isBackendReady={isBackendReady} />
+          )}
+
+          {page === 'playlists' && (
+            <PlaylistsView
+              playlists={playlists}
+              onCreatePlaylist={handleCreatePlaylist}
+              isBackendReady={isBackendReady}
+            />
+          )}
+
+          {page === 'albums' && <AlbumsView albums={[]} />}
+
+          {page === 'artists' && <ArtistsView artists={[]} />}
+
+          {page === 'liked' && (
+            <LikedTracksView tracks={likedTracks} isBackendReady={isBackendReady} />
+          )}
+
           {page === 'search' && <SearchView />}
-          {page === 'settings' && <SettingsView health={health} />}
-          {['playlists', 'albums', 'artists', 'liked'].includes(page) && <CollectionEmpty page={page} />}
+
+          {page === 'settings' && (
+            <SettingsView
+              health={health}
+              density={density}
+              onDensityChange={setDensity}
+              showKanji={showKanji}
+              onShowKanjiChange={setShowKanji}
+            />
+          )}
         </div>
 
-        <footer className="player-dock">
-          <div className="dock-track"><div className="dock-art"><Music2 size={19} /></div><div className="dock-meta"><strong>Nothing playing</strong><span>Your next favourite starts here.</span></div></div>
-          <div className="dock-center"><div className="dock-controls"><IconButton label="Shuffle" icon={<SlidersHorizontal size={16} />} disabled title="Playback engine is not connected yet" /><IconButton label="Previous track" icon={<span className="control-glyph">|◀</span>} disabled title="Playback engine is not connected yet" /><button className="play-button" disabled aria-label="Play"><span /></button><IconButton label="Next track" icon={<span className="control-glyph">▶|</span>} disabled title="Playback engine is not connected yet" /><IconButton label="Queue" icon={<ListMusic size={16} />} disabled title="Queue becomes available with the playback engine" /></div><div className="dock-progress"><span>0:00</span><div className="progress-track"><div /></div><span>0:00</span></div></div>
-          <div className="dock-right"><span className="engine-hint"><span className="status-dot muted" />AUDIO ENGINE NOT CONNECTED</span><IconButton label="Volume" icon={<Headphones size={17} />} disabled title="Playback engine is not connected yet" /></div>
-        </footer>
+        {/* Persistent Bottom Player Dock */}
+        <PlayerDock
+          playback={playback}
+          isBackendReady={isBackendReady}
+          onOpenExpanded={() => setIsExpandedPlayerOpen(true)}
+          onOpenQueue={() => setIsQueueOpen(true)}
+          onOpenLyrics={() => setIsLyricsOpen(true)}
+        />
       </main>
 
-      <nav className="mobile-nav">
-        {[{ page: 'library' as const, icon: Home, label: 'Home' }, { page: 'search' as const, icon: Search, label: 'Search' }, { page: 'liked' as const, icon: Heart, label: 'Liked' }, { page: 'settings' as const, icon: Settings2, label: 'Settings' }].map((item) => {
+      {/* Expanded Full-Screen Player Modal */}
+      <ExpandedPlayer
+        isOpen={isExpandedPlayerOpen}
+        onClose={() => setIsExpandedPlayerOpen(false)}
+        playback={playback}
+        isBackendReady={isBackendReady}
+        onOpenQueue={() => {
+          setIsExpandedPlayerOpen(false);
+          setIsQueueOpen(true);
+        }}
+        onOpenLyrics={() => {
+          setIsExpandedPlayerOpen(false);
+          setIsLyricsOpen(true);
+        }}
+      />
+
+      {/* Slide-over Queue Drawer */}
+      <QueueDrawer
+        isOpen={isQueueOpen}
+        onClose={() => setIsQueueOpen(false)}
+        currentTrack={playback.currentTrack}
+        queue={playback.queue}
+        onClearQueue={() => setPlayback((p) => ({ ...p, queue: [] }))}
+        onRemoveTrack={(id) =>
+          setPlayback((p) => ({ ...p, queue: p.queue.filter((t) => t.id !== id) }))
+        }
+      />
+
+      {/* Slide-over Lyrics Drawer */}
+      <LyricsDrawer
+        isOpen={isLyricsOpen}
+        onClose={() => setIsLyricsOpen(false)}
+        currentTrack={playback.currentTrack}
+      />
+
+      {/* Mobile Bottom Navigation Bar */}
+      <nav className="cavia-mobile-nav" aria-label="Mobile Navigation">
+        {[
+          { page: 'library' as const, icon: Home, label: 'Archive' },
+          { page: 'search' as const, icon: Search, label: 'Search' },
+          { page: 'playlists' as const, icon: ListMusic, label: 'Playlists' },
+          { page: 'liked' as const, icon: Heart, label: 'Liked' },
+          { page: 'settings' as const, icon: Settings2, label: 'Settings' },
+        ].map((item) => {
           const Icon = item.icon;
-          return <button key={item.page} className={page === item.page ? 'mobile-active' : ''} onClick={() => setPage(item.page)}><Icon size={19} /><span>{item.label}</span></button>;
+          const isActive = page === item.page;
+          return (
+            <button
+              key={item.page}
+              type="button"
+              className={`mobile-nav-btn ${isActive ? 'active' : ''}`}
+              onClick={() => setPage(item.page)}
+            >
+              <Icon size={19} />
+              <span>{item.label}</span>
+            </button>
+          );
         })}
       </nav>
     </div>
   );
-}
-
-function CollectionEmpty({ page }: { page: Page }) {
-  const icon = page === 'playlists' ? <ListMusic size={22} /> : page === 'albums' ? <Album size={22} /> : page === 'artists' ? <AudioWaveform size={22} /> : <Heart size={22} />;
-  return <section className="simple-empty"><div className="simple-empty-icon">{icon}</div><div className="eyebrow">COLLECTION / {page.toUpperCase()}</div><h2>This space is waiting<br />for your music.</h2><p>Nothing is pre-filled. Your collection will be built from music you add.</p></section>;
 }
