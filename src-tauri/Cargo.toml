@@ -1,0 +1,28 @@
+[package]
+name = "cavia-music"
+version = "2.0.0"
+description = "Cavia Music desktop and mobile application core"
+authors = ["StretchWave"]
+edition = "2024"
+rust-version = "1.90"
+
+[lib]
+name = "cavia_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+tauri = { version = "2.12.3", features = [] }
+tauri-plugin-dialog = "2.8.4"
+
+# Desktop playback candidate. Enable only after libmpv is packaged and its
+# licensing/build configuration has been reviewed for each desktop target.
+rsmpv = { version = "0.2.1", optional = true }
+
+[features]
+default = []
+desktop-mpv = ["dep:rsmpv"]
