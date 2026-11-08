@@ -70,7 +70,7 @@ export function ExpandedPlayer({
   const engineDisabledTooltip = 'Playback engine is not connected yet (Milestone 3)';
 
   return (
-    <div className="cavia-expanded-player-overlay" role="dialog" aria-modal="true">
+    <div className="cavia-expanded-player-overlay" role="dialog" aria-modal="true" aria-label="Expanded player">
       <div className="expanded-background-ambient" aria-hidden="true" />
 
       <header className="expanded-header">
@@ -90,7 +90,7 @@ export function ExpandedPlayer({
         </div>
 
         <div className="expanded-header-actions">
-          <Badge variant="outline" size="sm">
+          <Badge variant={isBackendReady ? 'ready' : 'outline'} size="sm">
             {isBackendReady ? 'BIT-PERFECT OUTPUT' : 'STANDBY ENGINE'}
           </Badge>
           <IconButton
@@ -98,6 +98,7 @@ export function ExpandedPlayer({
             icon={<Share2 size={18} />}
             variant="ghost"
             disabled={!currentTrack}
+            title={!currentTrack ? 'No track playing to share' : undefined}
           />
         </div>
       </header>
@@ -111,11 +112,11 @@ export function ExpandedPlayer({
             ) : (
               <div className="sleeve-art-placeholder">
                 <div className="sleeve-pattern" />
-                <span className="sleeve-kanji">音</span>
+                <span className="sleeve-kanji" aria-hidden="true">音</span>
                 <span className="sleeve-label">CAVIA HIGH-FIDELITY</span>
               </div>
             )}
-            <div className="sleeve-sheen" />
+            <div className="sleeve-sheen" aria-hidden="true" />
           </div>
 
           {/* Grooved Vinyl Record */}
@@ -138,7 +139,7 @@ export function ExpandedPlayer({
                 {currentTrack?.title ?? 'No audio loaded'}
               </h1>
               <p className="expanded-track-artist">
-                {currentTrack?.artist ? `${currentTrack.artist}` : 'Import real audio to begin'}
+                {currentTrack?.artist ? `${currentTrack.artist}` : 'Import real audio to begin listening'}
               </p>
             </div>
 
@@ -146,23 +147,40 @@ export function ExpandedPlayer({
               type="button"
               className="expanded-heart-btn"
               disabled={!currentTrack || !isBackendReady}
-              title={!currentTrack ? 'No track playing' : 'Add to Liked'}
+              title={!currentTrack ? 'No track playing' : 'Add to Liked Songs'}
               aria-label="Like track"
             >
               <Heart size={22} />
             </button>
           </div>
 
+          {/* Honest Technical Badges */}
           <div className="expanded-format-badges">
-            <Badge variant="vermilion" size="sm">
-              {currentTrack?.sourceKind === 'local' ? 'LOCAL AUDIO' : 'STREAM SOURCE'}
-            </Badge>
-            <Badge variant="neutral" size="sm">
-              FLAC / 44.1kHz · 16-BIT
-            </Badge>
-            <Badge variant="outline" size="sm">
-              RATE: {playbackSpeed}x
-            </Badge>
+            {currentTrack ? (
+              <>
+                <Badge variant="vermilion" size="sm">
+                  {currentTrack.sourceKind === 'local' ? 'LOCAL AUDIO' : (currentTrack.providerId?.toUpperCase() ?? 'STREAM')}
+                </Badge>
+                <Badge variant="neutral" size="sm">
+                  {currentTrack.genre || 'HI-RES AUDIO'}
+                </Badge>
+                <Badge variant="outline" size="sm">
+                  RATE: {playbackSpeed}x
+                </Badge>
+              </>
+            ) : (
+              <>
+                <Badge variant="outline" size="sm">
+                  AUDIO STANDBY
+                </Badge>
+                <Badge variant="neutral" size="sm">
+                  {isBackendReady ? 'ENGINE READY' : 'ENGINE UNWIRED (MILESTONE 3)'}
+                </Badge>
+                <Badge variant="outline" size="sm">
+                  RATE: {playbackSpeed}x
+                </Badge>
+              </>
+            )}
           </div>
 
           {/* Scrubber */}
@@ -172,7 +190,7 @@ export function ExpandedPlayer({
               max={durationMs || 100}
               onChange={() => {}}
               disabled={!isBackendReady || durationMs <= 0}
-              label="Seek track"
+              label="Seek track position"
               showFill={durationMs > 0}
             />
             <div className="expanded-time-labels">
@@ -234,6 +252,7 @@ export function ExpandedPlayer({
               type="button"
               className="expanded-chip-btn"
               onClick={onOpenLyrics}
+              aria-label="Open lyrics drawer"
             >
               <Mic2 size={16} />
               <span>Lyrics</span>
@@ -243,6 +262,7 @@ export function ExpandedPlayer({
               type="button"
               className="expanded-chip-btn"
               onClick={onOpenQueue}
+              aria-label="Open queue drawer"
             >
               <ListMusic size={16} />
               <span>Queue</span>
@@ -253,6 +273,7 @@ export function ExpandedPlayer({
               className="expanded-chip-btn"
               disabled
               title="DSP & Equalizer planned for Milestone 3"
+              aria-disabled="true"
             >
               <SlidersHorizontal size={16} />
               <span>Equalizer</span>
@@ -263,6 +284,7 @@ export function ExpandedPlayer({
                 label={isMuted ? 'Unmute' : 'Mute'}
                 icon={isMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
                 disabled={!isBackendReady}
+                title={engineDisabledTooltip}
                 size="sm"
               />
               <div className="expanded-vol-slider-wrap">

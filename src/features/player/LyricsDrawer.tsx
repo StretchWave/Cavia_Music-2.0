@@ -38,8 +38,9 @@ export function LyricsDrawer({ isOpen, onClose, currentTrack }: LyricsDrawerProp
   if (!isOpen) return null;
 
   return (
-    <aside className="cavia-drawer-backdrop" onClick={onClose} role="dialog" aria-modal="true">
+    <aside className="cavia-drawer-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Lyrics archive">
       <div className="cavia-drawer-panel lyrics-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-drag-handle" aria-hidden="true" />
         {/* Header */}
         <div className="drawer-header">
           <div>

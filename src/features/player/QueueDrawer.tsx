@@ -54,8 +54,9 @@ export function QueueDrawer({
   };
 
   return (
-    <aside className="cavia-drawer-backdrop" onClick={onClose} role="dialog" aria-modal="true">
+    <aside className="cavia-drawer-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Play queue">
       <div className="cavia-drawer-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-drag-handle" aria-hidden="true" />
         {/* Header */}
         <div className="drawer-header">
           <div>

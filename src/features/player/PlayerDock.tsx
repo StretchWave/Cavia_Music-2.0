@@ -52,7 +52,19 @@ export function PlayerDock({
   return (
     <footer className="cavia-player-dock" role="region" aria-label="Audio player">
       {/* Track Information */}
-      <div className="dock-track-section" onClick={onOpenExpanded} role="button" tabIndex={0} aria-label="Open expanded player">
+      <div
+        className="dock-track-section"
+        onClick={onOpenExpanded}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onOpenExpanded();
+          }
+        }}
+        role="button"
+        tabIndex={0}
+        aria-label="Open expanded player"
+      >
         <div className="dock-art-container">
           <div className="dock-art-frame">
             {currentTrack?.artworkUri ? (
@@ -209,7 +221,19 @@ export function PlayerDock({
       </div>
 
       {/* Mobile Mini-Player View */}
-      <div className="dock-mobile-touch-bar" onClick={onOpenExpanded}>
+      <div
+        className="dock-mobile-touch-bar"
+        onClick={onOpenExpanded}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onOpenExpanded();
+          }
+        }}
+        role="button"
+        tabIndex={0}
+        aria-label="Open expanded player"
+      >
         <div className="mobile-mini-art">
           <Headphones size={16} />
         </div>

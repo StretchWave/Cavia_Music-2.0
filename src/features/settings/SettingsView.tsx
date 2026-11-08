@@ -297,12 +297,12 @@ export function SettingsView({
                 </strong>
               </div>
               <div className="sqlite-stat-box">
-                <span className="box-label">MIGRATIONS APPLIED</span>
-                <strong className="box-val">0001_initial.sql</strong>
+                <span className="box-label">SCHEMA MIGRATION</span>
+                <strong className="box-val">0001_initial.sql (Active)</strong>
               </div>
               <div className="sqlite-stat-box">
-                <span className="box-label">STORAGE KIND</span>
-                <strong className="box-val">WAL Mode (Zero Lock Contention)</strong>
+                <span className="box-label">SQLITE JOURNAL</span>
+                <strong className="box-val">WAL Mode (Configured)</strong>
               </div>
             </div>
           </div>

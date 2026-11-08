@@ -43,10 +43,13 @@ export function Slider({
         aria-valuemin={min}
         aria-valuemax={max}
         aria-valuenow={value}
+        aria-disabled={disabled}
         className="cavia-range-input"
         style={{
           background: showFill
-            ? `linear-gradient(to right, var(--accent-vermilion) ${percentage}%, var(--bg-hover) ${percentage}%)`
+            ? disabled
+              ? `linear-gradient(to right, rgba(255, 255, 255, 0.15) ${percentage}%, var(--bg-hover) ${percentage}%)`
+              : `linear-gradient(to right, var(--accent-vermilion) ${percentage}%, var(--bg-hover) ${percentage}%)`
             : undefined,
         }}
       />

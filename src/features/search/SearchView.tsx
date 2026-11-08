@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type KeyboardEvent } from 'react';
 import {
   Clock,
   RadioTower,
@@ -16,20 +16,22 @@ type SearchCategory = 'all' | 'tracks' | 'albums' | 'artists' | 'playlists';
 export function SearchView() {
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<SearchCategory>('all');
-  const [recentSearches, setRecentSearches] = useState<string[]>([
-    'Local FLAC archive',
-    'Japanese Ambient',
-    'Post-rock',
-  ]);
+  // Starts strictly empty to avoid fabricated search data
+  const [recentSearches, setRecentSearches] = useState<string[]>([]);
 
   const handleClearHistory = () => {
     setRecentSearches([]);
   };
 
   const handleSearchSubmit = (searchTerm: string) => {
-    if (!searchTerm.trim()) return;
-    if (!recentSearches.includes(searchTerm)) {
-      setRecentSearches([searchTerm, ...recentSearches.slice(0, 5)]);
+    const trimmed = searchTerm.trim();
+    if (!trimmed) return;
+    setRecentSearches((prev) => [trimmed, ...prev.filter((item) => item !== trimmed)].slice(0, 8));
+  };
+
+  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      handleSearchSubmit(query);
     }
   };
 
@@ -55,12 +57,10 @@ export function SearchView() {
       <div className="search-bar-wrap">
         <SearchInput
           value={query}
-          onChange={(val) => {
-            setQuery(val);
-            if (val.length > 2) handleSearchSubmit(val);
-          }}
+          onChange={(val) => setQuery(val)}
+          onKeyDown={handleKeyDown}
           onClear={() => setQuery('')}
-          placeholder="Search by track title, artist, album name, or genre..."
+          placeholder="Search by track title, artist, album name, or genre (press Enter)..."
           className="search-main-input"
         />
       </div>
@@ -101,18 +101,19 @@ export function SearchView() {
         </Badge>
       </div>
 
-      {/* Recent Search History if no active query */}
+      {/* Recent Search History if active query is empty */}
       {!query && recentSearches.length > 0 && (
         <div className="search-history-section">
           <div className="history-header">
             <div className="history-title">
               <Clock size={14} />
-              <span>RECENT QUERIES</span>
+              <span>SESSION RECENT QUERIES</span>
             </div>
             <button
               type="button"
               className="history-clear-btn"
               onClick={handleClearHistory}
+              aria-label="Clear session search history"
             >
               <Trash2 size={13} />
               <span>Clear History</span>
@@ -142,24 +143,29 @@ export function SearchView() {
           </div>
           <h3>No matching recordings found</h3>
           <p>
-            No indexed tracks match &ldquo;<strong>{query}</strong>&rdquo; in your local library.
+            No indexed tracks match &ldquo;<strong>{query}</strong>&rdquo; in your local library. Once local audio files are imported in Milestone 2, real-time search will index title, artist, and album tags.
           </p>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setQuery('')}
-          >
-            Clear Search
-          </Button>
+          <div className="search-empty-actions">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setQuery('')}
+            >
+              Clear Search
+            </Button>
+          </div>
         </div>
       ) : (
         <div className="search-discovery-prompt">
-          <div className="discovery-kanji">尋</div>
+          <div className="discovery-kanji" aria-hidden="true">尋</div>
           <div className="discovery-copy">
-            <Sparkles size={16} className="text-vermilion" />
-            <h3>Direct catalogue lookup</h3>
+            <div className="cavia-eyebrow">
+              <Sparkles size={14} className="text-vermilion" />
+              <span>DIRECT CATALOGUE LOOKUP</span>
+            </div>
+            <h3>Local & Provider Search Ready</h3>
             <p>
-              Type any query above to filter tracks, albums, or artists indexed in your Cavia collection.
+              Type any query above to filter tracks, albums, or artists indexed in your Cavia collection. Your searches remain 100% private and offline.
             </p>
           </div>
         </div>

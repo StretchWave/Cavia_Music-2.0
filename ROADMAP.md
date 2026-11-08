@@ -12,7 +12,7 @@
 - [x] Install dependencies and generate lockfiles
 - [x] Verify Vite production build
 - [x] Verify Tauri Windows dev build
-- [ ] Initialize Android and iOS projects
+- [x] Initialize Android target (Tauri Android initialized)
 - [x] Verify Windows startup and persistent SQLite path
 - [ ] Add CI for frontend and Rust checks
 

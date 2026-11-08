@@ -120,7 +120,7 @@ export function PlaylistsView({
               Create First Playlist
             </Button>
           }
-          footnote="Local playlists are stored in the SQLite database and never uploaded to remote servers."
+          footnote="Session playlists are maintained in application state. Permanent SQLite persistence connects in Milestone 2. No telemetry or remote cloud syncing."
         />
       )}
 
