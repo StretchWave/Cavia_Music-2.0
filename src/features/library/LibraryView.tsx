@@ -1,11 +1,7 @@
 import {
-  Album,
-  AudioWaveform,
   Disc3,
   FolderPlus,
-  Heart,
   Library,
-  ListMusic,
   Plus,
   Sparkles,
   WifiOff,
@@ -96,6 +92,12 @@ export function LibraryView({
         <div
           className="stat-interactive-cell"
           onClick={() => onNavigate('playlists')}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onNavigate('playlists');
+            }
+          }}
           tabIndex={0}
           role="button"
           aria-label="View playlists"
@@ -109,6 +111,12 @@ export function LibraryView({
         <div
           className="stat-interactive-cell"
           onClick={() => onNavigate('liked')}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onNavigate('liked');
+            }
+          }}
           tabIndex={0}
           role="button"
           aria-label="View liked tracks"
@@ -141,60 +149,6 @@ export function LibraryView({
         </div>
       )}
 
-      {/* Navigation Filter Shelf */}
-      <section className="library-shelf-nav">
-        <div className="shelf-chips">
-          <button
-            type="button"
-            className="shelf-chip active"
-            onClick={() => onNavigate('library')}
-          >
-            <Library size={14} />
-            <span>Overview</span>
-          </button>
-          <button
-            type="button"
-            className="shelf-chip"
-            onClick={() => onNavigate('tracks')}
-          >
-            <Disc3 size={14} />
-            <span>Tracks</span>
-          </button>
-          <button
-            type="button"
-            className="shelf-chip"
-            onClick={() => onNavigate('playlists')}
-          >
-            <ListMusic size={14} />
-            <span>Playlists ({playlists.length})</span>
-          </button>
-          <button
-            type="button"
-            className="shelf-chip"
-            onClick={() => onNavigate('albums')}
-          >
-            <Album size={14} />
-            <span>Albums</span>
-          </button>
-          <button
-            type="button"
-            className="shelf-chip"
-            onClick={() => onNavigate('artists')}
-          >
-            <AudioWaveform size={14} />
-            <span>Artists</span>
-          </button>
-          <button
-            type="button"
-            className="shelf-chip"
-            onClick={() => onNavigate('liked')}
-          >
-            <Heart size={14} />
-            <span>Liked</span>
-          </button>
-        </div>
-      </section>
-
       {/* Custom Playlists Spotlight if created */}
       {playlists.length > 0 && (
         <section className="library-section">
@@ -211,12 +165,19 @@ export function LibraryView({
 
           <div className="playlists-grid">
             {playlists.slice(0, 3).map((pl) => (
-              <div
+              <article
                 key={pl.id}
                 className="playlist-card"
                 onClick={() => onNavigate('playlists')}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onNavigate('playlists');
+                  }
+                }}
                 tabIndex={0}
                 role="button"
+                aria-label={`Open playlist ${pl.name}`}
               >
                 <div className="playlist-card-art">
                   <Disc3 size={32} />
@@ -227,7 +188,7 @@ export function LibraryView({
                     {pl.trackCount} tracks
                   </span>
                 </div>
-              </div>
+              </article>
             ))}
           </div>
         </section>

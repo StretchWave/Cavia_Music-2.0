@@ -91,7 +91,7 @@ export function ExpandedPlayer({
 
         <div className="expanded-header-actions">
           <Badge variant={isBackendReady ? 'ready' : 'outline'} size="sm">
-            {isBackendReady ? 'BIT-PERFECT OUTPUT' : 'STANDBY ENGINE'}
+            {isBackendReady ? 'AUDIO ENGINE CONNECTED' : 'STANDBY ENGINE (MILESTONE 3)'}
           </Badge>
           <IconButton
             label="Share track"

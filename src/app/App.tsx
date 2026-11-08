@@ -73,7 +73,6 @@ export function App() {
 
   // Appearance preferences
   const [density, setDensity] = useState<'standard' | 'compact'>('standard');
-  const [showKanji, setShowKanji] = useState(true);
 
   // Playback state (honest initial state: audio backend is standby)
   const [playback, setPlayback] = useState<PlaybackState>({
@@ -151,7 +150,7 @@ export function App() {
   ];
 
   return (
-    <div className={`cavia-app-frame ${density === 'compact' ? 'density-compact' : ''} ${showKanji ? 'show-kanji' : 'hide-kanji'}`}>
+    <div className={`cavia-app-frame ${density === 'compact' ? 'density-compact' : ''} show-kanji`}>
       {/* Desktop Sidebar Navigation */}
       <aside className="cavia-sidebar" aria-label="Main Navigation">
         <div className="brand-lockup">
@@ -321,8 +320,6 @@ export function App() {
               health={health}
               density={density}
               onDensityChange={setDensity}
-              showKanji={showKanji}
-              onShowKanjiChange={setShowKanji}
             />
           )}
         </div>

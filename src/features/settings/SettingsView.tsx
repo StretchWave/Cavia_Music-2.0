@@ -28,8 +28,6 @@ interface SettingsViewProps {
   health: PlatformHealth | null;
   density: 'standard' | 'compact';
   onDensityChange: (density: 'standard' | 'compact') => void;
-  showKanji: boolean;
-  onShowKanjiChange: (show: boolean) => void;
 }
 
 type SettingsSection = 'appearance' | 'audio' | 'library' | 'providers' | 'about';
@@ -38,11 +36,8 @@ export function SettingsView({
   health,
   density,
   onDensityChange,
-  showKanji,
-  onShowKanjiChange,
 }: SettingsViewProps) {
   const [activeTab, setActiveTab] = useState<SettingsSection>('appearance');
-  const [accentTheme, setAccentTheme] = useState<'vermilion' | 'amber' | 'ivory'>('vermilion');
   const [selectedProvider, setSelectedProvider] = useState<ProviderInfo | null>(null);
 
   const providers: ProviderInfo[] = [
@@ -147,42 +142,6 @@ export function SettingsView({
         <div className="settings-content-pane">
           <div className="settings-card">
             <div className="card-head">
-              <Palette size={18} className="card-icon" />
-              <div>
-                <h3>Accent Tint</h3>
-                <p>Selected tone applied to active indicators, glints, and volume sliders.</p>
-              </div>
-            </div>
-            <div className="accent-picker-row">
-              <button
-                type="button"
-                className={`accent-option vermilion ${accentTheme === 'vermilion' ? 'selected' : ''}`}
-                onClick={() => setAccentTheme('vermilion')}
-              >
-                <span className="swatch" style={{ background: '#d64732' }} />
-                <span>Vermilion (Default)</span>
-              </button>
-              <button
-                type="button"
-                className={`accent-option amber ${accentTheme === 'amber' ? 'selected' : ''}`}
-                onClick={() => setAccentTheme('amber')}
-              >
-                <span className="swatch" style={{ background: '#e09f58' }} />
-                <span>Vintage Amber</span>
-              </button>
-              <button
-                type="button"
-                className={`accent-option ivory ${accentTheme === 'ivory' ? 'selected' : ''}`}
-                onClick={() => setAccentTheme('ivory')}
-              >
-                <span className="swatch" style={{ background: '#f5f2eb' }} />
-                <span>Aged Ivory</span>
-              </button>
-            </div>
-          </div>
-
-          <div className="settings-card">
-            <div className="card-head">
               <Layers size={18} className="card-icon" />
               <div>
                 <h3>Interface Density</h3>
@@ -204,23 +163,91 @@ export function SettingsView({
 
           <div className="settings-card">
             <div className="card-head">
-              <Sparkles size={18} className="card-icon" />
+              <Palette size={18} className="card-icon text-vermilion" />
               <div>
-                <h3>Watermark Japanese Calligraphy</h3>
-                <p>Display subtle background kanji watermarks (藏 / 音 / 盤) across archive pages.</p>
+                <h3>Brand Identity & Color Tokens</h3>
+                <p>Cavia operates strictly on its established obsidian, aged ivory, and restrained vermilion palette.</p>
               </div>
             </div>
-            <div className="setting-control-row">
-              <button
-                type="button"
-                className={`cavia-toggle-btn ${showKanji ? 'active' : ''}`}
-                onClick={() => onShowKanjiChange(!showKanji)}
-              >
-                <span className="toggle-track">
-                  <span className="toggle-thumb" />
-                </span>
-                <span>{showKanji ? 'Visible' : 'Hidden'}</span>
-              </button>
+            <div className="palette-spec-grid">
+              <div className="palette-spec-item">
+                <span className="palette-color-swatch" style={{ background: '#090a0d', border: '1px solid rgba(255,255,255,0.15)' }} />
+                <div className="palette-spec-meta">
+                  <strong>Canvas</strong>
+                  <code>#090a0d</code>
+                </div>
+              </div>
+              <div className="palette-spec-item">
+                <span className="palette-color-swatch" style={{ background: '#12141a', border: '1px solid rgba(255,255,255,0.15)' }} />
+                <div className="palette-spec-meta">
+                  <strong>Surface</strong>
+                  <code>#12141a</code>
+                </div>
+              </div>
+              <div className="palette-spec-item">
+                <span className="palette-color-swatch" style={{ background: '#f5f2eb' }} />
+                <div className="palette-spec-meta">
+                  <strong>Aged Ivory</strong>
+                  <code>#f5f2eb</code>
+                </div>
+              </div>
+              <div className="palette-spec-item">
+                <span className="palette-color-swatch" style={{ background: '#d64732' }} />
+                <div className="palette-spec-meta">
+                  <strong>Restrained Vermilion</strong>
+                  <code>#d64732</code>
+                </div>
+              </div>
+            </div>
+            <p className="palette-policy-footnote">
+              Vermilion is the fixed, non-negotiable brand accent. Status colors are strictly semantic (ready / warning / error) and never used as decorative alternatives.
+            </p>
+          </div>
+
+          <div className="settings-card">
+            <div className="card-head">
+              <Sparkles size={18} className="card-icon" />
+              <div>
+                <h3>Editorial Details & Visual Watermarks</h3>
+                <p>Authentic archival cues, physical record details, and calligraphy.</p>
+              </div>
+            </div>
+            <div className="kanji-meaning-grid">
+              <div className="kanji-meaning-chip">
+                <span className="kanji-symbol">藏</span>
+                <div className="kanji-text">
+                  <strong>Archive</strong>
+                  <span>Library & Storage</span>
+                </div>
+              </div>
+              <div className="kanji-meaning-chip">
+                <span className="kanji-symbol">音</span>
+                <div className="kanji-text">
+                  <strong>Sound</strong>
+                  <span>Acoustic Playback</span>
+                </div>
+              </div>
+              <div className="kanji-meaning-chip">
+                <span className="kanji-symbol">盤</span>
+                <div className="kanji-text">
+                  <strong>Record</strong>
+                  <span>Albums & Vinyl</span>
+                </div>
+              </div>
+              <div className="kanji-meaning-chip">
+                <span className="kanji-symbol">選</span>
+                <div className="kanji-text">
+                  <strong>Curation</strong>
+                  <span>Playlists</span>
+                </div>
+              </div>
+              <div className="kanji-meaning-chip">
+                <span className="kanji-symbol">尋</span>
+                <div className="kanji-text">
+                  <strong>Search</strong>
+                  <span>Discovery</span>
+                </div>
+              </div>
             </div>
           </div>
         </div>

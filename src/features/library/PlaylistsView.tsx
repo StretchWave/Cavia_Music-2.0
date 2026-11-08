@@ -71,6 +71,12 @@ export function PlaylistsView({
               key={playlist.id}
               className="playlist-card"
               onClick={() => setSelectedPlaylist(playlist)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setSelectedPlaylist(playlist);
+                }
+              }}
               tabIndex={0}
               role="button"
               aria-label={`Open playlist ${playlist.name}`}

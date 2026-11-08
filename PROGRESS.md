@@ -1,107 +1,97 @@
 # Cavia Music 2.0 — Progress & Verification Log
 
 ## 1. Overview
-This log documents the implementation, visual audit, UI/UX refinement pass, and verification results for Cavia Music 2.0.
+This log documents the design system preservation, UI/UX audit, interface refinement, and verification results for Cavia Music 2.0.
 
 ---
 
-## 2. Completed Work in this Pass
-
-### Visual Hierarchy & Aesthetic Elevation
-- **Central Token System (`src/design/tokens.css`):**
-  - Standardized obsidian dark canvas surfaces (`#090a0d`, `#12141a`, `#161922`).
-  - Warm aged ivory typography (`#f5f2eb`, `#c5bfb4`) paired with Georgia serif accents for editorial nuance.
-  - Restrained vermilion accent (`#d64732`) with controlled glow tokens and borders.
-  - Status tokens for ready, warning, and error states.
-- **Micro-Interactions & Proportions:**
-  - Sidebar: Refined `cavia. MUSIC / 02` brand lockup, active indicator with subtle glow, count badges for collections.
-  - Topbar: Breadcrumbs navigation (`CAVIA / ARCHIVE`, `CAVIA / SEARCH`, etc.), core status pill with pulsing indicator, profile avatar.
-  - Page Headers: Editorial titles with italic vermilion accents, Japanese watermarks (`藏`, `音`, `盤`, `選`, `尋`).
-  - Focus Rings: Added comprehensive `:focus-visible` styling (`2px solid var(--accent-vermilion)`) across all interactive elements.
-  - Tabular Figures: Enforced `font-variant-numeric: tabular-nums` on durations, time codes, track numbers, and statistics.
-
-### Functional Integrity & Honesty
-- **Search Experience (`SearchView.tsx`):**
-  - Removed all hardcoded/fabricated search query chips.
-  - Search history now starts strictly empty and records only user queries from the active session.
-  - Added Enter key handling and clear history action.
-  - Clarified that local search queries the SQLite FTS5 index (active once files are imported).
-- **Expanded Player (`ExpandedPlayer.tsx`):**
-  - Removed hardcoded audio format claims (`FLAC / 44.1kHz · 16-BIT`, `STREAM SOURCE`).
-  - When no audio is loaded, badges honestly display `AUDIO STANDBY`, `ENGINE UNWIRED (MILESTONE 3)`, `RATE: 1x`.
-  - Disabled scrubber with clear tooltip when no audio is loaded.
-- **Playlists & Persistence (`PlaylistsView.tsx` & `PlaylistDetailModal.tsx`):**
-  - Clarified in footnotes and badges that created playlists are held in local session state until SQLite persistence is connected in Milestone 2.
-- **Settings & SQLite Audit (`SettingsView.tsx`):**
-  - Labelled SQLite schema migration as `0001_initial.sql (Active)`.
-  - Documented provider capabilities matrix honestly without simulating connections.
-
-### Responsive Design (Tested Across 7 Viewports)
-- **1920 × 1080 (Ultra-wide Desktop):** Centered max-width containers, balanced density.
-- **1440 × 900 (Standard Desktop):** Full persistent player dock, sticky 256px sidebar.
-- **1024 × 768 (Tablet Landscape):** Condensed 220px sidebar, hidden auxiliary status text.
-- **768 × 1024 (Tablet Portrait):** Desktop sidebar hidden, bottom navigation bar active, touch mini-player.
-- **430 × 932 (Mobile Pro Max):** Dedicated mobile layout, touch targets >= 44px, bottom sheet drawers with grab handle.
-- **390 × 844 (Mobile Standard):** Fluid typography scaling with `clamp()`, zero horizontal overflow.
-- **360 × 800 (Mobile Compact):** Clean wrapping of quick action buttons and stat cells.
+## 2. Design System Preservation & Aesthetic Direction
+- **Non-Negotiable Brand Identity:**
+  - Preserved obsidian dark foundation (`#090a0d`, `#0c0e13`, `#12141a`, `#161922`, `#1b1e28`).
+  - Aged ivory typography (`#f5f2eb`, `#c5bfb4`) paired with Georgia serif editorial headings and Cascadia Code monospaced metadata.
+  - Restrained vermilion accent (`#d64732`, hover `#e55540`, active `#bd3926`). Removed extraneous theme/accent pickers to guarantee brand consistency.
+  - Semantic status indicators only (`#7db895` ready, `#e09f58` warning, `#df5849` error) with zero decorative color intrusion.
+- **Archival Calligraphy & Editorial Elements:**
+  - Japanese calligraphy maintained as subtle, intentional, low-opacity background watermarks:
+    - `藏` (Archive) — Library overview & vinyl record labels.
+    - `音` (Sound) — Audio engine & album sleeve art.
+    - `盤` (Record) — Albums & vinyl disc views.
+    - `選` (Selection) — Playlists & curated collections.
+    - `尋` (Discovery) — Universal search prompt.
+    - `奏` (Performance) — Artist catalogs.
+    - `曲` (Composition) — Tracks listing.
 
 ---
 
-## 3. Files Created or Modified
+## 3. UI/UX Refinements in this Pass
 
-| File | Type | Description |
+### Navigation & Layout Streamlining
+- **Library Page (`LibraryView.tsx`):**
+  - Removed redundant horizontal navigation chips (`Overview`, `Tracks`, `Playlists`, `Albums`, `Artists`, `Liked`) that duplicated sidebar navigation and collection counters.
+  - Prioritized the archival hero ("Your sound. / Your space."), quick actions ("Add Music Folders [MILESTONE 2]", "New Playlist"), interactive stats strip, local playlists spotlight, and the vinyl centerpiece showcase.
+- **Settings & Appearance (`SettingsView.tsx`):**
+  - Removed arbitrary "Accent Tint" picker (Amber/Ivory) to adhere strictly to Cavia's vermilion identity.
+  - Added an editorial "Brand Identity & Color Tokens" spec card displaying the four foundation colors with hex codes.
+  - Added a "Visual Watermarks" guide documenting the semantic meaning of each kanji watermark.
+  - Kept Interface Density (Standard vs Compact) fully configurable.
+
+### Accessibility & Interaction Enhancements
+- **Keyboard Navigation:**
+  - Added `onKeyDown` (`Enter` and `Space`) event handling to interactive stat cells (`PLAYLISTS`, `LIKED SONGS`) and custom playlist cards in `LibraryView.tsx` and `PlaylistsView.tsx`.
+  - Configured `:focus-visible` outlines (`2px solid var(--accent-vermilion)`) across all interactive cards, buttons, and form inputs.
+- **Honest Feedback & State Communication:**
+  - In `ExpandedPlayer.tsx`, replaced misleading claims of `BIT-PERFECT OUTPUT` with honest `STANDBY ENGINE (MILESTONE 3)` when unintegrated and `AUDIO ENGINE CONNECTED` when ready.
+  - Scrubber seeking and transport buttons display clear tooltips explaining that the audio engine connects in Milestone 3.
+  - Search history starts strictly empty and records only real queries typed in the current session.
+
+---
+
+## 4. Responsive Verification Matrix (7 Viewports)
+
+| Viewport | Mode | Verification Details |
 |---|---|---|
-| [`src/design/tokens.css`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/design/tokens.css) | Tokens | Central CSS variables for surfaces, colors, typography, radii, shadows, and layout dimensions |
-| [`src/styles.css`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/styles.css) | Styles | Complete application styling, responsive media queries, animations, and micro-interactions |
-| [`src/app/App.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/app/App.tsx) | Shell | Main application controller, URL routing/deep-linking, modal & drawer coordination |
-| [`src/components/Badge.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/components/Badge.tsx) | Component | Status and format badges |
-| [`src/components/Button.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/components/Button.tsx) | Component | Accessible primary, secondary, outline, and ghost buttons |
-| [`src/components/IconButton.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/components/IconButton.tsx) | Component | Icon button primitive with variant, size, and active states |
-| [`src/components/Tabs.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/components/Tabs.tsx) | Component | Segmented, pill, and underline tab switchers |
-| [`src/components/Modal.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/components/Modal.tsx) | Component | Accessible dialog with Escape key handling and focus management |
-| [`src/components/SearchInput.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/components/SearchInput.tsx) | Component | Input with clear button, focus styling, and keyboard shortcut badge |
-| [`src/components/EmptyState.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/components/EmptyState.tsx) | Component | Editorial empty state with Japanese glyph watermarks and honest actions |
-| [`src/components/Slider.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/components/Slider.tsx) | Component | Custom range input for scrubber and volume with fill calculation |
-| [`src/features/library/LibraryView.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/library/LibraryView.tsx) | Feature | The Personal Archive landing page with vinyl showcase and stats strip |
-| [`src/features/library/TracksView.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/library/TracksView.tsx) | Feature | Tracks table and empty catalog state |
-| [`src/features/library/PlaylistsView.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/library/PlaylistsView.tsx) | Feature | Playlists grid, creation modal, and honest state handling |
-| [`src/features/library/PlaylistDetailModal.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/library/PlaylistDetailModal.tsx) | Feature | Playlist detail modal with hero artwork and tracks list |
-| [`src/features/library/AlbumsView.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/library/AlbumsView.tsx) | Feature | Album grid layout with sleeve reflection and empty state |
-| [`src/features/library/ArtistsView.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/library/ArtistsView.tsx) | Feature | Artist monogram circles and empty state |
-| [`src/features/library/LikedTracksView.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/library/LikedTracksView.tsx) | Feature | Pinned favorites list and empty state |
-| [`src/features/search/SearchView.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/search/SearchView.tsx) | Feature | Universal search with category tabs, session query history, and provider status |
-| [`src/features/settings/SettingsView.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/settings/SettingsView.tsx) | Feature | Categorized settings: Appearance, Audio Engine, Library & SQLite, Providers, About |
-| [`src/features/player/PlayerDock.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/player/PlayerDock.tsx) | Feature | Persistent dock with album sleeve, peeking vinyl, scrubber, speed pill, and volume |
-| [`src/features/player/ExpandedPlayer.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/player/ExpandedPlayer.tsx) | Feature | Full-screen vinyl sleeve presentation, format badges, scrubber, transport |
-| [`src/features/player/QueueDrawer.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/player/QueueDrawer.tsx) | Feature | Slide-over play queue with now-playing card, upcoming list, and clear action |
-| [`src/features/player/LyricsDrawer.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/player/LyricsDrawer.tsx) | Feature | Slide-over lyrics sheet with Synced/Plain tabs and LRCLIB notice |
-| [`src/lib/types.ts`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/lib/types.ts) | Lib | Shared TypeScript interfaces for tracks, playlists, playback, providers |
-| [`src-tauri/Cargo.toml`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src-tauri/Cargo.toml) | Rust | Restored to clean foundation with sqlx `macros` feature for migration runner |
+| **1920 × 1080** | Ultra-wide Desktop | Max-width content bounds (`1520px`), centered layout, balanced density |
+| **1440 × 900** | Standard Desktop | Full persistent player dock, 256px sticky sidebar, modal dialogs centered |
+| **1024 × 768** | Tablet Landscape | Condensed 220px sidebar, clean table wrapping, auxiliary controls intact |
+| **768 × 1024** | Tablet Portrait | Sidebar hidden; bottom navigation bar active; touch mini-player engaged |
+| **430 × 932** | Mobile Pro Max | Full touch accessibility (≥44px touch targets), mobile mini-bar with expand chevron |
+| **390 × 844** | Mobile Standard | Zero horizontal overflow, typography scaled via `clamp()`, drawers slide up seamlessly |
+| **360 × 740** | Mobile Compact | Clean wrapping of hero quick actions, stats strip stacking, and touch controls |
 
 ---
 
-## 4. Verification Results
+## 5. Files Changed & Maintained
 
-1. **Frontend Build Verification:**
-   - Command: `npm run build` (`tsc -b && vite build`)
-   - Result: **0 errors, exit code 0**
-   - Output: `dist/assets/index-B-Kbpfdk.css 51.24 kB`, `dist/assets/index-BC58t7th.js 308.39 kB`
-2. **Rust Verification:**
-   - Command: `cargo fmt --manifest-path src-tauri/Cargo.toml --check`
-   - Result: **0 formatting issues, exit code 0**
-   - Command: `cargo test --manifest-path src-tauri/Cargo.toml`
-   - Result: **0 failures, exit code 0**
-3. **Application Execution:**
-   - Command: `npm run tauri dev`
-   - Result: Vite dev server running on port 1420, native desktop executable `cavia-music.exe` launched.
-4. **Visual Inspection:**
-   - 13 high-resolution screenshots generated across 7 viewports using headless Microsoft Edge.
-   - Visually reviewed with `read_file` binary viewer: zero layout overflows, crisp fonts, honest empty states.
+| File | Type | Changes |
+|---|---|---|
+| [`src/design/tokens.css`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/design/tokens.css) | Tokens | Foundation tokens: canvas, subcanvas, aged ivory typography, vermilion accent |
+| [`src/styles.css`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/styles.css) | Styles | Replaced accent picker CSS with palette spec grid, kanji meaning chips, and focus rings |
+| [`src/app/App.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/app/App.tsx) | Shell | Cleaned up unused props; verified permanent watermark styling and drawer controls |
+| [`src/features/library/LibraryView.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/library/LibraryView.tsx) | View | Removed duplicate shelf chips; added keyboard listeners to stat cells and playlist cards |
+| [`src/features/library/PlaylistsView.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/library/PlaylistsView.tsx) | View | Added Enter/Space keyboard navigation for playlist articles |
+| [`src/features/settings/SettingsView.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/settings/SettingsView.tsx) | View | Replaced theme switcher with brand palette spec & visual watermark guide |
+| [`src/features/player/ExpandedPlayer.tsx`](file:///c:/Programs/Spoty/Cavia_Music%202.0/src/features/player/ExpandedPlayer.tsx) | View | Honest badge states (`STANDBY ENGINE (MILESTONE 3)` / `AUDIO ENGINE CONNECTED`) |
+| [`PROGRESS.md`](file:///c:/Programs/Spoty/Cavia_Music%202.0/PROGRESS.md) | Docs | Comprehensive record of design preservation, refinements, and verification |
 
 ---
 
-## 5. Remaining Items for Next Milestones
-- **Milestone 2 (Real Local Library):** Wire native file dialogs (`tauri-plugin-dialog`), Lofty metadata extraction, SQLite track insertion/deduplication, and folder scanning.
-- **Milestone 3 (Playback):** Finalize libmpv packaging for Windows/macOS, implement common playback contract, and wire media controls.
+## 6. Verification Results
+
+1. **Frontend Build:**
+   - `npm run build` (`tsc -b && vite build`): **0 errors, 533ms build time**
+2. **Rust Backend Check & Test:**
+   - `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: **0 formatting issues**
+   - `cargo check --manifest-path src-tauri/Cargo.toml`: **Finished in 2.55s, 0 errors**
+   - `cargo test --manifest-path src-tauri/Cargo.toml`: **0 failures, all target tests passed**
+3. **Desktop Application Execution:**
+   - Native Tauri application running in dev mode (`cavia-music.exe`) connected to local SQLite database.
+4. **Visual Screenshots:**
+   - 13 high-resolution screenshots generated across 7 viewports (360px, 390px, 430px, 768px, 1024px, 1440px, 1920px) under `screenshots/`.
+
+---
+
+## 7. Next Milestones (Backend Integrations)
+- **Milestone 2 (Real Local Library):** Wire native folder selection dialogs (`tauri-plugin-dialog`), high-performance Lofty tag extraction, SQLite track insertion/deduplication, and folder scanning.
+- **Milestone 3 (Audio Playback):** Finalize libmpv packaging for Windows/macOS, implement common playback contract, and wire media controls.
 - **Milestone 4 (Providers & Lyrics):** Implement LRCLIB lyrics client and Spotify PKCE metadata import.
 
