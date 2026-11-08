@@ -29,7 +29,15 @@ You are working in a clean Tauri 2 + React + TypeScript + Rust project. The old 
 - Review screenshots at 360px, 390px, 430px, 768px, 1024px, 1440px and 1920px.
 - Verify keyboard, mouse, touch, focus, contrast, reduced motion, loading, empty, error and disabled states.
 - Do not use sample music content to make empty screens look populated.
-
+- The established Cavia design system is authoritative. New UI must extend
+  existing patterns rather than introduce an independent visual direction.
+- No new brand palettes, accent themes, decorative systems, or major layout
+  redesigns without explicit approval.
+- Prefer refinement and reuse over reinvention. A new component must justify
+  why existing components cannot serve the same purpose.
+- Any substantial UI change must be visually compared against existing
+  Library, Search, Player and Settings screens.
+  
 ## Verification
 - Run `npm run build` after frontend changes.
 - Run `cargo fmt --check`, `cargo check` and `cargo test` after Rust changes.
