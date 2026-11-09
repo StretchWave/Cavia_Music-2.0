@@ -46,7 +46,9 @@ impl RodioBackend {
                 hls: false,
                 dash: false,
                 background_playback: true,
-                system_media_controls: true,
+                // Reflects actual SMTC initialization, which happens in the
+                // playback service after this backend is constructed.
+                system_media_controls: false,
                 gapless: false,
                 crossfade: false,
             },
@@ -69,45 +71,6 @@ impl RodioBackend {
             self.device_available = true;
             self.capabilities.local_files = true;
         }
-        Ok(())
-    }
-
-    fn reopen_and_seek_fallback(&mut self, position_ms: u64) -> Result<(), PlaybackError> {
-        let path = self
-            .current_path
-            .clone()
-            .ok_or_else(|| PlaybackError::SeekError("No audio file currently loaded".into()))?;
-
-        let file = File::open(&path).map_err(|e| {
-            PlaybackError::DecoderError(format!("Could not re-open file for fallback seek: {e}"))
-        })?;
-        let decoder = Decoder::try_from(file).map_err(|e| {
-            PlaybackError::DecoderError(format!("Could not decode stream for seek: {e:?}"))
-        })?;
-
-        self.ensure_player_ready()?;
-        let sink = self.sink.as_ref().unwrap();
-
-        // Fresh player avoids thread sleep on previous stream
-        let player = Player::connect_new(&sink.mixer());
-        if position_ms > 0 {
-            let skipped = decoder.skip_duration(Duration::from_millis(position_ms));
-            player.append(skipped);
-        } else {
-            player.append(decoder);
-        }
-
-        player.set_volume(self.volume);
-        player.set_speed(self.speed);
-        self.seek_offset_ms = position_ms;
-
-        if self.status == PlaybackStatus::Playing {
-            player.play();
-        } else {
-            player.pause();
-        }
-
-        self.player = Some(player);
         Ok(())
     }
 }
@@ -147,6 +110,8 @@ impl AudioBackend for RodioBackend {
 
         // Connect a fresh player to the mixer to immediately purge previous track
         let player = Player::connect_new(&sink.mixer());
+        player.set_volume(self.volume);
+        player.set_speed(self.speed);
         player.append(decoder);
 
         if start_ms > 0 {
@@ -155,16 +120,26 @@ impl AudioBackend for RodioBackend {
             } else {
                 start_ms
             };
-            if let Err(e) = player.try_seek(Duration::from_millis(clamped_start)) {
+            let speed_factor = if self.speed > 0.0 {
+                self.speed as f64
+            } else {
+                1.0
+            };
+            let seek_duration =
+                Duration::from_secs_f64((clamped_start as f64 / 1000.0) / speed_factor);
+            if let Err(e) = player.try_seek(seek_duration) {
                 eprintln!("[RodioBackend] Initial seek to {start_ms}ms returned: {e:?}");
+                player.stop();
+                self.status = PlaybackStatus::Error;
+                return Err(PlaybackError::SeekError(format!(
+                    "Initial seek failed: {e:?}"
+                )));
             }
             self.seek_offset_ms = clamped_start;
         } else {
             self.seek_offset_ms = 0;
         }
 
-        player.set_volume(self.volume);
-        player.set_speed(self.speed);
         player.play();
 
         self.player = Some(player);
@@ -220,19 +195,24 @@ impl AudioBackend for RodioBackend {
         };
 
         if let Some(player) = &self.player {
-            match player.try_seek(Duration::from_millis(clamped_ms)) {
+            let speed_factor = if self.speed > 0.0 {
+                self.speed as f64
+            } else {
+                1.0
+            };
+            let seek_duration =
+                Duration::from_secs_f64((clamped_ms as f64 / 1000.0) / speed_factor);
+            match player.try_seek(seek_duration) {
                 Ok(()) => {
                     self.seek_offset_ms = clamped_ms;
                     Ok(())
                 }
-                Err(rodio::source::SeekError::NotSupported { .. }) => {
-                    self.reopen_and_seek_fallback(clamped_ms)
-                }
-                Err(e) => Err(PlaybackError::SeekError(format!("Seek error: {e:?}"))),
+                Err(e) => Err(PlaybackError::SeekError(format!("Seek failed: {e:?}"))),
             }
         } else {
-            self.ensure_player_ready()?;
-            self.reopen_and_seek_fallback(clamped_ms)
+            Err(PlaybackError::SeekError(
+                "Audio player is not active".into(),
+            ))
         }
     }
 
@@ -247,17 +227,42 @@ impl AudioBackend for RodioBackend {
 
     fn set_speed(&mut self, speed: f32) -> Result<(), PlaybackError> {
         let clamped = speed.clamp(0.25, 4.0);
-        self.speed = clamped;
         if let Some(player) = &self.player {
+            let current_media_ms = self.position_ms();
+            self.speed = clamped;
             player.set_speed(clamped);
+            let new_speed_factor = clamped as f64;
+            let seek_duration =
+                Duration::from_secs_f64((current_media_ms as f64 / 1000.0) / new_speed_factor);
+            let _ = player.try_seek(seek_duration);
+        } else {
+            self.speed = clamped;
         }
         Ok(())
     }
 
     fn position_ms(&self) -> u64 {
         if let Some(player) = &self.player {
-            let pos = player.get_pos().as_millis() as u64;
-            if pos > 0 { pos } else { self.seek_offset_ms }
+            let wall_clock_secs = player.get_pos().as_secs_f64();
+            let speed_factor = if self.speed > 0.0 {
+                self.speed as f64
+            } else {
+                1.0
+            };
+            let mut media_ms = (wall_clock_secs * speed_factor * 1000.0).round() as u64;
+            // Rodio refreshes its position from the audio callback. When a
+            // track is loaded at an offset and paused immediately (startup
+            // restore), that callback may not have run yet and get_pos() can
+            // still read zero. The requested seek offset is authoritative
+            // while paused, so an exit cannot overwrite the resume point.
+            if self.status == PlaybackStatus::Paused && self.seek_offset_ms > media_ms {
+                media_ms = self.seek_offset_ms;
+            }
+            if self.current_duration_ms > 0 {
+                media_ms.min(self.current_duration_ms)
+            } else {
+                media_ms
+            }
         } else {
             self.seek_offset_ms
         }
@@ -287,6 +292,19 @@ impl AudioBackend for RodioBackend {
         self.capabilities.clone()
     }
 
+    fn validate_source(&self, file_path: &str) -> Result<(), PlaybackError> {
+        let path = Path::new(file_path);
+        if !path.exists() {
+            return Err(PlaybackError::FileNotFound(file_path.to_string()));
+        }
+        let file = File::open(path).map_err(|e| {
+            PlaybackError::DecoderError(format!("Could not open file for validation: {e}"))
+        })?;
+        Decoder::try_from(file).map(|_| ()).map_err(|e| {
+            PlaybackError::DecoderError(format!("Could not decode audio stream: {e:?}"))
+        })
+    }
+
     fn is_device_ready(&self) -> bool {
         self.device_available && self.sink.is_some()
     }
@@ -297,7 +315,7 @@ impl AudioBackend for RodioBackend {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use std::io::Write;
 
@@ -395,18 +413,86 @@ mod tests {
             // Seek near start (500ms)
             assert!(backend.seek(500).is_ok());
             assert_eq!(backend.seek_offset_ms, 500);
+            assert_eq!(backend.position_ms(), 500);
 
             // Seek in middle (2500ms)
             assert!(backend.seek(2500).is_ok());
             assert_eq!(backend.seek_offset_ms, 2500);
+            assert_eq!(backend.position_ms(), 2500);
 
             // Seek near end (4800ms)
             assert!(backend.seek(4800).is_ok());
             assert_eq!(backend.seek_offset_ms, 4800);
+            assert_eq!(backend.position_ms(), 4800);
 
             // Seek beyond duration (clamps to 5000ms)
             assert!(backend.seek(10000).is_ok());
             assert_eq!(backend.seek_offset_ms, 5000);
+            assert_eq!(backend.position_ms(), 5000);
+
+            let _ = backend.stop();
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        }
+    }
+
+    #[test]
+    fn test_position_and_seeking_at_multiple_speeds() {
+        if let Ok(mut backend) = RodioBackend::new() {
+            if !backend.is_device_ready() {
+                return;
+            }
+
+            let temp_dir =
+                std::env::temp_dir().join(format!("cavia_speed_test_{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let wav_path = temp_dir.join("speed_audio.wav");
+            create_test_wav_with_duration(&wav_path, 10.0);
+
+            assert!(backend.load(wav_path.to_str().unwrap(), 0).is_ok());
+
+            let test_speeds = [0.5f32, 1.0f32, 1.25f32, 2.0f32];
+            for &spd in &test_speeds {
+                assert!(backend.set_speed(spd).is_ok());
+                // Seek to 3000ms in media timeline
+                assert!(backend.seek(3000).is_ok());
+
+                // Media position immediately after seek must be 3000ms (+/- 50ms tolerance)
+                let pos = backend.position_ms();
+                assert!(
+                    (pos as i64 - 3000).abs() <= 50,
+                    "Expected ~3000ms at {spd}x speed, got {pos}ms"
+                );
+            }
+
+            let _ = backend.stop();
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        }
+    }
+
+    #[test]
+    fn test_seek_latency_on_long_audio_is_instantaneous() {
+        if let Ok(mut backend) = RodioBackend::new() {
+            if !backend.is_device_ready() {
+                return;
+            }
+
+            let temp_dir =
+                std::env::temp_dir().join(format!("cavia_latency_test_{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let wav_path = temp_dir.join("long_audio_30s.wav");
+            create_test_wav_with_duration(&wav_path, 30.0);
+
+            assert!(backend.load(wav_path.to_str().unwrap(), 0).is_ok());
+
+            let start = std::time::Instant::now();
+            assert!(backend.seek(25000).is_ok());
+            let elapsed = start.elapsed();
+
+            // Native seek must complete quickly without decoding 25 seconds of PCM samples
+            assert!(
+                elapsed < Duration::from_millis(500),
+                "Seek took too long ({elapsed:?}), slow fallback detected"
+            );
 
             let _ = backend.stop();
             let _ = std::fs::remove_dir_all(&temp_dir);
@@ -419,5 +505,84 @@ mod tests {
             let res = backend.seek(500);
             assert!(matches!(res, Err(PlaybackError::SeekError(_))));
         }
+    }
+
+    #[test]
+    fn test_real_codec_fixtures_decode_and_seek() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_codec_fixtures_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let fixtures: [(&str, &[u8]); 5] = [
+            ("flac", include_bytes!("../../testdata/tone.flac")),
+            ("mp3", include_bytes!("../../testdata/tone.mp3")),
+            ("aac_m4a", include_bytes!("../../testdata/tone_aac.m4a")),
+            ("alac_m4a", include_bytes!("../../testdata/tone_alac.m4a")),
+            ("aiff", include_bytes!("../../testdata/tone.aiff")),
+        ];
+
+        for (name, bytes) in fixtures {
+            let path = temp_dir.join(format!("{name}.audio"));
+            std::fs::write(&path, bytes).unwrap();
+            let file = File::open(&path).unwrap();
+            let mut decoder = Decoder::try_from(file)
+                .unwrap_or_else(|e| panic!("{name}: decoder rejected fixture: {e:?}"));
+            assert!(decoder.next().is_some(), "{name}: no decoded samples");
+            let seek = decoder.try_seek(Duration::from_millis(500));
+            assert!(seek.is_ok(), "{name}: native seek failed: {seek:?}");
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    #[ignore = "requires a physical audio output device"]
+    fn test_load_at_offset_keeps_position_when_paused() {
+        let mut backend = RodioBackend::new().expect("physical audio output device required");
+        assert!(
+            backend.is_device_ready(),
+            "physical audio output device required"
+        );
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_restore_pos_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let path = temp_dir.join("restore.flac");
+        std::fs::write(&path, include_bytes!("../../testdata/tone_long.flac")).unwrap();
+
+        backend
+            .load(path.to_str().unwrap(), 2000)
+            .expect("load at offset");
+        backend.pause().expect("pause restored track");
+        let pos = backend.position_ms();
+        assert!(
+            (1900..=2100).contains(&pos),
+            "paused restored position should stay near 2000ms, got {pos}ms"
+        );
+
+        let _ = backend.stop();
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_long_flac_seek_is_bounded() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_long_flac_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let path = temp_dir.join("tone_long.flac");
+        std::fs::write(&path, include_bytes!("../../testdata/tone_long.flac")).unwrap();
+
+        let file = File::open(&path).unwrap();
+        let mut decoder = Decoder::try_from(file).unwrap();
+        let start = std::time::Instant::now();
+        decoder
+            .try_seek(Duration::from_secs(25))
+            .expect("long FLAC seek failed");
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "long FLAC seek took {:?}",
+            start.elapsed()
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

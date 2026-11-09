@@ -215,4 +215,135 @@ Following an independent technical audit of the initial Milestone 3 audio playba
 - **Remediation:** Stripped all mock successes. Mobile targets explicitly return `PlaybackError::BackendUnavailable` and `AudioCapabilities::unavailable()`.
 
 ### I. Complete Test Suite
-- **Result:** **22 unit tests passing in 0.50s** (`cargo test`), covering seeking on real audio fixtures, lifecycle events, error reporting, queue invariants, shuffle entropy, scanner cancellation, and database persistence.
+- **Result at that stage:** 22 unit tests passing in 0.50s (`cargo test`), covering seeking on real audio fixtures, lifecycle events, error reporting, queue invariants, shuffle entropy, scanner cancellation, and database persistence. Superseded by §9.
+
+---
+
+## 7. Milestone 3 Second Audit Remediation — Reliability Patch
+
+Following the independent second-pass audit of Milestone 3, all P0, P1, and P2 defects and regression vectors were remediated and verified with forward-only migrations and 28 passing unit/integration tests at that stage (current suite in §9).
+
+### A. Dedicated Audio Actor Control Thread (P0-C)
+- **Defect:** Tauri async commands acquired `std::sync::Mutex` and performed synchronous decoder creation and file I/O on async runtime workers, creating lock contention with the background position ticker.
+- **Remediation:** Migrated the audio engine to an actor architecture (`cavia-audio-control` thread) owning `PlaybackCore`, backend decoders, and queue. All commands serialize predictably over an `mpsc` channel with `tokio::sync::oneshot` replies. State snapshots are updated in an `Arc<RwLock<PlaybackSnapshot>>` cache for instantaneous $O(1)$ lock-free frontend reads.
+
+### B. Elimination of Slow Fallback Seeking (P0-A)
+- **Defect:** `RodioBackend::reopen_and_seek_fallback()` decoded samples from file beginning via `skip_duration`, freezing the playback service during seeks on large files.
+- **Remediation:** Completely removed `reopen_and_seek_fallback()` and all $O(N)$ decodes. Seeking routes strictly to Symphonia's container demuxer seek index via `player.try_seek(Duration)`. If seek fails or is unsupported, an honest `SeekError` is returned immediately without thread blocking.
+
+### C. Unified Media Position Semantics & Speed Adaptation (P0-B)
+- **Defect:** Position calculations did not account for speed changes and seek offsets, drifting from the true media timeline.
+- **Remediation:** Implemented media timeline position calculation: `media_ms = wall_clock_secs * speed_factor * 1000`. Seeking adapts target duration to `target_ms / speed_factor`. When playback speed changes during playback (0.5x, 1x, 1.25x, 2x), the backend realigns the player's internal timeline via `try_seek` so the current song position remains continuous without jumping.
+
+### D. Atomic Queue Operations & Bounded Skip (P0-D)
+- **Defect:** Queue cursor mutated before confirming successful audio loading, leaving players in broken states on missing or corrupt files.
+- **Remediation:** `PlaybackCore` uses non-mutating `peek_next` and `peek_previous` to validate files and decoders prior to shifting the active index. If target track fails, the existing queue cursor is preserved. `set_queue` implements a bounded skip policy checking up to 10 tracks before reporting an error.
+
+### E. Generation-Synced Event Protocol (P0-E)
+- **Defect:** Rapid UI seeks and race conditions could apply stale position updates to new tracks.
+- **Remediation:** Added `generation: Option<u64>` to `PlaybackCommand::Seek`. Mismatched generations are rejected as stale. React rejects position events when `pos.generation < prev.generation`, when `pos.trackId` mismatches, or when the player is idle/stopped.
+
+### F. Serialized Persistence & Safe Restoration (P0-F)
+- **Defect:** Asynchronous SQLite writes could overwrite newer state with stale ticks; restoration lacked volume/mute persistence.
+- **Remediation:** Added forward-only migration `0002_playback_state_volume.sql` adding `volume` and `is_muted`. State persistence routes through a dedicated, serialized debouncing channel. Application startup preloads the saved track and position in a `Paused` state, never auto-resuming playback without user interaction.
+
+### G. Clean Teardown & Lifecycle (P0-G)
+- **Defect:** Strong `Arc` references in the ticker thread prevented clean process teardown, and shutdown was not owned by the Tauri exit lifecycle.
+- **Remediation:** The audio actor thread checks an atomic shutdown flag and terminates cleanly. Tauri's `RunEvent::ExitRequested` now prevents immediate exit, calls `PlaybackService::shutdown()` (rejecting new commands, draining pending commands, stopping the actor, flushing persistence, joining threads), and then exits. There is no `Drop`-based shutdown.
+
+### H. Complete Windows SMTC & Honest Media Control Matrix (P1-A)
+- **Defect:** System media controls (`souvlaki`) were initialized but incoming OS media events were discarded.
+- **Remediation:** Attached native event listeners forwarding Windows OS Play, Pause, Toggle, Next, Previous, Stop, and Seek commands into the audio actor channel. macOS Now Playing is marked Standby/Deferred until verified on physical Apple hardware.
+
+### I. Authoritative Capability & Health Reporting (P1-B, P1-C)
+- **Defect:** TypeScript health union did not match Rust health states; ALAC and AIFF lacked explicit decoder features.
+- **Remediation:** Enabled `symphonia-alac` and `symphonia-aiff` in `Cargo.toml`. Updated TypeScript `PlatformHealth` union to `'ready' | 'device_unavailable' | 'not_integrated' | 'error' | 'unsupported'`. Topbar and player displays reflect exact device states (`NO AUDIO DEVICE`, `BACKEND NOT INTEGRATED`).
+
+### J. UI & Input Hardening (P1-D, P2)
+- **Remediation:**
+  - `QueueDrawer` dynamically reflects `PLAYING`, `PAUSED`, or `STOPPED` and disables rotating artwork when audio is not playing.
+  - Added `onCommit` callback to volume sliders in `PlayerDock` and `ExpandedPlayer` to prevent IPC flooding during dragging.
+  - Validated finite playback speed (`0.25..=4.0`) and volume (`<= 100`).
+  - Optimized queue resolution in `set_queue` from $O(N \times M)$ to $O(N + M)$ using a `HashMap`.
+  - Configured ComCtl32 v6 manifest in `build.rs` to allow MSVC test runners to execute without `0xc0000139` entry point errors.
+
+### K. Test Suite Verification
+- **Result at that stage:** 28 unit and integration tests passed. The current suite is 36 unit tests + 1 integration test, plus 1 hardware-marked ignored test (see §9, which supersedes this count):
+  - Multi-speed position calculation and seeking (0.5x, 1x, 1.25x, 2x)
+  - Sub-second native seeking latency on 30s audio fixture
+  - Preserved cursor selection on Next/Previous failure
+  - Bounded skip on broken queue tracks
+  - Full persistence round-trip integration test in SQLite
+  - Queue duplicate disambiguation and reordering
+  - Scanner cancellation and MIME classification
+  - Frontend typecheck and production bundle build (`tsc -b && vite build`) passing cleanly.
+
+---
+
+## 9. Milestone 3 Third Audit Remediation — Final Verification (current)
+
+This section supersedes earlier test counts and device-resilience/SMTC claims where they differ.
+
+### A. Windows manifest and test harness (P0)
+- `build.rs` uses `WindowsAttributes::new_without_app_manifest()` so Tauri does not embed its own manifest, and embeds exactly one Common Controls v6 manifest with `/MANIFESTINPUT` for every target.
+- This fixes both `CVT1100 duplicate resource` in `cargo build --bin cavia-music` and `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` in the unit-test harness.
+- `cargo build --bin cavia-music` succeeds and the test harness executes.
+
+### B. Persistence worker ownership (P0)
+- `PlaybackService::new()` no longer calls `tokio::spawn` from synchronous Tauri setup.
+- A dedicated `cavia-persist` std thread owns a current-thread Tokio runtime and serializes/debounces writes.
+- Worker and persistence threads are joined during shutdown.
+
+### C. Application shutdown (P0)
+- `RunEvent::ExitRequested` prevents immediate exit, calls `PlaybackService::shutdown()`, then exits.
+- Shutdown rejects new commands (`"Playback service is shutting down"`), drains FIFO pending commands, stops the actor, captures state before `backend.stop()`, flushes with a 3 s bound, joins threads, and exits.
+- `backend.stop()` zeroes Rodio's position, so persisting after it erased the resume point. State is now captured before stop.
+- Verified by closing the window: the process exits and the SQLite row is durable.
+
+### D. Periodic position persistence (P0)
+- Saves every 5 s while Playing (not every 250 ms), plus explicit pause/stop/track-change/exit flushes.
+- Verified in the running app: position advanced 2005 → 7493 ms while playing; pause persisted 9029 ms.
+
+### E. Atomic `set_queue` (P1)
+- `AudioBackend::validate_source` performs a real decoder probe before the queue commit.
+- A corrupt-but-existing fixture test confirms the previous queue and selection survive and the error is returned.
+- Bounded skip remains for auto-advance; repeat-one/all-failed cases terminate without livelock.
+
+### F. Health and device recovery (P1)
+- Desktop reports `ready`, `device_unavailable`, or `error`.
+- Android/iOS stubs report `not_integrated`, not `device_unavailable`.
+- A manual `retry_audio_device` command and UI retry button exist.
+- Mid-stream device-disconnect detection and automatic recovery are **not implemented**; documentation and UI do not claim them.
+
+### G. Windows SMTC (P1)
+- `attach()` errors are returned and mark controls unavailable.
+- Metadata and paused/playing state are published after restore and after attach; progress syncs every 1 s.
+- Runtime verified with the real app and OS media keys: media Play started playback (UI changed to Pause), media Pause stopped it, and the final 8016 ms position persisted.
+- Media-key Seek/Next/Previous mappings are implemented but only Play/Pause were exercised through OS keys. Taskbar/overlay visuals were not screenshot-verified.
+
+### H. Queue and shuffle (P1)
+- `peek_next` rebuilds a fresh shuffle cycle on repeat-all wrap; remove/reorder remap history instead of resetting it.
+- Regression tests cover shuffle history preservation and new-cycle repeat-all.
+
+### I. Tests and real fixtures
+- `cargo test`: **36 unit tests passed, 1 ignored (hardware), 0 failed**; integration smoke test **1 passed**.
+- The ignored test `test_load_at_offset_keeps_position_when_paused` requires a physical audio output device; run explicitly with `cargo test test_load_at_offset_keeps_position_when_paused -- --ignored`, it passed.
+- Real fixtures: FLAC, MP3, AAC/M4A, ALAC/M4A, AIFF, and a 30 s FLAC. Tests cover decode/seek, long seek latency, corrupt files, actor concurrency, pending shutdown, periodic/shutdown persistence, queue preservation, and shuffle history.
+- Hardware-dependent decode/seek tests state their requirement via `eprintln!` when no device exists; they are not counted as proof on headless machines.
+
+### J. Actual verification results (2026-11-09, Windows 11)
+- `cargo fmt --check`: pass.
+- `cargo check --all-targets`: pass.
+- `cargo test`: 36 passed / 1 ignored / 0 failed; smoke 1 passed.
+- `cargo build --bin cavia-music`: pass; the current executable was launched.
+- `npm run build`: pass.
+- Real app launched with the Vite dev server and driven through WebView2 UI Automation: Play, Pause, seek to 12001 ms, speed 1.0→1.25×, volume 70→71, mute/unmute, Next (30 s → 1 s track), Previous (back), and close/relaunch restore.
+- SQLite evidence: position advanced to 7493 ms; pause 9029 ms; after seek 12001 ms; final 8016 ms persisted across shutdown. A restored 2000 ms position became 2005 ms on a pure open/close cycle.
+- Test row/files were removed after verification.
+
+### K. Remaining limitations
+- macOS, Android and iOS were not run; macOS is compiled-only and mobile backends are honest stubs.
+- Mid-stream audio-device disconnect is not detected; only startup unavailability plus manual retry.
+- SMTC overlay visuals and media-key Next/Previous/Seek were not exercised; Play/Pause were.
+- UI automation covered the 1440×900 desktop window; responsive viewports and reduced-motion states were not re-reviewed in this remediation.
+- No Milestone 4 work was started.

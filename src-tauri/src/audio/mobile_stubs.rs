@@ -97,6 +97,12 @@ impl AudioBackend for AndroidMedia3Backend {
         AudioCapabilities::unavailable()
     }
 
+    fn validate_source(&self, _file_path: &str) -> Result<(), PlaybackError> {
+        Err(PlaybackError::BackendUnavailable(
+            "Android Media3 native playback engine is not yet integrated into this build.".into(),
+        ))
+    }
+
     fn is_device_ready(&self) -> bool {
         false
     }
@@ -193,6 +199,12 @@ impl AudioBackend for IosAvPlayerBackend {
 
     fn capabilities(&self) -> AudioCapabilities {
         AudioCapabilities::unavailable()
+    }
+
+    fn validate_source(&self, _file_path: &str) -> Result<(), PlaybackError> {
+        Err(PlaybackError::BackendUnavailable(
+            "Android Media3 native playback engine is not yet integrated into this build.".into(),
+        ))
     }
 
     fn is_device_ready(&self) -> bool {

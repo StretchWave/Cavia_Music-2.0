@@ -10,6 +10,7 @@ import {
   Mic2,
   Pause,
   Play,
+  RefreshCw,
   Repeat,
   Repeat1,
   Rewind,
@@ -25,6 +26,8 @@ import type { PlaybackState } from '../../lib/types';
 interface PlayerDockProps {
   playback: PlaybackState;
   isBackendReady: boolean;
+  audioBackendStatus?: 'ready' | 'device_unavailable' | 'not_integrated' | 'error' | 'unsupported';
+  onRetryDevice?: () => void;
   onOpenExpanded: () => void;
   onOpenQueue: () => void;
   onOpenLyrics: () => void;
@@ -43,6 +46,8 @@ interface PlayerDockProps {
 export function PlayerDock({
   playback,
   isBackendReady,
+  audioBackendStatus,
+  onRetryDevice,
   onOpenExpanded,
   onOpenQueue,
   onOpenLyrics,
@@ -62,6 +67,7 @@ export function PlayerDock({
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
 
   const activePosition = scrubPosition !== null ? scrubPosition : positionMs;
+  const displayDuration = playback.status === 'error' || !currentTrack ? 0 : durationMs;
 
   const formatTime = (ms: number) => {
     if (!ms || ms <= 0) return '0:00';
@@ -71,7 +77,13 @@ export function PlayerDock({
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  const engineTooltip = isBackendReady ? undefined : 'Audio engine is initializing';
+  const engineTooltip = isBackendReady
+    ? undefined
+    : audioBackendStatus === 'device_unavailable'
+      ? 'No audio output device found'
+      : audioBackendStatus === 'not_integrated'
+        ? 'Audio backend not integrated for this platform'
+        : 'Audio engine is initializing';
 
   return (
     <footer className="cavia-player-dock" role="region" aria-label="Audio player">
@@ -199,7 +211,7 @@ export function PlayerDock({
               showFill={durationMs > 0}
             />
           </div>
-          <span className="dock-time-code">{formatTime(durationMs)}</span>
+          <span className="dock-time-code">{formatTime(displayDuration)}</span>
         </div>
       </div>
 
@@ -212,7 +224,9 @@ export function PlayerDock({
               ? `Playback error: ${playback.errorMessage}`
               : isBackendReady
               ? 'Active audio backend: Native Rodio (WASAPI / CoreAudio via Symphonia)'
-              : 'Audio engine is standby or no output device available'
+              : audioBackendStatus === 'device_unavailable'
+              ? 'No audio output device found on system'
+              : 'Audio engine is standby or initializing'
           }
         >
           <span
@@ -225,9 +239,21 @@ export function PlayerDock({
               ? 'PLAYBACK ERROR'
               : isBackendReady
               ? 'ENGINE READY'
+              : audioBackendStatus === 'device_unavailable'
+              ? 'NO AUDIO DEVICE'
               : 'ENGINE STANDBY'}
           </span>
         </div>
+
+        {!isBackendReady && audioBackendStatus === 'device_unavailable' && onRetryDevice && (
+          <IconButton
+            label="Retry audio device"
+            icon={<RefreshCw size={16} />}
+            onClick={onRetryDevice}
+            title="Retry audio device initialization"
+            size="sm"
+          />
+        )}
 
         <button
           type="button"
@@ -267,7 +293,7 @@ export function PlayerDock({
             <Slider
               value={isMuted ? 0 : volume}
               max={100}
-              onChange={(newVol) => onVolumeChange?.(newVol)}
+              onCommit={(newVol) => onVolumeChange?.(newVol)}
               disabled={!isBackendReady}
               label="Adjust volume"
             />

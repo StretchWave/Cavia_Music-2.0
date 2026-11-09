@@ -17,6 +17,8 @@ export interface BackendPlaybackSnapshot {
   queue: Track[];
   errorMessage?: string;
   deviceReady?: boolean;
+  backendHealth?: string;
+  systemMediaControls?: boolean;
 }
 
 export interface PositionUpdatePayload {
@@ -56,9 +58,9 @@ export async function stop(): Promise<void> {
   return invoke('stop');
 }
 
-export async function seek(positionMs: number): Promise<void> {
+export async function seek(positionMs: number, generation?: number): Promise<void> {
   if (!isNativeApp()) return;
-  return invoke('seek', { positionMs: Math.round(positionMs) });
+  return invoke('seek', { positionMs: Math.round(positionMs), generation });
 }
 
 export async function setVolume(volume: number): Promise<void> {
@@ -124,6 +126,11 @@ export async function reorderQueue(fromIndex: number, toIndex: number): Promise<
 export async function clearQueue(): Promise<void> {
   if (!isNativeApp()) return;
   return invoke('clear_queue');
+}
+
+export async function retryAudioDevice(): Promise<void> {
+  if (!isNativeApp()) return;
+  return invoke('retry_audio_device');
 }
 
 export async function listenPlaybackState(

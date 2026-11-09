@@ -10,6 +10,11 @@ rust-version = "1.90"
 name = "cavia_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "cavia-music"
+path = "src/main.rs"
+test = false
+
 [build-dependencies]
 tauri-build = { version = "2.7.2", features = [] }
 
@@ -25,7 +30,7 @@ walkdir = "2.5"
 sha2 = "0.10"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
-rodio = { version = "0.23", default-features = true }
+rodio = { version = "0.23", default-features = true, features = ["symphonia-alac", "symphonia-aiff"] }
 souvlaki = { version = "0.9.3", default-features = false }
 
 # Desktop playback candidate. Enable only after libmpv is packaged and its
@@ -33,7 +38,7 @@ souvlaki = { version = "0.9.3", default-features = false }
 rsmpv = { version = "0.2.1", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 [features]
 default = []

@@ -51,6 +51,7 @@ import {
   removeFromQueue,
   removeFromQueueByIndex,
   reorderQueue,
+  retryAudioDevice,
   seek,
   setPlaybackSpeed,
   setQueue,
@@ -235,32 +236,40 @@ export function App() {
       .catch((err) => console.error('Failed to get initial playback state:', err));
 
     listenPlaybackState((snap) => {
-      setPlayback((prev) => ({
-        ...prev,
-        status: snap.status,
-        currentTrack: snap.currentTrack,
-        positionMs: snap.positionMs,
-        durationMs: snap.durationMs,
-        volume: snap.volume,
-        isMuted: snap.isMuted,
-        repeatMode: snap.repeatMode,
-        isShuffle: snap.isShuffle,
-        playbackSpeed: snap.playbackSpeed,
-        queue: snap.queue,
-        errorMessage: snap.errorMessage,
-        generation: snap.generation,
-      }));
+      setPlayback((prev) => {
+        if (snap.generation !== undefined && prev.generation !== undefined && snap.generation < prev.generation) {
+          return prev;
+        }
+        return {
+          ...prev,
+          status: snap.status,
+          currentTrack: snap.currentTrack,
+          positionMs: snap.positionMs,
+          durationMs: snap.durationMs,
+          volume: snap.volume,
+          isMuted: snap.isMuted,
+          repeatMode: snap.repeatMode,
+          isShuffle: snap.isShuffle,
+          playbackSpeed: snap.playbackSpeed,
+          queue: snap.queue,
+          errorMessage: snap.errorMessage,
+          generation: snap.generation,
+        };
+      });
     }).then((fn) => {
       unlistenState = fn;
     });
 
     listenPlaybackPosition((pos) => {
       setPlayback((prev) => {
-        // Discard stale position events from prior generations or previous tracks
+        // Discard stale position events from prior generations, previous tracks, or idle player
         if (pos.generation !== undefined && prev.generation !== undefined && pos.generation < prev.generation) {
           return prev;
         }
         if (pos.trackId && prev.currentTrack?.id && pos.trackId !== prev.currentTrack.id) {
+          return prev;
+        }
+        if (!prev.currentTrack || prev.status === 'stopped' || prev.status === 'idle') {
           return prev;
         }
         return {
@@ -364,6 +373,16 @@ export function App() {
     }
   };
 
+  const handleRetryDevice = async () => {
+    try {
+      await retryAudioDevice();
+      const nextHealth = await getPlatformHealth();
+      setHealth(nextHealth);
+    } catch (err) {
+      console.error('Retry audio device failed:', err);
+    }
+  };
+
   const handlePlayTrack = async (trackId: string) => {
     try {
       await setQueue(tracks.map((t) => t.id), trackId);
@@ -452,7 +471,7 @@ export function App() {
 
   const handleSeek = async (positionMs: number) => {
     try {
-      await seek(positionMs);
+      await seek(positionMs, playback.generation);
     } catch (err) {
       console.error('Seek failed:', err);
     }
@@ -544,7 +563,12 @@ export function App() {
     if (!isNativeApp()) return 'DESIGN PREVIEW';
     if (connectionError) return 'CORE UNAVAILABLE';
     if (!health) return 'CONNECTING';
-    return health.database_connected ? 'LOCAL CORE READY' : 'DATABASE OFFLINE';
+    if (!health.database_connected) return 'DATABASE OFFLINE';
+    if (health.audio_backend === 'device_unavailable') return 'NO AUDIO DEVICE';
+    if (health.audio_backend === 'not_integrated') return 'BACKEND NOT INTEGRATED';
+    if (health.audio_backend === 'error') return 'AUDIO ERROR';
+    if (health.audio_backend === 'unsupported') return 'UNSUPPORTED PLATFORM';
+    return 'LOCAL CORE READY';
   }, [connectionError, health]);
 
   const nav = [
@@ -854,6 +878,8 @@ export function App() {
         <PlayerDock
           playback={playback}
           isBackendReady={isBackendReady}
+          audioBackendStatus={health?.audio_backend}
+          onRetryDevice={handleRetryDevice}
           onOpenExpanded={() => setIsExpandedPlayerOpen(true)}
           onOpenQueue={() => setIsQueueOpen(true)}
           onOpenLyrics={() => setIsLyricsOpen(true)}
@@ -876,6 +902,7 @@ export function App() {
         onClose={() => setIsExpandedPlayerOpen(false)}
         playback={playback}
         isBackendReady={isBackendReady}
+        audioBackendStatus={health?.audio_backend}
         onOpenQueue={() => {
           setIsExpandedPlayerOpen(false);
           setIsQueueOpen(true);
@@ -902,6 +929,8 @@ export function App() {
         onClose={() => setIsQueueOpen(false)}
         currentTrack={playback.currentTrack}
         queue={playback.queue}
+        isPlaying={playback.status === 'playing'}
+        status={playback.status}
         onClearQueue={handleClearQueue}
         onRemoveTrack={handleRemoveQueueTrack}
         onSelectTrack={handleSelectQueueTrack}

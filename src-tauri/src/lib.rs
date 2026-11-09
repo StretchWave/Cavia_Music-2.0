@@ -7,12 +7,17 @@ mod state;
 use services::playback::PlaybackService;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use state::AppState;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs, io};
-use tauri::Manager;
+use tauri::{Manager, RunEvent};
+
+/// Guards against re-running shutdown when `ExitRequested` is emitted more
+/// than once (for example while the explicit `exit(0)` is unwinding).
+static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
@@ -38,23 +43,31 @@ pub fn run() {
             })
             .map_err(io::Error::other)?;
 
-            let playback = PlaybackService::new(pool.clone()).map_err(|e| {
-                io::Error::other(format!("Playback engine initialization failed: {e}"))
-            })?;
+            let playback =
+                PlaybackService::new(pool.clone(), Some(app.handle().clone())).map_err(|e| {
+                    io::Error::other(format!("Playback engine initialization failed: {e}"))
+                })?;
 
-            // Restore saved playback state from SQLite asynchronously
-            let playback_for_restore = playback.clone();
-            tauri::async_runtime::block_on(async move {
-                if let Ok(mut svc) = playback_for_restore.lock() {
-                    let _ = svc.restore_saved_state().await;
-                }
-            });
+            // Restore saved playback state from SQLite. This runs on the
+            // synchronous setup thread; the persistence worker owns its own
+            // runtime, so no ambient Tokio context is required.
+            let _ = tauri::async_runtime::block_on(playback.restore_saved_state());
 
+            #[cfg(target_os = "windows")]
             {
-                if let Ok(mut svc) = playback.lock() {
-                    svc.set_app_handle(app.handle().clone());
-                    svc.init_media_controls(None);
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Ok(hwnd) = window.hwnd() {
+                        let _ = tauri::async_runtime::block_on(async {
+                            playback.init_media_controls(Some(hwnd.0 as isize)).await
+                        });
+                    }
                 }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = tauri::async_runtime::block_on(async {
+                    playback.init_media_controls(None).await
+                });
             }
 
             app.manage(AppState::new(pool, artworks_dir, playback));
@@ -94,7 +107,22 @@ pub fn run() {
             commands::playback::remove_from_queue_by_index,
             commands::playback::reorder_queue,
             commands::playback::clear_queue,
+            commands::playback::retry_audio_device,
         ])
-        .run(tauri::generate_context!())
-        .expect("Cavia Music failed to start");
+        .build(tauri::generate_context!())
+        .expect("Cavia Music failed to build");
+
+    app.run(|app_handle, event| {
+        if let RunEvent::ExitRequested { api, .. } = event {
+            if SHUTDOWN_STARTED.swap(true, Ordering::SeqCst) {
+                // The shutdown below already finished and requested exit.
+                return;
+            }
+            api.prevent_exit();
+
+            let state = app_handle.state::<AppState>();
+            tauri::async_runtime::block_on(state.playback.shutdown());
+            app_handle.exit(0);
+        }
+    });
 }

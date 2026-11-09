@@ -120,7 +120,36 @@ impl QueueManager {
         }
 
         if self.shuffle_enabled {
-            self.rebuild_shuffle(self.current_index);
+            // Preserve shuffle history: remove the deleted index from the
+            // permutation and shift the remaining indices instead of
+            // regenerating the whole order.
+            let removed_order_pos = self.shuffle_order.iter().position(|&i| i == pos);
+            self.shuffle_order.retain(|&i| i != pos);
+            for index in &mut self.shuffle_order {
+                if *index > pos {
+                    *index -= 1;
+                }
+            }
+            if removed_order_pos.is_none() && self.shuffle_pos > 0 {
+                // Removing an entry before the cursor shifts it left.
+                if self
+                    .shuffle_order
+                    .get(self.shuffle_pos)
+                    .is_some_and(|&idx| idx < pos)
+                {
+                    self.shuffle_pos -= 1;
+                }
+            }
+            if let Some(curr) = self.current_index {
+                if let Some(order_pos) = self.shuffle_order.iter().position(|&i| i == curr) {
+                    self.shuffle_pos = order_pos;
+                }
+            }
+            if self.shuffle_order.is_empty() {
+                self.shuffle_pos = 0;
+            } else if self.shuffle_pos >= self.shuffle_order.len() {
+                self.shuffle_pos = self.shuffle_order.len() - 1;
+            }
         }
 
         Some(removed)
@@ -155,7 +184,22 @@ impl QueueManager {
         }
 
         if self.shuffle_enabled {
-            self.rebuild_shuffle(self.current_index);
+            // Remap the existing permutation instead of regenerating it, so
+            // the played/unplayed history is preserved across reordering.
+            for index in &mut self.shuffle_order {
+                if *index == from {
+                    *index = to;
+                } else if from < to && *index > from && *index <= to {
+                    *index -= 1;
+                } else if to < from && *index >= to && *index < from {
+                    *index += 1;
+                }
+            }
+            if let Some(curr) = self.current_index {
+                if let Some(order_pos) = self.shuffle_order.iter().position(|&i| i == curr) {
+                    self.shuffle_pos = order_pos;
+                }
+            }
         }
         true
     }
@@ -197,96 +241,104 @@ impl QueueManager {
         }
     }
 
-    pub fn next(&mut self) -> Option<&Track> {
+    pub fn peek_next(&mut self) -> Option<(usize, &Track)> {
         if self.tracks.is_empty() {
             return None;
         }
 
         if self.repeat_mode == RepeatMode::One {
-            return self.current_track();
+            return self
+                .current_index
+                .and_then(|idx| self.tracks.get(idx).map(|t| (idx, t)));
         }
 
         if self.shuffle_enabled && !self.shuffle_order.is_empty() {
             if self.shuffle_pos + 1 < self.shuffle_order.len() {
-                self.shuffle_pos += 1;
-                self.current_index = Some(self.shuffle_order[self.shuffle_pos]);
-                self.current_track()
+                let next_idx = self.shuffle_order[self.shuffle_pos + 1];
+                self.tracks.get(next_idx).map(|t| (next_idx, t))
             } else if self.repeat_mode == RepeatMode::All {
-                // Loop shuffle from start
-                self.shuffle_pos = 0;
-                self.current_index = Some(self.shuffle_order[0]);
-                self.current_track()
+                // Begin a fresh shuffle cycle instead of replaying the
+                // permutation pinned when shuffle was originally enabled.
+                let last_played = self.current_index;
+                self.rebuild_shuffle(None);
+                let start_pos =
+                    if self.shuffle_order.len() > 1 && Some(self.shuffle_order[0]) == last_played {
+                        1
+                    } else {
+                        0
+                    };
+                self.shuffle_pos = start_pos;
+                let next_idx = self.shuffle_order[start_pos];
+                self.tracks.get(next_idx).map(|t| (next_idx, t))
             } else {
                 None
             }
         } else {
-            // Sequential playback
             match self.current_index {
                 Some(curr) => {
                     if curr + 1 < self.tracks.len() {
-                        self.current_index = Some(curr + 1);
-                        self.current_track()
+                        let next_idx = curr + 1;
+                        self.tracks.get(next_idx).map(|t| (next_idx, t))
                     } else if self.repeat_mode == RepeatMode::All {
-                        self.current_index = Some(0);
-                        self.current_track()
+                        self.tracks.get(0).map(|t| (0, t))
                     } else {
                         None
                     }
                 }
-                None => {
-                    self.current_index = Some(0);
-                    self.current_track()
-                }
+                None => self.tracks.get(0).map(|t| (0, t)),
             }
         }
     }
 
-    pub fn previous(&mut self, position_ms: u64) -> Option<&Track> {
+    pub fn peek_previous(&self, position_ms: u64) -> Option<(usize, &Track)> {
         if self.tracks.is_empty() {
             return None;
         }
 
-        // If played for > 3 seconds (3000ms), standard player behavior is to restart current track
-        if position_ms > 3000 {
-            return self.current_track();
-        }
-
-        if self.repeat_mode == RepeatMode::One {
-            return self.current_track();
+        if position_ms > 3000 || self.repeat_mode == RepeatMode::One {
+            return self
+                .current_index
+                .and_then(|idx| self.tracks.get(idx).map(|t| (idx, t)));
         }
 
         if self.shuffle_enabled && !self.shuffle_order.is_empty() {
             if self.shuffle_pos > 0 {
-                self.shuffle_pos -= 1;
-                self.current_index = Some(self.shuffle_order[self.shuffle_pos]);
-                self.current_track()
+                let prev_idx = self.shuffle_order[self.shuffle_pos - 1];
+                self.tracks.get(prev_idx).map(|t| (prev_idx, t))
             } else if self.repeat_mode == RepeatMode::All {
-                self.shuffle_pos = self.shuffle_order.len() - 1;
-                self.current_index = Some(self.shuffle_order[self.shuffle_pos]);
-                self.current_track()
+                let prev_idx = self.shuffle_order[self.shuffle_order.len() - 1];
+                self.tracks.get(prev_idx).map(|t| (prev_idx, t))
             } else {
-                self.current_track()
+                self.current_index
+                    .and_then(|idx| self.tracks.get(idx).map(|t| (idx, t)))
             }
         } else {
-            // Sequential playback
             match self.current_index {
                 Some(curr) => {
                     if curr > 0 {
-                        self.current_index = Some(curr - 1);
-                        self.current_track()
+                        let prev_idx = curr - 1;
+                        self.tracks.get(prev_idx).map(|t| (prev_idx, t))
                     } else if self.repeat_mode == RepeatMode::All {
-                        self.current_index = Some(self.tracks.len() - 1);
-                        self.current_track()
+                        let prev_idx = self.tracks.len() - 1;
+                        self.tracks.get(prev_idx).map(|t| (prev_idx, t))
                     } else {
-                        self.current_track()
+                        self.current_index
+                            .and_then(|idx| self.tracks.get(idx).map(|t| (idx, t)))
                     }
                 }
-                None => {
-                    self.current_index = Some(0);
-                    self.current_track()
-                }
+                None => self.tracks.get(0).map(|t| (0, t)),
             }
         }
+    }
+
+    pub fn next(&mut self) -> Option<&Track> {
+        let (next_idx, _) = self.peek_next()?;
+        self.set_current_index(next_idx)
+    }
+
+    pub fn previous(&mut self, position_ms: u64) -> Option<&Track> {
+        let (prev_idx, _) = self.peek_previous(position_ms)?;
+        self.set_current_index(prev_idx)
     }
 
     pub fn set_shuffle(&mut self, enabled: bool) {
@@ -549,5 +601,90 @@ mod tests {
         let _ = q.remove_at(0);
         assert_eq!(q.current_index(), None);
         assert!(q.current_track().is_none());
+    }
+
+    #[test]
+    fn test_shuffle_history_preserved_on_reorder_and_remove() {
+        let mut q = QueueManager::new();
+        q.set_queue(
+            vec![
+                dummy_track("1", "Track 1"),
+                dummy_track("2", "Track 2"),
+                dummy_track("3", "Track 3"),
+                dummy_track("4", "Track 4"),
+                dummy_track("5", "Track 5"),
+            ],
+            Some("3"),
+        );
+        q.set_shuffle(true);
+        q.next();
+        q.next();
+
+        let current_id = q.current_track().unwrap().id.clone();
+        let order_before: Vec<String> = q
+            .shuffle_order
+            .iter()
+            .map(|&i| q.tracks[i].id.clone())
+            .collect();
+
+        assert!(q.reorder(0, 4));
+        let order_after: Vec<String> = q
+            .shuffle_order
+            .iter()
+            .map(|&i| q.tracks[i].id.clone())
+            .collect();
+        assert_eq!(order_before, order_after);
+        assert_eq!(q.current_track().unwrap().id, current_id);
+
+        // Removing a non-current track must leave the relative shuffle
+        // history (played/unplayed order) intact.
+        let remove_idx = (0..q.len())
+            .find(|&i| q.tracks[i].id != current_id)
+            .unwrap();
+        let removed_id = q.tracks[remove_idx].id.clone();
+        let order_before_remove: Vec<String> = q
+            .shuffle_order
+            .iter()
+            .map(|&i| q.tracks[i].id.clone())
+            .collect();
+        q.remove_at(remove_idx);
+        let order_after_remove: Vec<String> = q
+            .shuffle_order
+            .iter()
+            .map(|&i| q.tracks[i].id.clone())
+            .collect();
+        let expected: Vec<String> = order_before_remove
+            .into_iter()
+            .filter(|id| id != &removed_id)
+            .collect();
+        assert_eq!(order_after_remove, expected);
+        assert_eq!(q.current_track().unwrap().id, current_id);
+    }
+
+    #[test]
+    fn test_shuffle_repeat_all_starts_new_cycle() {
+        let mut q = QueueManager::new();
+        q.set_queue(
+            vec![
+                dummy_track("1", "Track 1"),
+                dummy_track("2", "Track 2"),
+                dummy_track("3", "Track 3"),
+                dummy_track("4", "Track 4"),
+            ],
+            Some("2"),
+        );
+        q.set_shuffle(true);
+        q.set_repeat_mode(RepeatMode::All);
+
+        for _ in 0..3 {
+            q.next();
+        }
+        let last = q.current_track().unwrap().id.clone();
+        let wrapped = q.next().expect("repeat-all should wrap").id.clone();
+        assert_ne!(wrapped, last);
+
+        let mut indices = q.shuffle_order.clone();
+        indices.sort_unstable();
+        assert_eq!(indices, vec![0, 1, 2, 3]);
     }
 }

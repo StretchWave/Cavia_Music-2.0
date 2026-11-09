@@ -96,6 +96,13 @@ pub trait AudioBackend: Send {
     fn status(&self) -> PlaybackStatus;
     fn is_ended(&self) -> bool;
     fn capabilities(&self) -> AudioCapabilities;
+    /// Cheap decoder probe used before committing a new queue. Backends that
+    /// cannot validate a source without opening an output device may return
+    /// `Ok(())` and rely on `load`; the Rodio backend performs a real decode
+    /// probe here so a corrupt file cannot replace a working queue.
+    fn validate_source(&self, _path: &str) -> Result<(), PlaybackError> {
+        Ok(())
+    }
     fn is_device_ready(&self) -> bool {
         true
     }

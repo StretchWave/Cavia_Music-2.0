@@ -1,4 +1,4 @@
-use crate::services::playback::SharedPlaybackService;
+use crate::services::playback::PlaybackService;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,15 +10,11 @@ pub struct AppState {
     pub database: SqlitePool,
     pub artworks_dir: PathBuf,
     pub scan_cancelled: Arc<AtomicBool>,
-    pub playback: SharedPlaybackService,
+    pub playback: PlaybackService,
 }
 
 impl AppState {
-    pub fn new(
-        database: SqlitePool,
-        artworks_dir: PathBuf,
-        playback: SharedPlaybackService,
-    ) -> Self {
+    pub fn new(database: SqlitePool, artworks_dir: PathBuf, playback: PlaybackService) -> Self {
         Self {
             database,
             artworks_dir,

@@ -28,6 +28,7 @@ interface ExpandedPlayerProps {
   onClose: () => void;
   playback: PlaybackState;
   isBackendReady: boolean;
+  audioBackendStatus?: 'ready' | 'device_unavailable' | 'not_integrated' | 'error' | 'unsupported';
   onOpenQueue: () => void;
   onOpenLyrics: () => void;
   onTogglePlay?: () => void;
@@ -47,6 +48,7 @@ export function ExpandedPlayer({
   onClose,
   playback,
   isBackendReady,
+  audioBackendStatus,
   onOpenQueue,
   onOpenLyrics,
   onTogglePlay,
@@ -65,6 +67,7 @@ export function ExpandedPlayer({
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
 
   const activePosition = scrubPosition !== null ? scrubPosition : positionMs;
+  const displayDuration = playback.status === 'error' || !currentTrack ? 0 : durationMs;
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -228,7 +231,7 @@ export function ExpandedPlayer({
                   AUDIO STANDBY
                 </Badge>
                 <Badge variant="neutral" size="sm">
-                  {isBackendReady ? 'ENGINE READY' : 'ENGINE INITIALIZING'}
+                  {isBackendReady ? 'ENGINE READY' : audioBackendStatus === 'device_unavailable' ? 'NO AUDIO DEVICE' : 'ENGINE INITIALIZING'}
                 </Badge>
                 <Badge variant="outline" size="sm">
                   RATE: {playbackSpeed}x
@@ -241,19 +244,19 @@ export function ExpandedPlayer({
           <div className="expanded-scrubber-box">
             <Slider
               value={activePosition}
-              max={durationMs || 100}
+              max={displayDuration || 100}
               onChange={(newPos) => setScrubPosition(newPos)}
               onCommit={(newPos) => {
                 setScrubPosition(null);
                 onSeek?.(newPos);
               }}
-              disabled={!isBackendReady || durationMs <= 0}
+              disabled={!isBackendReady || displayDuration <= 0}
               label="Seek track position"
-              showFill={durationMs > 0}
+              showFill={displayDuration > 0}
             />
             <div className="expanded-time-labels">
               <span>{formatTime(activePosition)}</span>
-              <span>{formatTime(durationMs)}</span>
+              <span>{formatTime(displayDuration)}</span>
             </div>
           </div>
 
@@ -355,7 +358,7 @@ export function ExpandedPlayer({
                 <Slider
                   value={isMuted ? 0 : volume}
                   max={100}
-                  onChange={(newVol) => onVolumeChange?.(newVol)}
+                  onCommit={(newVol) => onVolumeChange?.(newVol)}
                   disabled={!isBackendReady}
                   label="Volume"
                 />

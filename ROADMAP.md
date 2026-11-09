@@ -30,11 +30,13 @@
 - [x] Staged Android Media3 ExoPlayer and iOS AVPlayer contract adapters
 - [x] Common commands and playback event model (`playback:state-changed`, `playback:position`)
 - [x] Authoritative queue manager with deterministic shuffle, repeat (off/all/one), and auto-advance
-- [x] System Media Transport Controls (`souvlaki` SMTC on Windows, Now Playing on macOS)
+- [x] Windows SMTC metadata and event forwarding (OS Play/Pause verified at runtime; Next/Previous/Seek mapped but not exercised; macOS Now Playing deferred to physical hardware verification)
 - [x] Playback state persistence and session restoration in SQLite (`playback_state`)
 - [x] PlayerDock, ExpandedPlayer, and QueueDrawer connected to real backend with honest UI states
 - [x] Format/stream capability matrix documented in `docs/audio-backends.md`
-- [x] Milestone 3 Playback Remediation: Native demuxer seeking, non-fatal device startup fallback, atomic queue loading, generation-tracked event streams, scrubber commit debounce, and drag-and-drop queue reordering
+- [x] Milestone 3 Playback Remediation: Dedicated audio actor control thread, native seeking without fallback, speed-adjusted position model across 0.5x–2.0x, atomic queue transitions, bounded skip policy, debounced volume slider, and ComCtl32 v6 test manifest.
+- [x] Third audit remediation: single Windows manifest for app and tests, owned persistence runtime, Tauri exit shutdown with durable flush, 5 s position persistence, atomic `set_queue` decoder probe, desktop/mobile health distinction, SMTC attach/status/progress, shuffle regression coverage, and 36 unit + 1 integration tests.
+- [ ] Mid-stream audio-device disconnect detection and automatic recovery (manual retry exists; currently unsupported).
 
 ## Milestone 4 — Product features
 - [ ] Search orchestration and provider adapters

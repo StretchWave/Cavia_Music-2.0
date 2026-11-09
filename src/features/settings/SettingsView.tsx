@@ -279,10 +279,29 @@ export function SettingsView({
                 </div>
               </div>
               <div className="setting-status-line">
-                <Badge variant={health?.audio_backend === 'ready' ? 'ready' : 'outline'} size="md">
-                  {health?.audio_backend === 'ready' ? 'INTEGRATED' : 'NOT INTEGRATED (STANDBY)'}
+                <Badge
+                  variant={
+                    health?.audio_backend === 'ready'
+                      ? 'ready'
+                      : health?.audio_backend === 'error'
+                        ? 'warn'
+                        : 'outline'
+                  }
+                  size="md"
+                >
+                  {health?.audio_backend === 'ready'
+                    ? 'INTEGRATED'
+                    : health?.audio_backend === 'device_unavailable'
+                      ? 'NO AUDIO DEVICE'
+                      : health?.audio_backend === 'not_integrated'
+                        ? 'BACKEND NOT INTEGRATED'
+                        : health?.audio_backend === 'error'
+                          ? 'INITIALIZATION ERROR'
+                          : 'STANDBY'}
                 </Badge>
-                <span className="text-muted-xs">Contract ready · No mock audio</span>
+                <span className="text-muted-xs">
+                  {health?.system_media_controls ? 'SMTC ACTIVE' : 'SMTC UNAVAILABLE'} · No mock audio
+                </span>
               </div>
             </div>
 

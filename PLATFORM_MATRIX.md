@@ -1,16 +1,20 @@
 # Platform support matrix
 
+Legend: **Verified** means exercised in this remediation on the stated platform. **Implemented, runtime-unverified** means code exists and compiles for that target but was not run here. **Not integrated** means an honest stub returns `BackendUnavailable` and reports `not_integrated`. **Unsupported** means no implementation and no claim.
+
 | Capability | Windows | macOS | Android | iOS |
 |---|---|---|---|---|
-| Shared React UI | Operational (Verified 360px–1920px) | Operational (Responsive) | Operational (Touch optimized) | Operational (Touch optimized) |
-| Tauri shell | Operational (Tauri 2) | Operational (Tauri 2) | Staged (Tauri 2 Mobile) | Staged (Tauri 2 Mobile) |
-| SQLite local library | Operational (Verified SQLx WAL mode) | Operational (Shared SQLite core) | Staged | Staged |
-| Native folder / file picking | Operational (`@tauri-apps/plugin-dialog`) | Operational (`@tauri-apps/plugin-dialog`) | URI staging still required | Sandbox / security-scoped URL staging required |
-| Metadata extraction | Operational (Lofty: FLAC, MP3, WAV, AAC, M4A, OGG) | Operational (Lofty) | Staged after URI staging | Staged after sandbox staging |
-| Local audio playback | Operational (Rodio WASAPI, native seeking) | Operational (Rodio CoreAudio) | Stub (Explicit BackendUnavailable) | Stub (Explicit BackendUnavailable) |
-| Audio device failure resilience | Operational (Headless/device fallback) | Operational | N/A | N/A |
+| Shared React UI | Implemented; runtime-verified at 1440×900 | Shared code; runtime-unverified | Shared code; runtime-unverified | Shared code; runtime-unverified |
+| Tauri shell | Verified (Tauri 2) | Configured; runtime-unverified | Initialized / staged | Initialized / staged |
+| SQLite local library | Verified (SQLx WAL, migrations 0001 + 0002) | Shared SQLite code; runtime-unverified | Not integrated | Not integrated |
+| Native folder / file picking | Implemented (native dialog) | Shared plugin; runtime-unverified | URI staging required | Security-scoped URL staging required |
+| Metadata extraction | Implemented (Lofty) | Shared code; runtime-unverified | Requires platform URI staging | Requires sandbox staging |
+| Local audio playback | **Implemented and runtime-verified** (Rodio/WASAPI + Symphonia; 30 s FLAC; UI Play/Pause/Seek/Speed/Volume/Mute; Next/Previous; media-key Play/Pause) | Compiled only; not runtime-verified | **Not integrated** — stub returns `BackendUnavailable`; health `not_integrated` | **Not integrated** — stub returns `BackendUnavailable`; health `not_integrated` |
+| Audio backend health | `ready` / `device_unavailable` / `error` | Same logic; runtime-unverified | `not_integrated` | `not_integrated` |
+| Startup without an output device | Implemented (non-fatal; UI shows NO AUDIO DEVICE) | Same code; runtime-unverified | N/A | N/A |
+| Mid-stream device disconnect recovery | **Unsupported** — no detection; manual retry button only | **Unsupported** | N/A | N/A |
 | Network audio playback | Standby | Standby | Not implemented | Not implemented |
-| Background playback | Operational (Desktop process) | Operational (Desktop process) | Standby (Needs Media3 Foreground Service) | Standby (Needs AVAudioSession) |
-| System media controls | Operational (`souvlaki` SMTC) | Operational (`souvlaki` Now Playing) | Standby (Needs Media3 MediaSession) | Standby (Needs MPRemoteCommandCenter) |
+| Background playback | Process open | Process open; runtime-unverified | Standby (needs Media3 foreground service) | Standby (needs AVAudioSession) |
+| System media controls | SMTC initialized; OS Play/Pause verified; Seek/Next/Previous mapped but not exercised; attach failures surfaced | Standby (needs physical macOS verification) | Standby (needs Media3 MediaSession) | Standby (needs MPRemoteCommandCenter) |
 
-*Note: Android and iOS backends are explicitly stubbed with honest errors (`AudioCapabilities::unavailable()`, returning `Err(PlaybackError::BackendUnavailable)`) rather than silent mock successes.*
+**Verification scope:** Windows 11 desktop, current debug binary launched with the Vite dev server and driven through WebView2 UI Automation. macOS, Android and iOS were not run in this remediation. Android/iOS are explicitly not integrated rather than silently mocked. Mid-stream device-disconnect resilience is not claimed.

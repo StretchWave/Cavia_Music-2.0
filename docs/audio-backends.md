@@ -1,53 +1,56 @@
 # Audio Backend Architecture & Evaluation Note
 
-## 1. Shared Playback Contract
+## 1. Shared playback contract
 
-All platform implementations follow one common Cavia playback contract (`AudioBackend` trait in `src-tauri/src/audio/mod.rs`). The React frontend communicates strictly through typed Tauri commands and authoritative event streams (`playback:state-changed` and `playback:position`), never communicating directly with underlying audio libraries.
+All platform implementations follow one Cavia playback contract (`AudioBackend` in `src-tauri/src/audio/mod.rs`). React communicates only through typed Tauri commands and authoritative events (`playback:state-changed`, `playback:position`); page components never call Rodio, Media3 or AVPlayer directly.
 
-| Target | Active Backend | Native Media Integration | License | Status |
+| Target | Active backend | Native media integration | License | Status |
 |---|---|---|---|---|
-| Windows | Native Rodio (CPAL WASAPI + Symphonia) | Windows System Media Transport Controls (`souvlaki`) | MIT / Apache-2.0 | Operational (seeking, non-blocking device init) |
-| macOS | Native Rodio (CPAL CoreAudio + Symphonia) | Now Playing / Remote Command Center (`souvlaki`) | MIT / Apache-2.0 | Operational (shared Rodio engine) |
-| Windows (Alt) | libmpv via `rsmpv` (feature `desktop-mpv`) | Windows SMTC | GPLv3 / LGPLv2.1+ | Evaluated / Optional feature |
-| Android | Native Media3 ExoPlayer | MediaSessionService + Foreground Notification + Audio Focus | Apache-2.0 | Staged contract / Stub (honest error on playback) |
-| iOS | Native AVPlayer | `MPNowPlayingInfoCenter` + `MPRemoteCommandCenter` | Apple Native SDK | Staged contract / Stub (honest error on playback) |
+| Windows | Native Rodio (CPAL WASAPI + Symphonia) | Windows SMTC (`souvlaki`) | MIT / Apache-2.0 | **Implemented and runtime-verified**: local UI transport, media-key Play/Pause, persistence, restore |
+| macOS | Native Rodio (CPAL CoreAudio + Symphonia) | Standby / deferred | MIT / Apache-2.0 | Compiled only; not runtime-verified |
+| Windows (alt) | libmpv via `rsmpv` (feature `desktop-mpv`) | Windows SMTC | GPLv3 / LGPLv2.1+ | Evaluated / optional feature; not bundled |
+| Android | Native Media3 ExoPlayer (planned) | MediaSessionService + foreground notification | Apache-2.0 | **Not integrated** — stub returns `BackendUnavailable`, health `not_integrated` |
+| iOS | Native AVPlayer (planned) | `MPNowPlayingInfoCenter` + `MPRemoteCommandCenter` | Apple SDK | **Not integrated** — stub returns `BackendUnavailable`, health `not_integrated` |
 
 ---
 
-## 2. Desktop Audio Engine: Native Rodio Backend (Milestone 3 Remediated)
+## 2. Desktop engine: native Rodio backend
 
-### Architecture
-- **Engine**: Pure-Rust audio sink leveraging `rodio 0.23` with `cpal` (WASAPI direct on Windows, CoreAudio on macOS) and pure-Rust `symphonia` decoders.
-- **Zero DLL Overhead**: Compiles directly into the Cavia binary with zero runtime dynamic C library dependencies. Works on clean machines immediately without requiring external DLLs (`mpv-2.dll`).
-- **Device Resilience**: Graceful startup without crashing when no physical audio output device is connected (`open_default_sink` failure handled non-fatally). App remains fully functional for browsing, scanning, and managing library while audio status reports `device_unavailable`.
-- **Fast Demuxer Seeking**: Uses `player.try_seek(Duration)` directly through Symphonia's native seek table. Clamps seek offsets within `[0, duration_ms]`. Operates in 0–5ms without decoding intermediate samples from track beginning.
-- **Instant Buffer Purge**: Loading a new track disconnects the previous player and attaches a fresh player instance immediately, releasing decoded buffers without thread blocking or audio overhang.
-- **Supported Codecs**: FLAC, ALAC, MP3, WAV, AAC, M4A, Ogg Vorbis, AIFF. Unsupported formats (WMA, Opus) are excluded from discovery to prevent silent playback failure.
-
----
-
-## 3. Queue Management & State Synchronization
-
-- **Authoritative Domain State**: Rust domain owns the queue (`QueueManager` in `src-tauri/src/services/queue.rs`), position, active track, repeat modes (`off`, `all`, `one`), and shuffle permutation.
-- **Atomic Track Loading**: File validation and audio decoding occur before committing queue index updates. If an unplayable file is encountered, the queue cursor is not corrupted, and an honest error snapshot is emitted.
-- **Livelock Prevention**: Automatic queue advancement tracks failed attempts and halts gracefully if all upcoming tracks or repeat-one recordings fail to load, preventing infinite CPU spinning.
-- **Event Concurrency & Generations**: Each playback generation is stamped with a monotonic `generation: u64`. The frontend discards stale position ticks (`pos.generation < state.generation`) or ticks from mismatched track IDs.
-- **True Shuffle Non-Determinism**: Seeded by system entropy (`SystemTime`), producing fresh non-repeating permutations on every shuffle cycle while pinning the currently playing track at index 0.
-- **Reordering & Removal**: Supports index-based queue removal (`remove_from_queue_by_index`) to safely disambiguate duplicated tracks, alongside full HTML5 drag-and-drop queue reordering.
-- **Persistence**: Playback state and queue are persistently debounced into SQLite table `playback_state` and restored on application startup.
+- **Engine:** `rodio 0.23` with `cpal` (WASAPI on Windows, CoreAudio on macOS) and pure-Rust Symphonia decoders (`symphonia-alac`, `symphonia-aiff` enabled).
+- **Audio actor:** all synchronous decoding, file I/O and backend calls run on the dedicated `cavia-audio-control` thread. Tauri commands send `oneshot` requests over an `mpsc` channel; the actor owns `PlaybackCore`, the queue and the backend.
+- **Persistence owner:** a dedicated `cavia-persist` std thread owns a current-thread Tokio runtime. It debounces serialized writes to SQLite. It is not started with `tokio::spawn` from synchronous Tauri setup.
+- **Shutdown:** `RunEvent::ExitRequested` prevents immediate exit, calls `PlaybackService::shutdown()`, and then exits. New commands are rejected with `"Playback service is shutting down"`; already-queued FIFO commands receive defined replies; the actor stops; state is persisted **before** `backend.stop()` (which zeroes Rodio's position), flushed with a 3 s bound, and worker/persistence threads are joined.
+- **Periodic persistence:** while Playing, the actor saves at most once every 5 s. Pause, stop, track changes and application exit flush explicitly.
+- **Position semantics:** `media_ms = wall_clock * speed_factor`, with seek-aware adaptation. When a track is loaded at an offset and paused immediately (startup restore), Rodio's audio callback may not yet have updated `get_pos()`; the paused position therefore falls back to the requested seek offset so shutdown cannot erase the resume point.
+- **Device resilience:** startup without an output device is non-fatal; the app remains usable and reports `device_unavailable`. A manual retry re-opens the device. **Mid-stream disconnect detection and automatic recovery are not implemented.**
+- **Seeking:** `player.try_seek(Duration)` uses Symphonia's container seek index; failures return an honest `SeekError` rather than decoding from the start.
+- **Codecs:** FLAC, ALAC, MP3, WAV, AAC/M4A, Ogg Vorbis, AIFF. WMA/Opus are excluded from discovery rather than silently failing.
+- **Tests:** real fixtures for FLAC, MP3, AAC/M4A, ALAC/M4A, AIFF and a 30 s FLAC; decode/seek and long-seek latency tests. Tests that require physical output state that requirement with `eprintln!`; the paused-offset regression test is marked `#[ignore]` and was run explicitly on hardware.
 
 ---
 
-## 4. Capability Honesty Matrix
+## 3. Queue, shuffle and state synchronization
 
-| Capability | Windows (Tested) | macOS (Compiled) | Android (Stub) | iOS (Stub) |
+- **Authoritative state:** Rust owns the queue, current track, position, repeat mode, shuffle order and volume/mute.
+- **Atomic loading:** `set_queue` validates the selected track through a real decoder probe before replacing the queue. Corrupt-but-existing files leave the previous queue and selection intact and return the error.
+- **Bounded skip:** automatic advance tries a bounded number of tracks; all-failed and repeat-one failure terminate without livelock.
+- **Shuffle:** repeat-all wrap builds a fresh shuffle cycle; queue removal/reorder remaps the existing order instead of resetting history.
+- **Generations:** monotonic `generation` values let React discard stale position events from previous tracks.
+- **Persistence:** queue, track, position, repeat, shuffle, speed, volume and mute are stored in `playback_state` (migration `0002_playback_state_volume.sql`) and restored on startup **paused**, never auto-resuming.
+
+---
+
+## 4. Capability honesty matrix
+
+| Capability | Windows | macOS | Android | iOS |
 |---|---|---|---|---|
-| Local Files (FLAC/MP3/WAV/AAC/OGG/AIFF) | Supported | Supported | Not Implemented | Not Implemented |
-| Non-blocking Demuxer Seeking | Supported | Supported | Not Implemented | Not Implemented |
-| Device Disconnect Resilience | Supported | Supported | Not Implemented | Not Implemented |
-| Progressive HTTPS | Standby | Standby | Not Implemented | Not Implemented |
-| HLS / DASH Streaming | Standby | Standby | Not Implemented | Not Implemented |
-| Background Playback | Supported | Supported | Standby (Needs MediaSessionService) | Standby (Needs AVAudioSession) |
-| System Media Controls | Supported (SMTC) | Supported (NowPlaying) | Standby (Needs Media3) | Standby (Needs MPNowPlaying) |
-| Gapless Transition | Standby | Standby | Standby | Standby |
-| Crossfade | Standby | Standby | Standby | Standby |
+| Local files (FLAC/ALAC/MP3/WAV/AAC/OGG/AIFF) | Supported, runtime-verified | Compiled only | Not integrated | Not integrated |
+| Non-blocking demuxer seeking | Supported, verified | Compiled only | Not integrated | Not integrated |
+| Mid-stream device disconnect recovery | **Unsupported** (manual retry only) | **Unsupported** | N/A | N/A |
+| Startup without output device | Supported, verified | Same code, unverified | N/A | N/A |
+| Progressive HTTPS / HLS / DASH | Standby | Standby | Not implemented | Not implemented |
+| Background playback | Process open | Process open, unverified | Standby | Standby |
+| System media controls | SMTC initialized; Play/Pause verified; Seek/Next/Previous mapped but not exercised | Standby | Standby | Standby |
+| Gapless / crossfade | Standby | Standby | Standby | Standby |
+
+**Scope note:** Windows was exercised with a real UI and OS media keys. macOS, Android and iOS were not run. Device-disconnect resilience is explicitly unsupported, not merely unverified.

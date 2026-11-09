@@ -18,6 +18,8 @@ interface QueueDrawerProps {
   onClose: () => void;
   currentTrack: Track | null;
   queue: Track[];
+  isPlaying?: boolean;
+  status?: string;
   onClearQueue?: () => void;
   onRemoveTrack?: (id: string, index?: number) => void;
   onSelectTrack?: (id: string) => void;
@@ -30,6 +32,8 @@ export function QueueDrawer({
   onClose,
   currentTrack,
   queue,
+  isPlaying = false,
+  status = 'idle',
   onClearQueue,
   onRemoveTrack,
   onSelectTrack,
@@ -87,20 +91,22 @@ export function QueueDrawer({
 
         {/* Content */}
         <div className="drawer-body">
-          {/* Currently Playing Track */}
+          {/* Currently Selected Track */}
           <div className="queue-section">
-            <span className="queue-section-label">CURRENTLY PLAYING</span>
+            <span className="queue-section-label">
+              {isPlaying ? 'CURRENTLY PLAYING' : status === 'paused' ? 'CURRENTLY PAUSED' : 'CURRENT SELECTION'}
+            </span>
             {currentTrack ? (
               <div className="queue-item active-queue-item">
                 <div className="queue-item-art">
-                  <Disc3 size={18} className="queue-spinning-art" />
+                  <Disc3 size={18} className={isPlaying ? 'queue-spinning-art' : undefined} />
                 </div>
                 <div className="queue-item-meta">
                   <strong className="queue-item-title">{currentTrack.title}</strong>
                   <span className="queue-item-artist">{currentTrack.artist}</span>
                 </div>
-                <Badge variant="vermilion" size="sm">
-                  PLAYING
+                <Badge variant={isPlaying ? 'vermilion' : 'neutral'} size="sm">
+                  {isPlaying ? 'PLAYING' : status === 'paused' ? 'PAUSED' : 'STOPPED'}
                 </Badge>
               </div>
             ) : (
