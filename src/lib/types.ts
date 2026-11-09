@@ -15,14 +15,19 @@ export interface Track {
   title: string;
   artist: string;
   album: string;
+  albumArtist?: string;
   durationMs: number;
   artworkUri?: string;
   sourceKind: 'local' | 'provider';
   providerId?: string;
+  fileUri?: string;
   releaseYear?: number;
   trackNumber?: number;
+  discNumber?: number;
   genre?: string;
   isLiked?: boolean;
+  playCount?: number;
+  dateAdded?: string;
 }
 
 export interface Playlist {
@@ -53,7 +58,8 @@ export interface Artist {
 }
 
 export interface PlaybackState {
-  status: 'idle' | 'playing' | 'paused';
+  generation?: number;
+  status: 'idle' | 'loading' | 'playing' | 'paused' | 'stopped' | 'error';
   currentTrack: Track | null;
   positionMs: number;
   durationMs: number;
@@ -63,6 +69,7 @@ export interface PlaybackState {
   isShuffle: boolean;
   playbackSpeed: number;
   queue: Track[];
+  errorMessage?: string;
 }
 
 export interface ProviderInfo {

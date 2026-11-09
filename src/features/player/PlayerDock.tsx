@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import {
   ChevronUp,
   Disc3,
@@ -18,6 +19,7 @@ import {
 } from 'lucide-react';
 import { IconButton } from '../../components/IconButton';
 import { Slider } from '../../components/Slider';
+import { formatArtworkUri } from '../../lib/library';
 import type { PlaybackState } from '../../lib/types';
 
 interface PlayerDockProps {
@@ -27,6 +29,15 @@ interface PlayerDockProps {
   onOpenQueue: () => void;
   onOpenLyrics: () => void;
   onTogglePlay?: () => void;
+  onNext?: () => void;
+  onPrevious?: () => void;
+  onSeek?: (positionMs: number) => void;
+  onVolumeChange?: (volume: number) => void;
+  onToggleMute?: () => void;
+  onToggleShuffle?: () => void;
+  onCycleRepeat?: () => void;
+  onCycleSpeed?: () => void;
+  onToggleLike?: (trackId: string) => void;
 }
 
 export function PlayerDock({
@@ -35,9 +46,22 @@ export function PlayerDock({
   onOpenExpanded,
   onOpenQueue,
   onOpenLyrics,
+  onTogglePlay,
+  onNext,
+  onPrevious,
+  onSeek,
+  onVolumeChange,
+  onToggleMute,
+  onToggleShuffle,
+  onCycleRepeat,
+  onCycleSpeed,
+  onToggleLike,
 }: PlayerDockProps) {
   const { currentTrack, status, positionMs, durationMs, volume, isMuted, repeatMode, isShuffle, playbackSpeed } = playback;
   const isPlaying = status === 'playing';
+  const [scrubPosition, setScrubPosition] = useState<number | null>(null);
+
+  const activePosition = scrubPosition !== null ? scrubPosition : positionMs;
 
   const formatTime = (ms: number) => {
     if (!ms || ms <= 0) return '0:00';
@@ -47,7 +71,7 @@ export function PlayerDock({
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  const engineDisabledTooltip = 'Playback engine is not connected yet (Milestone 3)';
+  const engineTooltip = isBackendReady ? undefined : 'Audio engine is initializing';
 
   return (
     <footer className="cavia-player-dock" role="region" aria-label="Audio player">
@@ -68,7 +92,7 @@ export function PlayerDock({
         <div className="dock-art-container">
           <div className="dock-art-frame">
             {currentTrack?.artworkUri ? (
-              <img src={currentTrack.artworkUri} alt="" className="dock-artwork-img" />
+              <img src={formatArtworkUri(currentTrack.artworkUri)} alt="" className="dock-artwork-img" />
             ) : (
               <div className="dock-art-empty" aria-hidden="true">
                 <Disc3 size={20} className={isPlaying ? 'spinning' : ''} />
@@ -80,22 +104,29 @@ export function PlayerDock({
 
         <div className="dock-track-info">
           <strong className="dock-track-title">
-            {currentTrack?.title ?? 'No audio loaded'}
+            {currentTrack?.title ?? (playback.errorMessage ? 'Playback Halted' : 'No audio loaded')}
           </strong>
-          <span className="dock-track-artist">
-            {currentTrack?.artist ? `${currentTrack.artist} — ${currentTrack.album}` : 'Standby · Ready for local library'}
+          <span className={`dock-track-artist ${playback.errorMessage ? 'dock-error-text' : ''}`}>
+            {playback.errorMessage
+              ? playback.errorMessage
+              : currentTrack?.artist
+              ? `${currentTrack.artist} — ${currentTrack.album}`
+              : 'Select a track to start playback'}
           </span>
         </div>
 
         <button
           type="button"
-          className="dock-like-btn"
+          className={`dock-like-btn ${currentTrack?.isLiked ? 'active' : ''}`}
           disabled={!currentTrack || !isBackendReady}
-          title={!currentTrack ? 'No active track to like' : 'Save to Liked Tracks'}
+          title={!currentTrack ? 'No active track to like' : (currentTrack.isLiked ? 'Remove from Liked' : 'Save to Liked')}
           aria-label="Like current track"
-          onClick={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (currentTrack) onToggleLike?.(currentTrack.id);
+          }}
         >
-          <Heart size={15} />
+          <Heart size={15} fill={currentTrack?.isLiked ? 'var(--accent-vermilion)' : 'none'} />
         </button>
       </div>
 
@@ -107,7 +138,8 @@ export function PlayerDock({
             icon={<Shuffle size={15} />}
             disabled={!isBackendReady}
             active={isShuffle}
-            title={engineDisabledTooltip}
+            onClick={onToggleShuffle}
+            title={isShuffle ? 'Disable shuffle' : 'Enable shuffle'}
             size="sm"
           />
 
@@ -115,7 +147,8 @@ export function PlayerDock({
             label="Previous track"
             icon={<Rewind size={16} />}
             disabled={!isBackendReady}
-            title={engineDisabledTooltip}
+            onClick={onPrevious}
+            title="Previous track"
             size="sm"
           />
 
@@ -123,7 +156,8 @@ export function PlayerDock({
             type="button"
             className="dock-play-btn"
             disabled={!isBackendReady}
-            title={engineDisabledTooltip}
+            onClick={onTogglePlay}
+            title={isPlaying ? 'Pause' : 'Play'}
             aria-label={isPlaying ? 'Pause' : 'Play'}
           >
             {isPlaying ? <Pause size={17} /> : <Play size={17} className="play-triangle" />}
@@ -133,7 +167,8 @@ export function PlayerDock({
             label="Next track"
             icon={<FastForward size={16} />}
             disabled={!isBackendReady}
-            title={engineDisabledTooltip}
+            onClick={onNext}
+            title="Next track"
             size="sm"
           />
 
@@ -142,18 +177,23 @@ export function PlayerDock({
             icon={repeatMode === 'one' ? <Repeat1 size={15} /> : <Repeat size={15} />}
             disabled={!isBackendReady}
             active={repeatMode !== 'off'}
-            title={engineDisabledTooltip}
+            onClick={onCycleRepeat}
+            title={`Repeat mode: ${repeatMode}`}
             size="sm"
           />
         </div>
 
         <div className="dock-scrubber-row">
-          <span className="dock-time-code">{formatTime(positionMs)}</span>
+          <span className="dock-time-code">{formatTime(activePosition)}</span>
           <div className="dock-timeline-track">
             <Slider
-              value={positionMs}
+              value={activePosition}
               max={durationMs || 100}
-              onChange={() => {}}
+              onChange={(newPos) => setScrubPosition(newPos)}
+              onCommit={(newPos) => {
+                setScrubPosition(null);
+                onSeek?.(newPos);
+              }}
               disabled={!isBackendReady || durationMs <= 0}
               label="Seek track position"
               showFill={durationMs > 0}
@@ -165,16 +205,38 @@ export function PlayerDock({
 
       {/* Auxiliary Controls */}
       <div className="dock-aux-controls">
-        <div className="dock-engine-status" title="Playback engine candidate: libmpv (desktop) / Media3 (Android) / AVPlayer (iOS)">
-          <span className="status-indicator-dot muted" />
+        <div
+          className="dock-engine-status"
+          title={
+            playback.errorMessage
+              ? `Playback error: ${playback.errorMessage}`
+              : isBackendReady
+              ? 'Active audio backend: Native Rodio (WASAPI / CoreAudio via Symphonia)'
+              : 'Audio engine is standby or no output device available'
+          }
+        >
+          <span
+            className={`status-indicator-dot ${
+              playback.errorMessage ? 'error' : isBackendReady ? 'ready' : 'muted'
+            }`}
+          />
           <span className="engine-status-text">
-            {isBackendReady ? 'ENGINE READY' : 'ENGINE STANDBY'}
+            {playback.errorMessage
+              ? 'PLAYBACK ERROR'
+              : isBackendReady
+              ? 'ENGINE READY'
+              : 'ENGINE STANDBY'}
           </span>
         </div>
 
-        <div className="dock-speed-pill" title="Playback rate">
+        <button
+          type="button"
+          className="dock-speed-pill"
+          title="Click to cycle playback rate"
+          onClick={onCycleSpeed}
+        >
           <span>{playbackSpeed}x</span>
-        </div>
+        </button>
 
         <IconButton
           label="Synchronized lyrics"
@@ -197,14 +259,15 @@ export function PlayerDock({
             label={isMuted ? 'Unmute' : 'Mute'}
             icon={isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
             disabled={!isBackendReady}
-            title={engineDisabledTooltip}
+            onClick={onToggleMute}
+            title={isMuted ? 'Unmute' : 'Mute'}
             size="sm"
           />
           <div className="dock-volume-slider">
             <Slider
               value={isMuted ? 0 : volume}
               max={100}
-              onChange={() => {}}
+              onChange={(newVol) => onVolumeChange?.(newVol)}
               disabled={!isBackendReady}
               label="Adjust volume"
             />
@@ -235,21 +298,26 @@ export function PlayerDock({
         aria-label="Open expanded player"
       >
         <div className="mobile-mini-art">
-          <Headphones size={16} />
+          {currentTrack?.artworkUri ? (
+            <img src={formatArtworkUri(currentTrack.artworkUri)} alt="" className="mobile-mini-art-img" />
+          ) : (
+            <Headphones size={16} />
+          )}
         </div>
         <div className="mobile-mini-info">
           <strong>{currentTrack?.title ?? 'No audio loaded'}</strong>
-          <span>{currentTrack?.artist ?? 'Playback standby · Cavia 2.0'}</span>
+          <span>{currentTrack?.artist ?? 'Select a track to play'}</span>
         </div>
         <div className="mobile-mini-actions" onClick={(e) => e.stopPropagation()}>
           <button
             type="button"
             className="mobile-mini-play"
             disabled={!isBackendReady}
-            title={engineDisabledTooltip}
+            onClick={onTogglePlay}
+            title={engineTooltip}
             aria-label="Play/Pause"
           >
-            <Play size={15} />
+            {isPlaying ? <Pause size={15} /> : <Play size={15} />}
           </button>
           <button
             type="button"
@@ -264,4 +332,3 @@ export function PlayerDock({
     </footer>
   );
 }
-

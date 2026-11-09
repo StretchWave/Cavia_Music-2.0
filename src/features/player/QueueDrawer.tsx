@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Disc3,
   GripVertical,
@@ -19,7 +19,10 @@ interface QueueDrawerProps {
   currentTrack: Track | null;
   queue: Track[];
   onClearQueue?: () => void;
-  onRemoveTrack?: (id: string) => void;
+  onRemoveTrack?: (id: string, index?: number) => void;
+  onSelectTrack?: (id: string) => void;
+  onShuffleQueue?: () => void;
+  onReorderQueue?: (fromIndex: number, toIndex: number) => void;
 }
 
 export function QueueDrawer({
@@ -29,7 +32,13 @@ export function QueueDrawer({
   queue,
   onClearQueue,
   onRemoveTrack,
+  onSelectTrack,
+  onShuffleQueue,
+  onReorderQueue,
 }: QueueDrawerProps) {
+  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape' && isOpen) {
@@ -64,7 +73,7 @@ export function QueueDrawer({
             <div className="drawer-title-row">
               <h2 className="drawer-title">Play Queue</h2>
               <Badge variant="neutral" size="sm">
-                {queue.length + (currentTrack ? 1 : 0)} TRACKS
+                {queue.length} TRACKS
               </Badge>
             </div>
           </div>
@@ -112,6 +121,7 @@ export function QueueDrawer({
                     type="button"
                     className="queue-action-link"
                     title="Shuffle upcoming queue"
+                    onClick={onShuffleQueue}
                   >
                     <Shuffle size={13} />
                     <span>Shuffle</span>
@@ -130,26 +140,72 @@ export function QueueDrawer({
 
             {queue.length > 0 ? (
               <div className="queue-list">
-                {queue.map((track, index) => (
-                  <div key={`${track.id}-${index}`} className="queue-item">
-                    <span className="queue-drag-handle" title="Drag to reorder">
-                      <GripVertical size={14} />
-                    </span>
-                    <span className="queue-index">{index + 1}</span>
-                    <div className="queue-item-meta">
-                      <strong className="queue-item-title">{track.title}</strong>
-                      <span className="queue-item-artist">{track.artist}</span>
+                {queue.map((track, index) => {
+                  const isCurrent = currentTrack?.id === track.id;
+                  const isDragging = draggedIndex === index;
+                  const isDragOver = dragOverIndex === index;
+                  return (
+                    <div
+                      key={`${track.id}-${index}`}
+                      className={`queue-item ${isCurrent ? 'active-queue-item' : ''} ${
+                        isDragging ? 'dragging' : ''
+                      } ${isDragOver ? 'drag-over' : ''}`}
+                      onClick={() => onSelectTrack?.(track.id)}
+                      role="button"
+                      tabIndex={0}
+                      draggable
+                      onDragStart={(e) => {
+                        setDraggedIndex(index);
+                        e.dataTransfer.effectAllowed = 'move';
+                        e.dataTransfer.setData('text/plain', String(index));
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                        if (dragOverIndex !== index) {
+                          setDragOverIndex(index);
+                        }
+                      }}
+                      onDragLeave={() => {
+                        if (dragOverIndex === index) {
+                          setDragOverIndex(null);
+                        }
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        setDragOverIndex(null);
+                        if (draggedIndex !== null && draggedIndex !== index) {
+                          onReorderQueue?.(draggedIndex, index);
+                        }
+                        setDraggedIndex(null);
+                      }}
+                      onDragEnd={() => {
+                        setDraggedIndex(null);
+                        setDragOverIndex(null);
+                      }}
+                    >
+                      <span className="queue-drag-handle" title="Drag to reorder">
+                        <GripVertical size={14} />
+                      </span>
+                      <span className="queue-index">{index + 1}</span>
+                      <div className="queue-item-meta">
+                        <strong className="queue-item-title">{track.title}</strong>
+                        <span className="queue-item-artist">{track.artist}</span>
+                      </div>
+                      <span className="queue-time">{formatDuration(track.durationMs)}</span>
+                      <IconButton
+                        label="Remove track from queue"
+                        icon={<X size={14} />}
+                        size="sm"
+                        variant="ghost"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onRemoveTrack?.(track.id, index);
+                        }}
+                      />
                     </div>
-                    <span className="queue-time">{formatDuration(track.durationMs)}</span>
-                    <IconButton
-                      label="Remove track from queue"
-                      icon={<X size={14} />}
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => onRemoveTrack?.(track.id)}
-                    />
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
               <div className="queue-blank-slate">
@@ -158,7 +214,7 @@ export function QueueDrawer({
                 </div>
                 <h3>Your queue is empty</h3>
                 <p>
-                  As you play music or add albums and playlists to queue, they will appear here in listening order.
+                  As you play music or add tracks and albums to queue, they will appear here in listening order.
                 </p>
                 <Button
                   variant="outline"
@@ -176,11 +232,10 @@ export function QueueDrawer({
         {/* Footer */}
         <div className="drawer-footer">
           <span className="drawer-footer-text">
-            Queue persistence is maintained in Rust domain state (Milestone 3).
+            Queue persistence is authoritative in SQLite and native audio engine.
           </span>
         </div>
       </div>
     </aside>
   );
 }
-

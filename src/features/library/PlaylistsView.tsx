@@ -11,18 +11,22 @@ import { Badge } from '../../components/Badge';
 import { Modal } from '../../components/Modal';
 import { EmptyState } from '../../components/EmptyState';
 import { PlaylistDetailModal } from './PlaylistDetailModal';
-import type { Playlist } from '../../lib/types';
+import type { Playlist, Track } from '../../lib/types';
 
 interface PlaylistsViewProps {
   playlists: Playlist[];
   onCreatePlaylist: (name: string, description: string) => void;
+  onDeletePlaylist?: (playlistId: string) => void;
   isBackendReady: boolean;
+  onPlayTracks?: (tracks: Track[], startIndex?: number, shuffle?: boolean) => void;
 }
 
 export function PlaylistsView({
   playlists,
   onCreatePlaylist,
+  onDeletePlaylist,
   isBackendReady,
+  onPlayTracks,
 }: PlaylistsViewProps) {
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -92,7 +96,7 @@ export function PlaylistsView({
                     {playlist.sourceProvider ? playlist.sourceProvider.toUpperCase() : 'LOCAL'}
                   </Badge>
                   <span className="playlist-track-badge">
-                    {playlist.trackCount} tracks
+                    {playlist.trackCount} {playlist.trackCount === 1 ? 'track' : 'tracks'}
                   </span>
                 </div>
 
@@ -115,7 +119,7 @@ export function PlaylistsView({
           glyph="選"
           eyebrow="YOUR PLAYLISTS"
           title={<>No playlists created yet<br /><em>ready for your curation.</em></>}
-          description="Build playlists to organize your favorite albums, artists, and tracks. Everything is stored locally on your device with complete privacy."
+          description="Build playlists to organize your favorite albums, artists, and tracks. Everything is stored locally on your device in SQLite with complete privacy."
           actions={
             <Button
               variant="primary"
@@ -126,7 +130,7 @@ export function PlaylistsView({
               Create First Playlist
             </Button>
           }
-          footnote="Session playlists are maintained in application state. Permanent SQLite persistence connects in Milestone 2. No telemetry or remote cloud syncing."
+          footnote="Playlists are stored in your device's persistent SQLite database. No telemetry or remote cloud syncing."
         />
       )}
 
@@ -189,8 +193,9 @@ export function PlaylistsView({
         isOpen={!!selectedPlaylist}
         onClose={() => setSelectedPlaylist(null)}
         isBackendReady={isBackendReady}
+        onDeletePlaylist={onDeletePlaylist}
+        onPlayTracks={onPlayTracks}
       />
     </section>
   );
 }
-

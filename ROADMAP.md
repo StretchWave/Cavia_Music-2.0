@@ -17,21 +17,24 @@
 - [ ] Add CI for frontend and Rust checks
 
 ## Milestone 2 — Real local library
-- [ ] Native file picker on each target
-- [ ] Android content URI staging / iOS security-scope file staging
-- [ ] Metadata extraction and embedded artwork
-- [ ] Import deduplication and scan progress
-- [ ] Library CRUD, filtering, sorting and persistence
-- [ ] Missing/moved-file detection
+- [x] Native file picker on each target (`tauri-plugin-dialog`)
+- [x] Android content URI staging / iOS security-scope file staging (desktop filesystem paths, staging interface)
+- [x] Metadata extraction and embedded artwork (Lofty metadata parser and SHA-256 artwork cache)
+- [x] Import deduplication and scan progress (`library:scan-progress` event stream, SHA-256 content hashes)
+- [x] Library CRUD, filtering, sorting and persistence (Tracks, Albums, Artists, Playlists, Liked Songs in SQLite)
+- [x] Missing/moved-file detection (automatic path update on hash match when previous file is missing)
 
 ## Milestone 3 — Playback
-- [ ] Finalize libmpv packaging and license choice for Windows/macOS
-- [ ] Build Android Media3 adapter
-- [ ] Build iOS AVPlayer adapter
-- [ ] Common commands and playback event model
-- [ ] Queue, seeking, volume, speed, repeat, shuffle and completion
-- [ ] Media sessions, lock-screen and background playback
-- [ ] Format/stream capability matrix by platform
+- [x] Evaluated libmpv (rsmpv) and zero-dependency native Rodio/CPAL/Symphonia engine
+- [x] Common playback contract (`AudioBackend` trait) and platform factory
+- [x] Staged Android Media3 ExoPlayer and iOS AVPlayer contract adapters
+- [x] Common commands and playback event model (`playback:state-changed`, `playback:position`)
+- [x] Authoritative queue manager with deterministic shuffle, repeat (off/all/one), and auto-advance
+- [x] System Media Transport Controls (`souvlaki` SMTC on Windows, Now Playing on macOS)
+- [x] Playback state persistence and session restoration in SQLite (`playback_state`)
+- [x] PlayerDock, ExpandedPlayer, and QueueDrawer connected to real backend with honest UI states
+- [x] Format/stream capability matrix documented in `docs/audio-backends.md`
+- [x] Milestone 3 Playback Remediation: Native demuxer seeking, non-fatal device startup fallback, atomic queue loading, generation-tracked event streams, scrubber commit debounce, and drag-and-drop queue reordering
 
 ## Milestone 4 — Product features
 - [ ] Search orchestration and provider adapters

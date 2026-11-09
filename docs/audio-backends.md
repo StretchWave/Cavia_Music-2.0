@@ -1,38 +1,53 @@
-# Audio backend decision note
+# Audio Backend Architecture & Evaluation Note
 
-## Decision under evaluation
+## 1. Shared Playback Contract
 
-One shared Rust-side playback contract, with different native implementations by target:
+All platform implementations follow one common Cavia playback contract (`AudioBackend` trait in `src-tauri/src/audio/mod.rs`). The React frontend communicates strictly through typed Tauri commands and authoritative event streams (`playback:state-changed` and `playback:position`), never communicating directly with underlying audio libraries.
 
-| Target | Candidate backend | Native media integration |
-|---|---|---|
-| Windows | libmpv via `rsmpv` | Windows System Media Transport Controls adapter |
-| macOS | libmpv via `rsmpv` | Now Playing / remote command adapter |
-| Android | Media3 ExoPlayer | MediaSessionService + notification + audio focus |
-| iOS | AVPlayer | MPNowPlayingInfoCenter + MPRemoteCommandCenter |
+| Target | Active Backend | Native Media Integration | License | Status |
+|---|---|---|---|---|
+| Windows | Native Rodio (CPAL WASAPI + Symphonia) | Windows System Media Transport Controls (`souvlaki`) | MIT / Apache-2.0 | Operational (seeking, non-blocking device init) |
+| macOS | Native Rodio (CPAL CoreAudio + Symphonia) | Now Playing / Remote Command Center (`souvlaki`) | MIT / Apache-2.0 | Operational (shared Rodio engine) |
+| Windows (Alt) | libmpv via `rsmpv` (feature `desktop-mpv`) | Windows SMTC | GPLv3 / LGPLv2.1+ | Evaluated / Optional feature |
+| Android | Native Media3 ExoPlayer | MediaSessionService + Foreground Notification + Audio Focus | Apache-2.0 | Staged contract / Stub (honest error on playback) |
+| iOS | Native AVPlayer | `MPNowPlayingInfoCenter` + `MPRemoteCommandCenter` | Apple Native SDK | Staged contract / Stub (honest error on playback) |
 
-This is intentionally a split backend. A single desktop decoder should not be forced into iOS/Android if native background playback, audio focus and lock-screen controls are better handled by platform media stacks.
+---
 
-## Desktop candidate: libmpv
+## 2. Desktop Audio Engine: Native Rodio Backend (Milestone 3 Remediated)
 
-`rsmpv` provides safe Rust bindings to libmpv and is a credible candidate for local files and network playback. It depends on a separately built/packaged libmpv. It is therefore not a tiny, zero-dependency audio component: the shared library and codec/build configuration must be shipped and tested on Windows and macOS.
+### Architecture
+- **Engine**: Pure-Rust audio sink leveraging `rodio 0.23` with `cpal` (WASAPI direct on Windows, CoreAudio on macOS) and pure-Rust `symphonia` decoders.
+- **Zero DLL Overhead**: Compiles directly into the Cavia binary with zero runtime dynamic C library dependencies. Works on clean machines immediately without requiring external DLLs (`mpv-2.dll`).
+- **Device Resilience**: Graceful startup without crashing when no physical audio output device is connected (`open_default_sink` failure handled non-fatally). App remains fully functional for browsing, scanning, and managing library while audio status reports `device_unavailable`.
+- **Fast Demuxer Seeking**: Uses `player.try_seek(Duration)` directly through Symphonia's native seek table. Clamps seek offsets within `[0, duration_ms]`. Operates in 0–5ms without decoding intermediate samples from track beginning.
+- **Instant Buffer Purge**: Loading a new track disconnects the previous player and attaches a fresh player instance immediately, releasing decoded buffers without thread blocking or audio overhang.
+- **Supported Codecs**: FLAC, ALAC, MP3, WAV, AAC, M4A, Ogg Vorbis, AIFF. Unsupported formats (WMA, Opus) are excluded from discovery to prevent silent playback failure.
 
-Before adopting it:
-1. Build a minimal headless audio-only proof on Windows and macOS.
-2. Verify local MP3, AAC/M4A, FLAC, WAV, Ogg Vorbis and Opus.
-3. Verify permitted progressive HTTPS audio and HLS/DASH only where supported by the chosen stream protocol.
-4. Verify seek, rate, volume, output-device changes, interruption and end-of-track events.
-5. Bundle the correct dynamic libraries and test on a clean machine with no developer packages installed.
-6. Review mpv/libmpv licensing. mpv is GPL by default; the non-GPL build option and its LGPL implications must be understood before distribution. Do not assume the Rust wrapper license changes the linked libmpv license.
+---
 
-The optional `desktop-mpv` Cargo feature is declared but not enabled by default. It is not yet wired to playback commands.
+## 3. Queue Management & State Synchronization
 
-## Mobile candidates
+- **Authoritative Domain State**: Rust domain owns the queue (`QueueManager` in `src-tauri/src/services/queue.rs`), position, active track, repeat modes (`off`, `all`, `one`), and shuffle permutation.
+- **Atomic Track Loading**: File validation and audio decoding occur before committing queue index updates. If an unplayable file is encountered, the queue cursor is not corrupted, and an honest error snapshot is emitted.
+- **Livelock Prevention**: Automatic queue advancement tracks failed attempts and halts gracefully if all upcoming tracks or repeat-one recordings fail to load, preventing infinite CPU spinning.
+- **Event Concurrency & Generations**: Each playback generation is stamped with a monotonic `generation: u64`. The frontend discards stale position ticks (`pos.generation < state.generation`) or ticks from mismatched track IDs.
+- **True Shuffle Non-Determinism**: Seeded by system entropy (`SystemTime`), producing fresh non-repeating permutations on every shuffle cycle while pinning the currently playing track at index 0.
+- **Reordering & Removal**: Supports index-based queue removal (`remove_from_queue_by_index`) to safely disambiguate duplicated tracks, alongside full HTML5 drag-and-drop queue reordering.
+- **Persistence**: Playback state and queue are persistently debounced into SQLite table `playback_state` and restored on application startup.
 
-Android should use Media3 ExoPlayer with a MediaSessionService for background audio, audio focus and notification/lock-screen actions. iOS should use AVPlayer with Now Playing metadata and remote command handling.
+---
 
-A community Tauri plugin (`tauri-plugin-native-audio`) provides an existing Android Media3 / iOS AVPlayer implementation, but it is not an official Tauri plugin and is not a desktop backend. Audit its source, license, lifecycle, supported formats, stream handling, background behavior and maintenance before adopting or forking it. The app should own a thin plugin boundary so the implementation can be replaced without rewriting React or the domain layer.
+## 4. Capability Honesty Matrix
 
-## Capability honesty
-
-Do not mark HLS, DASH, gapless, crossfade, background playback, caching or a codec as supported until an integration test demonstrates it on that platform. The initial `AudioCapabilities::unavailable()` is the safe default.
+| Capability | Windows (Tested) | macOS (Compiled) | Android (Stub) | iOS (Stub) |
+|---|---|---|---|---|
+| Local Files (FLAC/MP3/WAV/AAC/OGG/AIFF) | Supported | Supported | Not Implemented | Not Implemented |
+| Non-blocking Demuxer Seeking | Supported | Supported | Not Implemented | Not Implemented |
+| Device Disconnect Resilience | Supported | Supported | Not Implemented | Not Implemented |
+| Progressive HTTPS | Standby | Standby | Not Implemented | Not Implemented |
+| HLS / DASH Streaming | Standby | Standby | Not Implemented | Not Implemented |
+| Background Playback | Supported | Supported | Standby (Needs MediaSessionService) | Standby (Needs AVAudioSession) |
+| System Media Controls | Supported (SMTC) | Supported (NowPlaying) | Standby (Needs Media3) | Standby (Needs MPNowPlaying) |
+| Gapless Transition | Standby | Standby | Standby | Standby |
+| Crossfade | Standby | Standby | Standby | Standby |

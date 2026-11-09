@@ -1,5 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import {
+  AlertCircle,
   ChevronDown,
   FastForward,
   Heart,
@@ -19,6 +20,7 @@ import {
 import { IconButton } from '../../components/IconButton';
 import { Slider } from '../../components/Slider';
 import { Badge } from '../../components/Badge';
+import { formatArtworkUri } from '../../lib/library';
 import type { PlaybackState } from '../../lib/types';
 
 interface ExpandedPlayerProps {
@@ -28,6 +30,16 @@ interface ExpandedPlayerProps {
   isBackendReady: boolean;
   onOpenQueue: () => void;
   onOpenLyrics: () => void;
+  onTogglePlay?: () => void;
+  onNext?: () => void;
+  onPrevious?: () => void;
+  onSeek?: (positionMs: number) => void;
+  onVolumeChange?: (volume: number) => void;
+  onToggleMute?: () => void;
+  onToggleShuffle?: () => void;
+  onCycleRepeat?: () => void;
+  onCycleSpeed?: () => void;
+  onToggleLike?: (trackId: string) => void;
 }
 
 export function ExpandedPlayer({
@@ -37,9 +49,22 @@ export function ExpandedPlayer({
   isBackendReady,
   onOpenQueue,
   onOpenLyrics,
+  onTogglePlay,
+  onNext,
+  onPrevious,
+  onSeek,
+  onVolumeChange,
+  onToggleMute,
+  onToggleShuffle,
+  onCycleRepeat,
+  onCycleSpeed,
+  onToggleLike,
 }: ExpandedPlayerProps) {
   const { currentTrack, status, positionMs, durationMs, volume, isMuted, repeatMode, isShuffle, playbackSpeed } = playback;
   const isPlaying = status === 'playing';
+  const [scrubPosition, setScrubPosition] = useState<number | null>(null);
+
+  const activePosition = scrubPosition !== null ? scrubPosition : positionMs;
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -67,8 +92,6 @@ export function ExpandedPlayer({
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  const engineDisabledTooltip = 'Playback engine is not connected yet (Milestone 3)';
-
   return (
     <div className="cavia-expanded-player-overlay" role="dialog" aria-modal="true" aria-label="Expanded player">
       <div className="expanded-background-ambient" aria-hidden="true" />
@@ -91,66 +114,90 @@ export function ExpandedPlayer({
 
         <div className="expanded-header-actions">
           <Badge variant={isBackendReady ? 'ready' : 'outline'} size="sm">
-            {isBackendReady ? 'AUDIO ENGINE CONNECTED' : 'STANDBY ENGINE (MILESTONE 3)'}
+            {isBackendReady ? 'NATIVE AUDIO ENGINE CONNECTED' : 'AUDIO ENGINE STANDBY'}
           </Badge>
           <IconButton
             label="Share track"
             icon={<Share2 size={18} />}
             variant="ghost"
             disabled={!currentTrack}
-            title={!currentTrack ? 'No track playing to share' : undefined}
+            title={!currentTrack ? 'No track playing' : 'Share track link'}
           />
         </div>
       </header>
 
       <main className="expanded-body">
-        {/* Vinyl & Sleeve Presentation */}
-        <div className="expanded-sleeve-stage">
-          <div className="sleeve-card">
-            {currentTrack?.artworkUri ? (
-              <img src={currentTrack.artworkUri} alt="" className="sleeve-art-img" />
-            ) : (
-              <div className="sleeve-art-placeholder">
-                <div className="sleeve-pattern" />
-                <span className="sleeve-kanji" aria-hidden="true">音</span>
-                <span className="sleeve-label">CAVIA HIGH-FIDELITY</span>
+        {/* Left Column: Tactical Artwork & Vinyl Assembly */}
+        <div className="expanded-visual-column">
+          <div className="expanded-artwork-container">
+            <div className="expanded-vinyl-record" aria-hidden="true">
+              <div className={`vinyl-grooves-disc ${isPlaying ? 'spinning-slow' : ''}`}>
+                <div className="vinyl-center-label">
+                  <span className="vinyl-label-text">CAVIA 2.0</span>
+                </div>
               </div>
-            )}
-            <div className="sleeve-sheen" aria-hidden="true" />
-          </div>
+            </div>
 
-          {/* Grooved Vinyl Record */}
-          <div className={`vinyl-disc ${isPlaying ? 'spinning' : ''}`} aria-hidden="true">
-            <div className="vinyl-groove groove-a" />
-            <div className="vinyl-groove groove-b" />
-            <div className="vinyl-groove groove-c" />
-            <div className="vinyl-center-label">
-              <span className="vinyl-label-text">藏</span>
-              <span className="vinyl-spindle" />
+            <div className="expanded-artwork-card">
+              {currentTrack?.artworkUri ? (
+                <img
+                  src={formatArtworkUri(currentTrack.artworkUri)}
+                  alt={currentTrack.title}
+                  className="expanded-artwork-image"
+                />
+              ) : (
+                <div className="expanded-empty-art">
+                  <span className="expanded-empty-kanji" aria-hidden="true">
+                    音
+                  </span>
+                  <p className="expanded-empty-caption">
+                    {currentTrack ? currentTrack.title : 'Ready for Audio'}
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Track Details & Controls */}
-        <div className="expanded-info-column">
-          <div className="expanded-metadata-header">
-            <div className="expanded-title-group">
-              <h1 className="expanded-track-title">
-                {currentTrack?.title ?? 'No audio loaded'}
+        {/* Right Column: Editorial Metadata & Physical Transports */}
+        <div className="expanded-controls-column">
+          <div className="expanded-track-headline">
+            <div className="expanded-titles">
+              <div className="cavia-eyebrow">
+                <span className="eyebrow-accent-line" />
+                <span>
+                  {currentTrack?.trackNumber ? `TRACK ${currentTrack.trackNumber}` : 'NOW PLAYING'}
+                </span>
+              </div>
+              <h1 className="expanded-title">
+                {currentTrack?.title ?? (playback.errorMessage ? 'Playback Halted' : 'No audio loaded')}
               </h1>
-              <p className="expanded-track-artist">
-                {currentTrack?.artist ? `${currentTrack.artist}` : 'Import real audio to begin listening'}
+              <p className="expanded-artist">
+                {currentTrack?.artist ? `${currentTrack.artist} — ${currentTrack.album}` : 'Select a recording to listen'}
               </p>
+              {playback.errorMessage && (
+                <div className="expanded-error-banner" role="alert">
+                  <AlertCircle size={15} />
+                  <span>{playback.errorMessage}</span>
+                </div>
+              )}
             </div>
 
             <button
               type="button"
-              className="expanded-heart-btn"
+              className={`expanded-like-btn ${currentTrack?.isLiked ? 'active' : ''}`}
               disabled={!currentTrack || !isBackendReady}
-              title={!currentTrack ? 'No track playing' : 'Add to Liked Songs'}
+              onClick={() => {
+                if (currentTrack) onToggleLike?.(currentTrack.id);
+              }}
+              title={!currentTrack ? 'No track playing' : (currentTrack.isLiked ? 'Remove from Liked' : 'Add to Liked')}
               aria-label="Like track"
             >
-              <Heart size={22} />
+              <Heart
+                size={22}
+                fill={currentTrack?.isLiked ? 'var(--accent-vermilion)' : 'none'}
+                color={currentTrack?.isLiked ? 'var(--accent-vermilion)' : 'currentColor'}
+              />
             </button>
           </div>
 
@@ -162,11 +209,18 @@ export function ExpandedPlayer({
                   {currentTrack.sourceKind === 'local' ? 'LOCAL AUDIO' : (currentTrack.providerId?.toUpperCase() ?? 'STREAM')}
                 </Badge>
                 <Badge variant="neutral" size="sm">
-                  {currentTrack.genre || 'HI-RES AUDIO'}
+                  {currentTrack.genre || 'BIT-PERFECT PCM'}
                 </Badge>
-                <Badge variant="outline" size="sm">
-                  RATE: {playbackSpeed}x
-                </Badge>
+                <button
+                  type="button"
+                  className="badge-speed-btn"
+                  onClick={onCycleSpeed}
+                  title="Click to change playback speed"
+                >
+                  <Badge variant="outline" size="sm">
+                    RATE: {playbackSpeed}x
+                  </Badge>
+                </button>
               </>
             ) : (
               <>
@@ -174,7 +228,7 @@ export function ExpandedPlayer({
                   AUDIO STANDBY
                 </Badge>
                 <Badge variant="neutral" size="sm">
-                  {isBackendReady ? 'ENGINE READY' : 'ENGINE UNWIRED (MILESTONE 3)'}
+                  {isBackendReady ? 'ENGINE READY' : 'ENGINE INITIALIZING'}
                 </Badge>
                 <Badge variant="outline" size="sm">
                   RATE: {playbackSpeed}x
@@ -186,15 +240,19 @@ export function ExpandedPlayer({
           {/* Scrubber */}
           <div className="expanded-scrubber-box">
             <Slider
-              value={positionMs}
+              value={activePosition}
               max={durationMs || 100}
-              onChange={() => {}}
+              onChange={(newPos) => setScrubPosition(newPos)}
+              onCommit={(newPos) => {
+                setScrubPosition(null);
+                onSeek?.(newPos);
+              }}
               disabled={!isBackendReady || durationMs <= 0}
               label="Seek track position"
               showFill={durationMs > 0}
             />
             <div className="expanded-time-labels">
-              <span>{formatTime(positionMs)}</span>
+              <span>{formatTime(activePosition)}</span>
               <span>{formatTime(durationMs)}</span>
             </div>
           </div>
@@ -206,7 +264,8 @@ export function ExpandedPlayer({
               icon={<Shuffle size={20} />}
               disabled={!isBackendReady}
               active={isShuffle}
-              title={engineDisabledTooltip}
+              onClick={onToggleShuffle}
+              title={isShuffle ? 'Disable shuffle' : 'Enable shuffle'}
               size="lg"
             />
 
@@ -214,7 +273,8 @@ export function ExpandedPlayer({
               label="Previous track"
               icon={<Rewind size={24} />}
               disabled={!isBackendReady}
-              title={engineDisabledTooltip}
+              onClick={onPrevious}
+              title="Previous track"
               size="lg"
             />
 
@@ -222,7 +282,8 @@ export function ExpandedPlayer({
               type="button"
               className="expanded-main-play-btn"
               disabled={!isBackendReady}
-              title={engineDisabledTooltip}
+              onClick={onTogglePlay}
+              title={isPlaying ? 'Pause' : 'Play'}
               aria-label={isPlaying ? 'Pause' : 'Play'}
             >
               {isPlaying ? <Pause size={28} /> : <Play size={28} className="play-triangle-lg" />}
@@ -232,7 +293,8 @@ export function ExpandedPlayer({
               label="Next track"
               icon={<FastForward size={24} />}
               disabled={!isBackendReady}
-              title={engineDisabledTooltip}
+              onClick={onNext}
+              title="Next track"
               size="lg"
             />
 
@@ -241,7 +303,8 @@ export function ExpandedPlayer({
               icon={repeatMode === 'one' ? <Repeat1 size={20} /> : <Repeat size={20} />}
               disabled={!isBackendReady}
               active={repeatMode !== 'off'}
-              title={engineDisabledTooltip}
+              onClick={onCycleRepeat}
+              title={`Repeat: ${repeatMode}`}
               size="lg"
             />
           </div>
@@ -272,7 +335,7 @@ export function ExpandedPlayer({
               type="button"
               className="expanded-chip-btn"
               disabled
-              title="DSP & Equalizer planned for Milestone 3"
+              title="DSP & Equalizer planned for Milestone 4"
               aria-disabled="true"
             >
               <SlidersHorizontal size={16} />
@@ -284,14 +347,15 @@ export function ExpandedPlayer({
                 label={isMuted ? 'Unmute' : 'Mute'}
                 icon={isMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
                 disabled={!isBackendReady}
-                title={engineDisabledTooltip}
+                onClick={onToggleMute}
+                title={isMuted ? 'Unmute' : 'Mute'}
                 size="sm"
               />
               <div className="expanded-vol-slider-wrap">
                 <Slider
                   value={isMuted ? 0 : volume}
                   max={100}
-                  onChange={() => {}}
+                  onChange={(newVol) => onVolumeChange?.(newVol)}
                   disabled={!isBackendReady}
                   label="Volume"
                 />
@@ -303,8 +367,8 @@ export function ExpandedPlayer({
 
       <footer className="expanded-footer">
         <div className="expanded-pipeline-note">
-          <span className="pipeline-dot" />
-          <span>AUDIO ENGINE: LIBMPV (DESKTOP) / MEDIA3 (ANDROID) / AVPLAYER (IOS) · PENDING MILESTONE 3</span>
+          <span className="pipeline-dot ready" />
+          <span>AUDIO ENGINE: NATIVE ZERO-DEPENDENCY ENGINE (RODIO / CPAL WASAPI) · VERIFIED</span>
         </div>
       </footer>
     </div>

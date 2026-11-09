@@ -1,14 +1,38 @@
 import { Heart, Play, Shuffle } from 'lucide-react';
 import { EmptyState } from '../../components/EmptyState';
 import { Button } from '../../components/Button';
+import { formatArtworkUri } from '../../lib/library';
 import type { Track } from '../../lib/types';
 
 interface LikedTracksViewProps {
   tracks: Track[];
   isBackendReady: boolean;
+  onToggleLike?: (trackId: string) => void;
+  onPlayTrack?: (trackId: string) => void;
+  onPlayAll?: () => void;
+  onShuffleAll?: () => void;
+  currentTrackId?: string;
+  isPlaying?: boolean;
 }
 
-export function LikedTracksView({ tracks, isBackendReady }: LikedTracksViewProps) {
+export function LikedTracksView({
+  tracks,
+  isBackendReady,
+  onToggleLike,
+  onPlayTrack,
+  onPlayAll,
+  onShuffleAll,
+  currentTrackId,
+  isPlaying,
+}: LikedTracksViewProps) {
+  const formatTime = (ms: number) => {
+    if (!ms || ms <= 0) return '0:00';
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  };
+
   return (
     <section className="cavia-subpage liked-page">
       <div className="subpage-header">
@@ -32,7 +56,8 @@ export function LikedTracksView({ tracks, isBackendReady }: LikedTracksViewProps
               size="md"
               icon={<Play size={16} />}
               disabled={!isBackendReady}
-              title={!isBackendReady ? 'Audio engine standby' : undefined}
+              onClick={onPlayAll}
+              title="Play all liked tracks"
             >
               Play All
             </Button>
@@ -41,7 +66,8 @@ export function LikedTracksView({ tracks, isBackendReady }: LikedTracksViewProps
               size="md"
               icon={<Shuffle size={16} />}
               disabled={!isBackendReady}
-              title={!isBackendReady ? 'Audio engine standby' : undefined}
+              onClick={onShuffleAll}
+              title="Shuffle liked tracks"
             >
               Shuffle
             </Button>
@@ -57,35 +83,72 @@ export function LikedTracksView({ tracks, isBackendReady }: LikedTracksViewProps
             <span className="col-artist">ARTIST</span>
             <span className="col-album">ALBUM</span>
             <span className="col-duration">TIME</span>
+            <span className="col-action" />
           </div>
           <div className="tracks-table-body">
-            {tracks.map((track, i) => (
-              <div key={track.id} className="track-row">
-                <span className="col-num">{i + 1}</span>
-                <span className="col-title">{track.title}</span>
-                <span className="col-artist">{track.artist}</span>
-                <span className="col-album">{track.album}</span>
-                <span className="col-duration">
-                  {Math.floor(track.durationMs / 60000)}:
-                  {Math.floor((track.durationMs % 60000) / 1000)
-                    .toString()
-                    .padStart(2, '0')}
-                </span>
-              </div>
-            ))}
+            {tracks.map((track, i) => {
+              const isCurrent = currentTrackId === track.id;
+              return (
+                <div
+                  key={track.id}
+                  className={`track-row ${isCurrent ? 'active' : ''}`}
+                  tabIndex={0}
+                  role="row"
+                  onClick={() => onPlayTrack?.(track.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      onPlayTrack?.(track.id);
+                    }
+                  }}
+                >
+                  <span className="col-num">
+                    {isCurrent && isPlaying ? (
+                      <span className="track-playing-indicator" title="Playing">▶</span>
+                    ) : (
+                      track.trackNumber || i + 1
+                    )}
+                  </span>
+                  <span className="col-title">
+                    {track.artworkUri && (
+                      <img
+                        src={formatArtworkUri(track.artworkUri)}
+                        alt=""
+                        className="track-row-art"
+                        loading="lazy"
+                      />
+                    )}
+                    <span className="track-title-text">{track.title}</span>
+                  </span>
+                  <span className="col-artist">{track.artist || 'Unknown Artist'}</span>
+                  <span className="col-album">{track.album || 'Unknown Album'}</span>
+                  <span className="col-duration">{formatTime(track.durationMs)}</span>
+                  <span className="col-action" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      className="track-like-inline-btn active"
+                      onClick={() => onToggleLike?.(track.id)}
+                      aria-label="Remove from liked tracks"
+                      title="Remove from Liked"
+                    >
+                      <Heart size={15} fill="var(--accent-vermilion)" color="var(--accent-vermilion)" />
+                    </button>
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
       ) : (
         <EmptyState
-          icon={<Heart size={28} className="text-vermilion" />}
-          glyph="愛"
-          eyebrow="YOUR FAVORITES"
-          title={<>Songs you love<br /><em>will gather here.</em></>}
-          description="Click the heart icon on any track in your library or in the player dock to save it here. Pinned favorites are stored securely in your local SQLite database."
-          footnote="Favorites can be exported as M3U8 playlists or synced to external devices."
+          icon={<Heart size={28} />}
+          glyph="好"
+          eyebrow="FAVORITES ARCHIVE"
+          title={<>Your liked list<br /><em>is currently empty.</em></>}
+          description="Click the heart icon on any track row, player dock, or expanded player to collect your essential listening catalog."
+          footnote="Liked songs are stored persistently in SQLite and work across all sessions."
         />
       )}
     </section>
   );
 }
-

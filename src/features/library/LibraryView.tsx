@@ -18,6 +18,8 @@ interface LibraryViewProps {
   playlists: Playlist[];
   onNavigate: (page: Page) => void;
   onOpenCreatePlaylist: () => void;
+  onImportFolder?: () => void;
+  isScanning?: boolean;
 }
 
 export function LibraryView({
@@ -27,7 +29,11 @@ export function LibraryView({
   playlists,
   onNavigate,
   onOpenCreatePlaylist,
+  onImportFolder,
+  isScanning,
 }: LibraryViewProps) {
+  const hasTracks = (summary?.tracks ?? 0) > 0;
+
   return (
     <div className="cavia-library-page">
       {/* Editorial Hero Header */}
@@ -50,10 +56,11 @@ export function LibraryView({
               variant="primary"
               size="md"
               icon={<FolderPlus size={16} />}
-              disabled
-              title="Native file staging & Lofty metadata scanning are planned for Milestone 2"
+              onClick={onImportFolder}
+              disabled={isScanning}
+              title="Select a directory to scan and import audio files into your local library"
             >
-              Add Music Folders <span className="coming-tag">MILESTONE 2</span>
+              {isScanning ? 'Scanning Directory...' : 'Add Music Folders'}
             </Button>
 
             <Button
@@ -194,56 +201,120 @@ export function LibraryView({
         </section>
       )}
 
-      {/* Empty State / Philosophy Banner */}
-      <section className="empty-library-showcase">
-        <div className="showcase-art-orbit" aria-hidden="true">
-          <div className="orbit-ring ring-1" />
-          <div className="orbit-ring ring-2" />
-          <div className="orbit-ring ring-3" />
-          <div className="vinyl-centerpiece">
-            <div className="vinyl-groove g-1" />
-            <div className="vinyl-groove g-2" />
-            <div className="vinyl-groove g-3" />
-            <div className="vinyl-label-disc">
-              <span className="vinyl-label-kanji">藏</span>
-              <span className="vinyl-hole" />
+      {/* Empty State / Philosophy Banner or Active Archive Summary */}
+      {!hasTracks ? (
+        <section className="empty-library-showcase">
+          <div className="showcase-art-orbit" aria-hidden="true">
+            <div className="orbit-ring ring-1" />
+            <div className="orbit-ring ring-2" />
+            <div className="orbit-ring ring-3" />
+            <div className="vinyl-centerpiece">
+              <div className="vinyl-groove g-1" />
+              <div className="vinyl-groove g-2" />
+              <div className="vinyl-groove g-3" />
+              <div className="vinyl-label-disc">
+                <span className="vinyl-label-kanji">藏</span>
+                <span className="vinyl-hole" />
+              </div>
+            </div>
+            <div className="ambient-glint glint-top" />
+            <div className="ambient-glint glint-bottom" />
+          </div>
+
+          <div className="showcase-text-block">
+            <div className="cavia-eyebrow">
+              <Sparkles size={13} />
+              <span>A BLANK CANVAS, NOT A BLANK EXPERIENCE</span>
+            </div>
+            <h2 className="showcase-heading">
+              Your library is<br />
+              <em>yours to shape.</em>
+            </h2>
+            <p className="showcase-description">
+              Cavia doesn't invent a catalogue for you. Bring in your own music and build a personal collection that honors your taste. No artificial recommendation engines, no DRM lockdowns, no telemetry.
+            </p>
+
+            <div className="showcase-badges-row">
+              <Badge variant="outline" size="sm">
+                FLAC & MP3
+              </Badge>
+              <Badge variant="outline" size="sm">
+                HI-RES READY
+              </Badge>
+              <Badge variant="outline" size="sm">
+                LOCAL SQLITE
+              </Badge>
+            </div>
+
+            <div className="showcase-footnote">
+              <span className="footnote-mark" />
+              <span>No demo tracks. No fabricated playlists. Just your music.</span>
             </div>
           </div>
-          <div className="ambient-glint glint-top" />
-          <div className="ambient-glint glint-bottom" />
-        </div>
-
-        <div className="showcase-text-block">
-          <div className="cavia-eyebrow">
-            <Sparkles size={13} />
-            <span>A BLANK CANVAS, NOT A BLANK EXPERIENCE</span>
-          </div>
-          <h2 className="showcase-heading">
-            Your library is<br />
-            <em>yours to shape.</em>
-          </h2>
-          <p className="showcase-description">
-            Cavia doesn't invent a catalogue for you. Bring in your own music and build a personal collection that honors your taste. No artificial recommendation engines, no DRM lockdowns, no telemetry.
-          </p>
-
-          <div className="showcase-badges-row">
-            <Badge variant="outline" size="sm">
-              FLAC & MP3
-            </Badge>
-            <Badge variant="outline" size="sm">
-              HI-RES READY
-            </Badge>
-            <Badge variant="outline" size="sm">
-              LOCAL SQLITE
-            </Badge>
+        </section>
+      ) : (
+        <section className="empty-library-showcase populated-showcase">
+          <div className="showcase-art-orbit" aria-hidden="true">
+            <div className="orbit-ring ring-1" />
+            <div className="orbit-ring ring-2" />
+            <div className="orbit-ring ring-3" />
+            <div className="vinyl-centerpiece">
+              <div className="vinyl-groove g-1" />
+              <div className="vinyl-groove g-2" />
+              <div className="vinyl-groove g-3" />
+              <div className="vinyl-label-disc">
+                <span className="vinyl-label-kanji">藏</span>
+                <span className="vinyl-hole" />
+              </div>
+            </div>
+            <div className="ambient-glint glint-top" />
+            <div className="ambient-glint glint-bottom" />
           </div>
 
-          <div className="showcase-footnote">
-            <span className="footnote-mark" />
-            <span>No demo tracks. No fabricated playlists. Just your music.</span>
+          <div className="showcase-text-block">
+            <div className="cavia-eyebrow">
+              <Sparkles size={13} />
+              <span>LOCAL MUSIC REPOSITORY ONLINE</span>
+            </div>
+            <h2 className="showcase-heading">
+              Your sound archive is<br />
+              <em>ready for listening.</em>
+            </h2>
+            <p className="showcase-description">
+              {summary?.tracks.toLocaleString()} local recordings indexed directly in SQLite with high-precision tag extraction. Your files remain untouched and completely offline.
+            </p>
+
+            <div className="showcase-badges-row">
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => onNavigate('tracks')}
+              >
+                Browse All Tracks
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onNavigate('albums')}
+              >
+                View Albums
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onNavigate('artists')}
+              >
+                View Artists
+              </Button>
+            </div>
+
+            <div className="showcase-footnote">
+              <span className="footnote-mark" />
+              <span>Bit-perfect offline storage · No cloud telemetry.</span>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
     </div>
   );
 }

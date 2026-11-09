@@ -21,11 +21,18 @@ pub async fn app_health(state: State<'_, AppState>) -> Result<AppHealth, String>
 
     let database_connected = row.try_get::<i64, _>("ok").unwrap_or_default() == 1;
 
+    let audio_backend = {
+        if let Ok(svc) = state.playback.lock() {
+            svc.backend_health_status()
+        } else {
+            "error"
+        }
+    };
+
     Ok(AppHealth {
         app_version: env!("CARGO_PKG_VERSION"),
         database_connected,
-        // Deliberately honest: no player adapter is wired into this foundation yet.
-        audio_backend: "not_integrated",
+        audio_backend,
         platform: std::env::consts::OS,
     })
 }

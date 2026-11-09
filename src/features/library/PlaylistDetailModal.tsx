@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import {
   Calendar,
   Disc3,
@@ -9,6 +10,7 @@ import {
 import { Modal } from '../../components/Modal';
 import { Button } from '../../components/Button';
 import { Badge } from '../../components/Badge';
+import { formatArtworkUri, getPlaylistTracks } from '../../lib/library';
 import type { Playlist, Track } from '../../lib/types';
 
 interface PlaylistDetailModalProps {
@@ -16,6 +18,8 @@ interface PlaylistDetailModalProps {
   isOpen: boolean;
   onClose: () => void;
   isBackendReady: boolean;
+  onDeletePlaylist?: (playlistId: string) => void;
+  onPlayTracks?: (tracks: Track[], startIndex?: number, shuffle?: boolean) => void;
 }
 
 export function PlaylistDetailModal({
@@ -23,10 +27,43 @@ export function PlaylistDetailModal({
   isOpen,
   onClose,
   isBackendReady,
+  onDeletePlaylist,
+  onPlayTracks,
 }: PlaylistDetailModalProps) {
+  const [tracks, setTracks] = useState<Track[]>([]);
+
+  useEffect(() => {
+    if (!playlist || !isOpen) {
+      setTracks([]);
+      return;
+    }
+    let active = true;
+    getPlaylistTracks(playlist.id)
+      .then((t) => {
+        if (active) setTracks(t);
+      })
+      .catch((e) => console.error('Failed to load playlist tracks:', e));
+
+    return () => {
+      active = false;
+    };
+  }, [playlist, isOpen]);
+
   if (!playlist) return null;
 
-  const tracks: Track[] = playlist.tracks ?? [];
+  const handleDelete = () => {
+    if (window.confirm(`Delete playlist "${playlist.name}"? This removes the playlist from your local database.`)) {
+      onDeletePlaylist?.(playlist.id);
+      onClose();
+    }
+  };
+
+  const formatDuration = (ms: number) => {
+    const totalSecs = Math.floor(ms / 1000);
+    const mins = Math.floor(totalSecs / 60);
+    const secs = totalSecs % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
 
   return (
     <Modal
@@ -49,8 +86,8 @@ export function PlaylistDetailModal({
               size="sm"
               icon={<Trash2 size={14} />}
               className="text-danger"
-              disabled
-              title="Playlist deletion will be active in Milestone 2"
+              onClick={handleDelete}
+              title="Delete playlist from local database"
             >
               Delete
             </Button>
@@ -88,7 +125,11 @@ export function PlaylistDetailModal({
                 size="md"
                 icon={<Play size={16} />}
                 disabled={!isBackendReady || tracks.length === 0}
-                title={!isBackendReady ? 'Audio playback engine is not connected (Milestone 3)' : undefined}
+                onClick={() => {
+                  onPlayTracks?.(tracks, 0, false);
+                  onClose();
+                }}
+                title="Play playlist from beginning"
               >
                 Play All
               </Button>
@@ -98,21 +139,25 @@ export function PlaylistDetailModal({
                 size="md"
                 icon={<Shuffle size={16} />}
                 disabled={!isBackendReady || tracks.length === 0}
-                title={!isBackendReady ? 'Audio playback engine is not connected (Milestone 3)' : undefined}
+                onClick={() => {
+                  onPlayTracks?.(tracks, 0, true);
+                  onClose();
+                }}
+                title="Shuffle play playlist"
               >
                 Shuffle
               </Button>
+
+              <Badge variant="neutral" size="sm">
+                {tracks.length} {tracks.length === 1 ? 'TRACK' : 'TRACKS'}
+              </Badge>
             </div>
           </div>
         </div>
 
-        {/* Tracks Section */}
+        {/* Track listing */}
         <div className="playlist-tracks-section">
-          <div className="playlist-tracks-header">
-            <span>TRACK LIST</span>
-            <span className="track-count">{tracks.length} tracks</span>
-          </div>
-
+          <h3 className="section-label">TRACK LIST</h3>
           {tracks.length > 0 ? (
             <div className="tracks-table">
               <div className="tracks-table-head">
@@ -124,28 +169,48 @@ export function PlaylistDetailModal({
               </div>
               <div className="tracks-table-body">
                 {tracks.map((track, i) => (
-                  <div key={track.id} className="track-row">
+                  <div
+                    key={`${track.id}-${i}`}
+                    className="track-row"
+                    tabIndex={0}
+                    role="row"
+                    onClick={() => {
+                      onPlayTracks?.(tracks, i, false);
+                      onClose();
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        onPlayTracks?.(tracks, i, false);
+                        onClose();
+                      }
+                    }}
+                  >
                     <span className="col-num">{i + 1}</span>
-                    <span className="col-title">{track.title}</span>
+                    <span className="col-title">
+                      {track.artworkUri && (
+                        <img
+                          src={formatArtworkUri(track.artworkUri)}
+                          alt=""
+                          className="track-row-art"
+                        />
+                      )}
+                      <span className="track-title-text">{track.title}</span>
+                    </span>
                     <span className="col-artist">{track.artist}</span>
                     <span className="col-album">{track.album}</span>
-                    <span className="col-duration">
-                      {Math.floor(track.durationMs / 60000)}:
-                      {Math.floor((track.durationMs % 60000) / 1000)
-                        .toString()
-                        .padStart(2, '0')}
-                    </span>
+                    <span className="col-duration">{formatDuration(track.durationMs)}</span>
                   </div>
                 ))}
               </div>
             </div>
           ) : (
             <div className="playlist-empty-tracks">
-              <ListMusic size={32} />
-              <h4>No tracks in this playlist yet</h4>
-              <p>
-                Add songs from your personal archive once local files are imported.
-              </p>
+              <ListMusic size={32} className="text-muted" />
+              <p>No tracks currently added to this playlist.</p>
+              <span className="text-muted-xs">
+                Tracks will be attachable through the playlist management drawer.
+              </span>
             </div>
           )}
         </div>
@@ -153,4 +218,3 @@ export function PlaylistDetailModal({
     </Modal>
   );
 }
-
