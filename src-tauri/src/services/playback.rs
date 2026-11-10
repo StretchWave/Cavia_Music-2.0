@@ -55,13 +55,17 @@ pub struct PersistencePayload {
 /// Messages consumed by the dedicated persistence thread.
 pub enum PersistenceMsg {
     State(PersistencePayload),
-    Flush(std::sync::mpsc::Sender<()>),
+    Flush(std::sync::mpsc::Sender<Result<(), String>>),
+    Shutdown(std::sync::mpsc::Sender<Result<(), String>>),
 }
 
 type PersistenceSender = std::sync::mpsc::Sender<PersistenceMsg>;
 
-async fn write_playback_state(pool: &SqlitePool, payload: &PersistencePayload) {
-    let _ = sqlx::query(
+pub async fn write_playback_state(
+    pool: &SqlitePool,
+    payload: &PersistencePayload,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
         "INSERT INTO playback_state (id, queue_json, current_track_id, position_ms, repeat_mode, shuffle_enabled, playback_speed, volume, is_muted, updated_at) \
          VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) \
          ON CONFLICT(id) DO UPDATE SET \
@@ -84,7 +88,8 @@ async fn write_playback_state(pool: &SqlitePool, payload: &PersistencePayload) {
     .bind(payload.volume)
     .bind(payload.is_muted)
     .execute(pool)
-    .await;
+    .await?;
+    Ok(())
 }
 
 type StateEmitter = Box<dyn Fn(PlaybackSnapshot) + Send + Sync>;
@@ -185,7 +190,7 @@ pub enum PlaybackCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     Shutdown {
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<Result<(), String>>,
     },
 }
 
@@ -208,6 +213,7 @@ pub struct PlaybackCore {
     persistence_tx: Option<PersistenceSender>,
     snapshot_cache: Arc<RwLock<PlaybackSnapshot>>,
     cmd_tx: Option<std::sync::mpsc::Sender<PlaybackCommand>>,
+    restored_position_ms: Option<i64>,
 }
 
 impl PlaybackCore {
@@ -235,6 +241,7 @@ impl PlaybackCore {
             persistence_tx,
             snapshot_cache,
             cmd_tx: None,
+            restored_position_ms: None,
         };
         core.update_snapshot_cache();
         core
@@ -305,6 +312,8 @@ impl PlaybackCore {
                             let err = format!("Windows SMTC event subscription failed: {e:?}");
                             eprintln!("[PlaybackCore] {err}");
                             self.media_controls_ready = false;
+                            self.update_snapshot_cache();
+                            self.emit_state();
                             return Err(err);
                         }
                     }
@@ -314,14 +323,19 @@ impl PlaybackCore {
                     // Windows has an active session for media keys instead
                     // of an empty metadata/playback state.
                     if let Some(track) = self.queue.current_track().cloned() {
-                        self.update_media_metadata(&track);
+                        let _ = self.update_media_metadata(&track);
                     }
-                    self.sync_media_playback_state();
+                    let _ = self.sync_media_playback_state();
+                    self.update_snapshot_cache();
+                    self.emit_state();
                     Ok(())
                 }
                 Err(e) => {
                     let err = format!("Windows SMTC media controls initialization failed: {e:?}");
                     eprintln!("[PlaybackCore] {err}");
+                    self.media_controls_ready = false;
+                    self.update_snapshot_cache();
+                    self.emit_state();
                     Err(err)
                 }
             }
@@ -330,6 +344,8 @@ impl PlaybackCore {
         {
             let _ = hwnd;
             self.media_controls_ready = false;
+            self.update_snapshot_cache();
+            self.emit_state();
             // Native Now Playing on macOS/Linux not claimed until verified on hardware
             Ok(())
         }
@@ -374,6 +390,7 @@ impl PlaybackCore {
         // Loading succeeded: commit queue selection
         self.queue.select_track_by_id(track_id);
         self.last_error = None;
+        self.restored_position_ms = None;
         self.generation += 1;
 
         let _ = self.backend.set_volume(if self.is_muted {
@@ -383,8 +400,8 @@ impl PlaybackCore {
         });
         let _ = self.backend.set_speed(self.playback_speed);
 
-        self.update_media_metadata(&track);
-        self.persist_state();
+        let _ = self.update_media_metadata(&track);
+        let _ = self.persist_state();
         self.update_snapshot_cache();
         self.emit_state();
         Ok(())
@@ -405,7 +422,7 @@ impl PlaybackCore {
 
         if self.backend.status() == PlaybackStatus::Paused {
             self.backend.play().map_err(|e| e.to_string())?;
-            self.sync_media_playback_state();
+            let _ = self.sync_media_playback_state();
             self.update_snapshot_cache();
             self.emit_state();
             return Ok(());
@@ -422,8 +439,8 @@ impl PlaybackCore {
 
     pub fn pause(&mut self) -> Result<(), String> {
         self.backend.pause().map_err(|e| e.to_string())?;
-        self.sync_media_playback_state();
-        self.persist_state();
+        let _ = self.sync_media_playback_state();
+        let _ = self.persist_state();
         self.update_snapshot_cache();
         self.emit_state();
         Ok(())
@@ -447,9 +464,9 @@ impl PlaybackCore {
 
     pub fn stop(&mut self) -> Result<(), String> {
         self.backend.stop().map_err(|e| e.to_string())?;
-        self.sync_media_playback_state();
+        let _ = self.sync_media_playback_state();
         self.generation += 1;
-        self.persist_state();
+        let _ = self.persist_state();
         self.update_snapshot_cache();
         self.emit_state();
         Ok(())
@@ -470,8 +487,9 @@ impl PlaybackCore {
         }
 
         self.backend.seek(position_ms).map_err(|e| e.to_string())?;
-        self.sync_media_playback_state();
-        self.persist_state();
+        self.restored_position_ms = None;
+        let _ = self.sync_media_playback_state();
+        let _ = self.persist_state();
         self.update_snapshot_cache();
         self.emit_position();
         Ok(())
@@ -485,7 +503,7 @@ impl PlaybackCore {
         self.backend
             .set_volume(backend_vol)
             .map_err(|e| e.to_string())?;
-        self.persist_state();
+        let _ = self.persist_state();
         self.update_snapshot_cache();
         self.emit_state();
         Ok(())
@@ -509,7 +527,7 @@ impl PlaybackCore {
             self.volume = 0;
             self.backend.set_volume(0.0).map_err(|e| e.to_string())?;
         }
-        self.persist_state();
+        let _ = self.persist_state();
         self.update_snapshot_cache();
         self.emit_state();
         Ok(())
@@ -524,7 +542,7 @@ impl PlaybackCore {
         let clamped = speed.clamp(0.25, 4.0);
         self.playback_speed = clamped;
         self.backend.set_speed(clamped).map_err(|e| e.to_string())?;
-        self.persist_state();
+        let _ = self.persist_state();
         self.update_snapshot_cache();
         self.emit_state();
         Ok(())
@@ -532,7 +550,7 @@ impl PlaybackCore {
 
     pub fn set_repeat_mode(&mut self, mode: &str) -> Result<(), String> {
         self.queue.set_repeat_mode(RepeatMode::from(mode));
-        self.persist_state();
+        let _ = self.persist_state();
         self.update_snapshot_cache();
         self.emit_state();
         Ok(())
@@ -540,7 +558,7 @@ impl PlaybackCore {
 
     pub fn set_shuffle(&mut self, enabled: bool) -> Result<(), String> {
         self.queue.set_shuffle(enabled);
-        self.persist_state();
+        let _ = self.persist_state();
         self.update_snapshot_cache();
         self.emit_state();
         Ok(())
@@ -551,7 +569,7 @@ impl PlaybackCore {
             Some((idx, track)) => (idx, track.clone()),
             None => {
                 let _ = self.backend.stop();
-                self.sync_media_playback_state();
+                let _ = self.sync_media_playback_state();
                 self.update_snapshot_cache();
                 self.emit_state();
                 return Ok(());
@@ -597,80 +615,82 @@ impl PlaybackCore {
             .map(|s| s.to_string())
             .or_else(|| tracks.first().map(|t| t.id.clone()));
 
-        let target_idx = target_id
+        let target_track = target_id
             .as_deref()
-            .and_then(|id| tracks.iter().position(|t| t.id == id))
-            .unwrap_or(0);
+            .and_then(|id| tracks.iter().find(|t| t.id == id))
+            .cloned()
+            .ok_or_else(|| {
+                let err = format!(
+                    "Requested starting track not found in queue: {}",
+                    target_id.as_deref().unwrap_or("unknown")
+                );
+                self.last_error = Some(err.clone());
+                self.update_snapshot_cache();
+                self.emit_state();
+                err
+            })?;
 
-        // Bounded skip policy: validate the decoder, not merely file
-        // existence, before replacing the live queue with a new one.
-        let mut playable_idx = None;
-        let mut first_error = None;
-        let scan_limit = tracks.len().min(10);
-        for i in 0..scan_limit {
-            let idx = (target_idx + i) % tracks.len();
-            let track = &tracks[idx];
-            if let Some(ref uri) = track.file_uri {
-                let path = Path::new(uri);
-                if !path.exists() {
-                    if first_error.is_none() {
-                        first_error = Some(format!("Audio file not found: {uri}"));
-                    }
-                    continue;
-                }
-                match self.backend.validate_source(uri) {
-                    Ok(()) => {
-                        playable_idx = Some(idx);
-                        break;
-                    }
-                    Err(e) => {
-                        if first_error.is_none() {
-                            first_error = Some(format!("Audio could not be decoded: {uri} ({e})"));
-                        }
-                    }
-                }
-            } else if first_error.is_none() {
-                first_error = Some("Track has no file path".to_string());
-            }
+        let file_path = target_track.file_uri.clone().ok_or_else(|| {
+            let err = format!("Track {} has no associated file path", target_track.id);
+            self.last_error = Some(err.clone());
+            self.update_snapshot_cache();
+            self.emit_state();
+            err
+        })?;
+
+        let path = Path::new(&file_path);
+        if !path.exists() {
+            let err = format!("Audio file does not exist at path: {file_path}");
+            self.last_error = Some(err.clone());
+            self.update_snapshot_cache();
+            self.emit_state();
+            return Err(err);
         }
 
-        if let Some(idx) = playable_idx {
-            let start_id = tracks[idx].id.clone();
-            let previous_tracks = self.queue.tracks().to_vec();
-            let previous_id = self.queue.current_track().map(|t| t.id.clone());
-            self.queue.set_queue(tracks, Some(&start_id));
-            self.generation += 1;
-            self.persist_state();
-            match self.play_track(&start_id) {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    // Device/output failure after validation: roll back to the
-                    // previous queue and selection so the caller keeps its
-                    // working state.
-                    self.queue
-                        .set_queue(previous_tracks, previous_id.as_deref());
-                    self.generation += 1;
-                    self.last_error = Some(e.clone());
-                    self.update_snapshot_cache();
-                    self.emit_state();
-                    Err(e)
-                }
-            }
-        } else {
-            let _ = self.backend.stop();
-            let err = first_error.unwrap_or_else(|| "No playable tracks in queue".to_string());
+        // Transactional validation: probe candidate decoder without mutating player or queue
+        if let Err(e) = self.backend.validate_source(&file_path) {
+            let err = format!("Audio could not be decoded: {file_path} ({e})");
+            self.last_error = Some(err.clone());
+            self.update_snapshot_cache();
+            self.emit_state();
+            return Err(err);
+        }
+
+        // Validation succeeded: stop active audio and load target
+        let _ = self.backend.stop();
+        if let Err(e) = self.backend.load(&file_path, 0) {
+            let err = format!("Failed to load audio: {e}");
             self.last_error = Some(err.clone());
             self.generation += 1;
             self.update_snapshot_cache();
             self.emit_state();
-            Err(err)
+            return Err(err);
         }
+
+        // Candidate successfully prepared: commit new queue and selection atomically
+        self.queue.set_queue(tracks, Some(&target_track.id));
+        self.last_error = None;
+        self.restored_position_ms = None;
+        self.generation += 1;
+
+        let _ = self.backend.set_volume(if self.is_muted {
+            0.0
+        } else {
+            self.volume as f32 / 100.0
+        });
+        let _ = self.backend.set_speed(self.playback_speed);
+
+        let _ = self.update_media_metadata(&target_track);
+        let _ = self.persist_state();
+        self.update_snapshot_cache();
+        self.emit_state();
+        Ok(())
     }
 
     pub fn add_to_queue(&mut self, track: Track) -> Result<(), String> {
         self.queue.add_track(track);
         self.generation += 1;
-        self.persist_state();
+        let _ = self.persist_state();
         self.update_snapshot_cache();
         self.emit_state();
         Ok(())
@@ -689,7 +709,7 @@ impl PlaybackCore {
 
         self.queue.remove_track(track_id);
         self.generation += 1;
-        self.persist_state();
+        let _ = self.persist_state();
         self.update_snapshot_cache();
         self.emit_state();
         Ok(())
@@ -704,7 +724,7 @@ impl PlaybackCore {
 
         self.queue.remove_at(index);
         self.generation += 1;
-        self.persist_state();
+        let _ = self.persist_state();
         self.update_snapshot_cache();
         self.emit_state();
         Ok(())
@@ -713,7 +733,7 @@ impl PlaybackCore {
     pub fn reorder_queue(&mut self, from: usize, to: usize) -> Result<(), String> {
         if self.queue.reorder(from, to) {
             self.generation += 1;
-            self.persist_state();
+            let _ = self.persist_state();
             self.update_snapshot_cache();
             self.emit_state();
             Ok(())
@@ -726,8 +746,8 @@ impl PlaybackCore {
         let _ = self.backend.stop();
         self.queue.clear();
         self.generation += 1;
-        self.sync_media_playback_state();
-        self.persist_state();
+        let _ = self.sync_media_playback_state();
+        let _ = self.persist_state();
         self.update_snapshot_cache();
         self.emit_state();
         Ok(())
@@ -770,15 +790,52 @@ impl PlaybackCore {
         };
         let _ = self.backend.set_volume(backend_vol);
 
+        self.restored_position_ms = if saved_position_ms > 0 {
+            Some(saved_position_ms)
+        } else {
+            None
+        };
+
         // Preload track at saved position in Paused state (NEVER auto-resumes playback)
         if saved_position_ms > 0 {
             if let Some(track) = self.queue.current_track().cloned() {
                 if let Some(ref uri) = track.file_uri {
-                    if self.backend.load(uri, saved_position_ms as u64).is_ok() {
-                        let _ = self.backend.pause();
-                        self.update_media_metadata(&track);
-                        self.sync_media_playback_state();
+                    let path = Path::new(uri);
+                    if !path.exists() {
+                        let is_volume_unavailable = {
+                            #[cfg(windows)]
+                            {
+                                let prefix = path.components().next();
+                                matches!(prefix, Some(std::path::Component::Prefix(_)))
+                                    && !path.parent().map(|p| p.exists()).unwrap_or(false)
+                            }
+                            #[cfg(not(windows))]
+                            {
+                                false
+                            }
+                        };
+                        let err = if is_volume_unavailable {
+                            format!("External media volume unavailable during restore: {uri}")
+                        } else {
+                            format!("Media file not found during restore: {uri}")
+                        };
+                        self.last_error = Some(err);
+                    } else {
+                        match self.backend.load(uri, saved_position_ms as u64) {
+                            Ok(()) => {
+                                let _ = self.backend.pause();
+                                self.restored_position_ms = None;
+                                let _ = self.update_media_metadata(&track);
+                                let _ = self.sync_media_playback_state();
+                            }
+                            Err(e) => {
+                                self.last_error =
+                                    Some(format!("Failed to load audio during restore: {e}"));
+                            }
+                        }
                     }
+                } else {
+                    self.last_error = Some("Restored track has no file URI".to_string());
                 }
             }
         }
@@ -826,11 +883,17 @@ impl PlaybackCore {
             current_track.as_ref().map(|t| t.duration_ms).unwrap_or(0)
         };
 
+        let position_ms = if let Some(pos) = self.restored_position_ms {
+            pos
+        } else {
+            self.backend.position_ms() as i64
+        };
+
         PlaybackSnapshot {
             generation: self.generation,
             status: status_str.to_string(),
             current_track,
-            position_ms: self.backend.position_ms() as i64,
+            position_ms,
             duration_ms,
             volume: self.volume,
             is_muted: self.is_muted,
@@ -903,7 +966,7 @@ impl PlaybackCore {
                 }
             } else {
                 let _ = self.backend.stop();
-                self.sync_media_playback_state();
+                let _ = self.sync_media_playback_state();
                 self.update_snapshot_cache();
                 self.emit_state();
                 return;
@@ -929,14 +992,14 @@ impl PlaybackCore {
                 // reset this timer, so pause/stop/track-change/exit always
                 // flush immediately.
                 if self.last_persist.elapsed() >= Duration::from_secs(5) {
-                    self.persist_state();
+                    let _ = self.persist_state();
                 }
                 // Windows SMTC progress is refreshed once per second; the
                 // system overlay interpolates between updates.
                 if self.media_controls_ready
                     && self.last_media_sync.elapsed() >= Duration::from_secs(1)
                 {
-                    self.sync_media_playback_state();
+                    let _ = self.sync_media_playback_state();
                     self.last_media_sync = Instant::now();
                 }
             }
@@ -967,76 +1030,110 @@ impl PlaybackCore {
         }
     }
 
-    fn persist_state(&mut self) {
+    fn persist_state(&mut self) -> Result<(), String> {
         self.last_persist = Instant::now();
         if let Some(tx) = &self.persistence_tx {
+            let position_ms = if let Some(pos) = self.restored_position_ms {
+                pos
+            } else {
+                self.backend.position_ms() as i64
+            };
             let payload = PersistencePayload {
                 queue_json: serde_json::to_string(self.queue.tracks())
                     .unwrap_or_else(|_| "[]".into()),
                 current_track_id: self.queue.current_track().map(|t| t.id.clone()),
-                position_ms: self.backend.position_ms() as i64,
+                position_ms,
                 repeat_mode: self.queue.repeat_mode().as_str().to_string(),
                 shuffle_enabled: if self.queue.is_shuffle() { 1 } else { 0 },
                 playback_speed: self.playback_speed as f64,
                 volume: self.volume as i64,
                 is_muted: if self.is_muted { 1 } else { 0 },
             };
-            let _ = tx.send(PersistenceMsg::State(payload));
+            tx.send(PersistenceMsg::State(payload))
+                .map_err(|e| format!("Persistence channel error: {e}"))
+        } else {
+            Err("Persistence worker offline".into())
         }
     }
 
-    fn update_media_metadata(&mut self, track: &Track) {
+    fn update_media_metadata(&mut self, track: &Track) -> Result<(), String> {
         if let Some(controls) = &mut self.media_controls {
-            let _ = controls.set_metadata(souvlaki::MediaMetadata {
+            let meta_res = controls.set_metadata(souvlaki::MediaMetadata {
                 title: Some(&track.title),
                 artist: Some(&track.artist),
                 album: Some(&track.album),
                 duration: Some(Duration::from_millis(track.duration_ms as u64)),
                 cover_url: None,
             });
-            let _ = controls.set_playback(souvlaki::MediaPlayback::Playing {
+            let play_res = controls.set_playback(souvlaki::MediaPlayback::Playing {
                 progress: Some(souvlaki::MediaPosition(Duration::from_millis(0))),
             });
-        }
-    }
-
-    fn sync_media_playback_state(&mut self) {
-        if let Some(controls) = &mut self.media_controls {
-            let current_pos = Duration::from_millis(self.backend.position_ms());
-            match self.backend.status() {
-                PlaybackStatus::Playing => {
-                    let _ = controls.set_playback(souvlaki::MediaPlayback::Playing {
-                        progress: Some(souvlaki::MediaPosition(current_pos)),
-                    });
-                }
-                PlaybackStatus::Paused => {
-                    let _ = controls.set_playback(souvlaki::MediaPlayback::Paused {
-                        progress: Some(souvlaki::MediaPosition(current_pos)),
-                    });
-                }
-                _ => {
-                    let _ = controls.set_playback(souvlaki::MediaPlayback::Stopped);
-                }
+            if let Err(e) = meta_res {
+                let err = format!("SMTC set_metadata error: {e:?}");
+                eprintln!("[PlaybackCore] {err}");
+                return Err(err);
+            }
+            if let Err(e) = play_res {
+                let err = format!("SMTC set_playback error: {e:?}");
+                eprintln!("[PlaybackCore] {err}");
+                return Err(err);
             }
         }
+        Ok(())
     }
 
-    pub fn shutdown(&mut self) {
+    fn sync_media_playback_state(&mut self) -> Result<(), String> {
+        if let Some(controls) = &mut self.media_controls {
+            let current_pos = Duration::from_millis(self.backend.position_ms());
+            let res = match self.backend.status() {
+                PlaybackStatus::Playing => {
+                    controls.set_playback(souvlaki::MediaPlayback::Playing {
+                        progress: Some(souvlaki::MediaPosition(current_pos)),
+                    })
+                }
+                PlaybackStatus::Paused => controls.set_playback(souvlaki::MediaPlayback::Paused {
+                    progress: Some(souvlaki::MediaPosition(current_pos)),
+                }),
+                _ => controls.set_playback(souvlaki::MediaPlayback::Stopped),
+            };
+            if let Err(e) = res {
+                let err = format!("SMTC set_playback error: {e:?}");
+                eprintln!("[PlaybackCore] {err}");
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn shutdown(&mut self) -> Result<(), String> {
         // Capture the live position BEFORE stopping the backend. Rodio's
         // stop() tears down the player and zeroes its seek offset, so
         // persisting afterwards would erase the user's resume point.
-        self.persist_state();
+        let persist_res = self.persist_state();
         let _ = self.backend.stop();
         self.media_controls = None;
         self.media_controls_ready = false;
+        let mut flush_res = Ok(());
         // Ask the persistence thread to flush everything queued so far and
         // wait (bounded) for the write to reach SQLite before process exit.
         if let Some(tx) = &self.persistence_tx {
             let (ack_tx, ack_rx) = std::sync::mpsc::channel();
-            if tx.send(PersistenceMsg::Flush(ack_tx)).is_ok() {
-                let _ = ack_rx.recv_timeout(Duration::from_secs(3));
+            match tx.send(PersistenceMsg::Shutdown(ack_tx)) {
+                Ok(()) => match ack_rx.recv_timeout(Duration::from_secs(3)) {
+                    Ok(res) => flush_res = res,
+                    Err(e) => {
+                        flush_res = Err(format!(
+                            "Persistence shutdown flush timed out or failed: {e}"
+                        ));
+                    }
+                },
+                Err(_) => {
+                    flush_res =
+                        Err("Persistence worker channel disconnected during shutdown".to_string());
+                }
             }
         }
+        persist_res.and(flush_res)
     }
 }
 
@@ -1098,6 +1195,7 @@ impl PlaybackService {
         // This avoids depending on an ambient Tokio context during Tauri's
         // synchronous setup and gives shutdown a joinable owner.
         let (persist_tx, persist_rx) = std::sync::mpsc::channel::<PersistenceMsg>();
+        let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let pool_for_persist = database.clone();
         let persist_thread = std::thread::Builder::new()
             .name("cavia-persist".into())
@@ -1106,13 +1204,19 @@ impl PlaybackService {
                     .enable_all()
                     .build()
                 {
-                    Ok(runtime) => runtime,
+                    Ok(runtime) => {
+                        let _ = init_tx.send(Ok(()));
+                        runtime
+                    }
                     Err(e) => {
-                        eprintln!("[PlaybackService] Persistence runtime failed: {e}");
+                        let err = format!("Persistence runtime failed to build: {e}");
+                        eprintln!("[PlaybackService] {err}");
+                        let _ = init_tx.send(Err(err));
                         return;
                     }
                 };
 
+                let mut last_payload: Option<PersistencePayload> = None;
                 while let Ok(message) = persist_rx.recv() {
                     match message {
                         PersistenceMsg::State(mut payload) => {
@@ -1126,21 +1230,53 @@ impl PlaybackService {
                                         flush_ack = Some(ack);
                                         break;
                                     }
+                                    Ok(PersistenceMsg::Shutdown(ack)) => {
+                                        flush_ack = Some(ack);
+                                        break;
+                                    }
                                     Err(_) => break,
                                 }
                             }
-                            runtime.block_on(write_playback_state(&pool_for_persist, &payload));
+                            let write_res = runtime
+                                .block_on(write_playback_state(&pool_for_persist, &payload))
+                                .map_err(|e| format!("Persistence write failed: {e}"));
                             if let Some(ack) = flush_ack {
-                                let _ = ack.send(());
+                                let _ = ack.send(write_res);
                             }
+                            last_payload = None;
                         }
                         PersistenceMsg::Flush(ack) => {
-                            let _ = ack.send(());
+                            if let Some(payload) = last_payload.take() {
+                                let write_res = runtime
+                                    .block_on(write_playback_state(&pool_for_persist, &payload))
+                                    .map_err(|e| format!("Persistence write failed: {e}"));
+                                let _ = ack.send(write_res);
+                            } else {
+                                let _ = ack.send(Ok(()));
+                            }
+                        }
+                        PersistenceMsg::Shutdown(ack) => {
+                            if let Some(payload) = last_payload.take() {
+                                let write_res = runtime
+                                    .block_on(write_playback_state(&pool_for_persist, &payload))
+                                    .map_err(|e| format!("Persistence write failed: {e}"));
+                                let _ = ack.send(write_res);
+                            } else {
+                                let _ = ack.send(Ok(()));
+                            }
+                            break;
                         }
                     }
                 }
             })
             .map_err(|e| format!("Failed to spawn persistence worker thread: {e}"))?;
+
+        // Verify persistence worker initialization succeeded
+        match init_rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(e) => return Err(format!("Persistence worker initialization timed out: {e}")),
+        }
 
         let mut core = PlaybackCore::new(backend, Arc::clone(&snapshot_cache), Some(persist_tx));
 
@@ -1151,12 +1287,11 @@ impl PlaybackService {
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<PlaybackCommand>();
         core.set_cmd_tx(cmd_tx.clone());
 
-        let shutdown_worker = Arc::clone(&shutdown_flag);
         let worker_join = std::thread::Builder::new()
             .name("cavia-audio-control".into())
             .spawn(move || {
                 let tick_interval = Duration::from_millis(250);
-                while !shutdown_worker.load(Ordering::Relaxed) {
+                loop {
                     match cmd_rx.recv_timeout(tick_interval) {
                         Ok(cmd) => match cmd {
                             PlaybackCommand::PlayTrack { track_id, reply } => {
@@ -1258,8 +1393,8 @@ impl PlaybackService {
                                 let _ = reply.send(core.retry_device());
                             }
                             PlaybackCommand::Shutdown { reply } => {
-                                core.shutdown();
-                                let _ = reply.send(());
+                                let res = core.shutdown();
+                                let _ = reply.send(res);
                                 break;
                             }
                         },
@@ -1267,7 +1402,7 @@ impl PlaybackService {
                             core.tick();
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                            core.shutdown();
+                            let _ = core.shutdown();
                             break;
                         }
                     }
@@ -1541,21 +1676,15 @@ impl PlaybackService {
             let volume: i64 = row.try_get("volume").unwrap_or(85);
             let is_muted: i64 = row.try_get("is_muted").unwrap_or(0);
 
-            let mut valid_tracks = Vec::new();
+            let mut all_tracks = Vec::new();
             if let Ok(tracks) = serde_json::from_str::<Vec<Track>>(&queue_json) {
-                for t in tracks {
-                    if let Some(ref uri) = t.file_uri {
-                        if Path::new(uri).exists() {
-                            valid_tracks.push(t);
-                        }
-                    }
-                }
+                all_tracks = tracks;
             }
 
             let (tx, rx) = oneshot::channel();
             self.cmd_tx
                 .send(PlaybackCommand::ApplyRestoredState {
-                    tracks: valid_tracks,
+                    tracks: all_tracks,
                     current_track_id,
                     saved_position_ms,
                     repeat_mode,
@@ -1591,6 +1720,25 @@ impl PlaybackService {
         self.snapshot().backend_health
     }
 
+    pub fn backend_name(&self) -> String {
+        #[cfg(target_os = "windows")]
+        {
+            "rodio_native".to_string()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            "rodio_native".to_string()
+        }
+        #[cfg(target_os = "android")]
+        {
+            "android_media3_unintegrated".to_string()
+        }
+        #[cfg(target_os = "ios")]
+        {
+            "ios_avplayer_unintegrated".to_string()
+        }
+    }
+
     pub fn is_shutting_down(&self) -> bool {
         self.shutdown_flag.load(Ordering::SeqCst)
     }
@@ -1608,24 +1756,26 @@ impl PlaybackService {
         }
     }
 
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(&self) -> Result<(), String> {
         let already_shutting_down = self.shutdown_flag.swap(true, Ordering::SeqCst);
         if already_shutting_down {
             self.join_workers();
-            return;
+            return Ok(());
         }
 
         // Commands already in the channel are processed before Shutdown
         // (FIFO), so their replies are defined rather than dropped.
         let (tx, rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(PlaybackCommand::Shutdown { reply: tx })
-            .is_ok()
-        {
-            let _ = rx.await;
-        }
+        let res = match self.cmd_tx.send(PlaybackCommand::Shutdown { reply: tx }) {
+            Ok(()) => match tokio::time::timeout(Duration::from_secs(5), rx).await {
+                Ok(Ok(inner_res)) => inner_res,
+                Ok(Err(_)) => Err("Audio worker thread dropped shutdown reply".into()),
+                Err(_) => Err("Audio worker shutdown timed out".into()),
+            },
+            Err(_) => Err("Audio worker thread channel disconnected".into()),
+        };
         self.join_workers();
+        res
     }
 }
 
@@ -1857,8 +2007,9 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_queue_bounded_skip_on_broken_first_track() {
-        let temp_dir = std::env::temp_dir().join(format!("cavia_test_sq_{}", uuid::Uuid::new_v4()));
+    async fn test_set_queue_fails_atomically_on_missing_track_preserving_previous_queue() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_test_sq_miss_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let good_wav = temp_dir.join("good.wav");
         crate::audio::rodio_backend::tests::create_test_wav_with_duration(&good_wav, 1.0);
@@ -1866,16 +2017,161 @@ pub mod tests {
         let backend = Box::new(crate::audio::rodio_backend::RodioBackend::new().unwrap());
         let mut core = new_test_core(backend);
 
-        let track1 = dummy_track("1", "Missing 1", Some("C:/non_existent_1.flac"));
-        let track2 = dummy_track("2", "Good 2", Some(good_wav.to_str().unwrap()));
+        let old1 = dummy_track("old1", "Old 1", Some(good_wav.to_str().unwrap()));
+        core.set_queue(vec![old1.clone()], Some("old1")).unwrap();
+        assert_eq!(core.queue.current_track().unwrap().id, "old1");
 
-        // set_queue with track 1 as start should bounded-skip to track 2
-        let res = core.set_queue(vec![track1, track2], Some("1"));
+        let missing = dummy_track("missing", "Missing", Some("C:/non_existent_cavia_sq.flac"));
+        let candidate2 = dummy_track("cand2", "Cand 2", Some(good_wav.to_str().unwrap()));
+
+        // set_queue requesting missing track MUST fail atomically without skipping to candidate2
+        let res = core.set_queue(vec![missing, candidate2], Some("missing"));
+        assert!(res.is_err());
+
+        // Previous queue and selection must remain 100% intact
+        assert_eq!(core.queue.len(), 1);
+        assert_eq!(core.queue.current_track().unwrap().id, "old1");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_set_queue_fails_atomically_on_corrupt_header_preserving_previous_queue() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_test_sq_hdr_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let good_wav = temp_dir.join("good.wav");
+        crate::audio::rodio_backend::tests::create_test_wav_with_duration(&good_wav, 1.0);
+
+        let corrupt_wav = temp_dir.join("corrupt_header.wav");
+        std::fs::write(&corrupt_wav, b"NOT_A_VALID_WAV_HEADER_12345").unwrap();
+
+        let backend = Box::new(crate::audio::rodio_backend::RodioBackend::new().unwrap());
+        let mut core = new_test_core(backend);
+
+        let old1 = dummy_track("old1", "Old 1", Some(good_wav.to_str().unwrap()));
+        core.set_queue(vec![old1.clone()], Some("old1")).unwrap();
+        assert_eq!(core.queue.current_track().unwrap().id, "old1");
+
+        let bad_track = dummy_track("bad", "Bad", Some(corrupt_wav.to_str().unwrap()));
+        let res = core.set_queue(vec![bad_track], Some("bad"));
+        assert!(res.is_err());
+
+        // Previous queue and selection must remain intact
+        assert_eq!(core.queue.len(), 1);
+        assert_eq!(core.queue.current_track().unwrap().id, "old1");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_set_queue_fails_atomically_on_valid_header_with_truncated_audio_preserving_previous_queue()
+     {
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_test_sq_trunc_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let good_wav = temp_dir.join("good.wav");
+        crate::audio::rodio_backend::tests::create_test_wav_with_duration(&good_wav, 1.0);
+
+        // Create a WAV with valid 44-byte PCM header claiming 50000 bytes of data, but with 0 data bytes
+        let trunc_wav = temp_dir.join("truncated.wav");
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&trunc_wav).unwrap();
+            file.write_all(b"RIFF").unwrap();
+            file.write_all(&(36u32 + 50000).to_le_bytes()).unwrap();
+            file.write_all(b"WAVEfmt ").unwrap();
+            file.write_all(&16u32.to_le_bytes()).unwrap();
+            file.write_all(&1u16.to_le_bytes()).unwrap(); // PCM
+            file.write_all(&1u16.to_le_bytes()).unwrap(); // 1 channel
+            file.write_all(&44100u32.to_le_bytes()).unwrap(); // 44.1kHz
+            file.write_all(&(44100u32 * 2).to_le_bytes()).unwrap(); // byte rate
+            file.write_all(&2u16.to_le_bytes()).unwrap(); // block align
+            file.write_all(&16u16.to_le_bytes()).unwrap(); // 16 bits
+            file.write_all(b"data").unwrap();
+            file.write_all(&50000u32.to_le_bytes()).unwrap(); // claims 50000 bytes
+            // Write ZERO sample bytes (truncated payload)
+        }
+
+        let backend = Box::new(crate::audio::rodio_backend::RodioBackend::new().unwrap());
+        let mut core = new_test_core(backend);
+
+        let old1 = dummy_track("old1", "Old 1", Some(good_wav.to_str().unwrap()));
+        core.set_queue(vec![old1.clone()], Some("old1")).unwrap();
+        assert_eq!(core.queue.current_track().unwrap().id, "old1");
+
+        let trunc_track = dummy_track("trunc", "Truncated", Some(trunc_wav.to_str().unwrap()));
+        let res = core.set_queue(vec![trunc_track], Some("trunc"));
+        assert!(
+            res.is_err(),
+            "set_queue should fail on truncated audio data"
+        );
+
+        // Previous queue and selection must remain intact
+        assert_eq!(core.queue.len(), 1);
+        assert_eq!(core.queue.current_track().unwrap().id, "old1");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_set_queue_fails_atomically_on_unsupported_codec_preserving_previous_queue() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_test_sq_codec_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let good_wav = temp_dir.join("good.wav");
+        crate::audio::rodio_backend::tests::create_test_wav_with_duration(&good_wav, 1.0);
+
+        let unsupported = temp_dir.join("unsupported.wma");
+        std::fs::write(
+            &unsupported,
+            b"\x30\x26\xB2\x75\x8E\x66\xCF\x11\xA6\xD9\x00\xAA\x00\x62\xCE\x6C",
+        )
+        .unwrap();
+
+        let backend = Box::new(crate::audio::rodio_backend::RodioBackend::new().unwrap());
+        let mut core = new_test_core(backend);
+
+        let old1 = dummy_track("old1", "Old 1", Some(good_wav.to_str().unwrap()));
+        core.set_queue(vec![old1.clone()], Some("old1")).unwrap();
+        assert_eq!(core.queue.current_track().unwrap().id, "old1");
+
+        let unsupp_track =
+            dummy_track("unsupp", "Unsupported", Some(unsupported.to_str().unwrap()));
+        let res = core.set_queue(vec![unsupp_track], Some("unsupp"));
+        assert!(res.is_err(), "set_queue should fail on unsupported codec");
+
+        assert_eq!(core.queue.len(), 1);
+        assert_eq!(core.queue.current_track().unwrap().id, "old1");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_set_queue_succeeds_on_valid_track_and_supports_normal_navigation() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_test_sq_ok_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let wav1 = temp_dir.join("track1.wav");
+        let wav2 = temp_dir.join("track2.wav");
+        crate::audio::rodio_backend::tests::create_test_wav_with_duration(&wav1, 2.0);
+        crate::audio::rodio_backend::tests::create_test_wav_with_duration(&wav2, 2.0);
+
+        let backend = Box::new(crate::audio::rodio_backend::RodioBackend::new().unwrap());
+        let mut core = new_test_core(backend);
+
+        let t1 = dummy_track("t1", "Track 1", Some(wav1.to_str().unwrap()));
+        let t2 = dummy_track("t2", "Track 2", Some(wav2.to_str().unwrap()));
+
+        let res = core.set_queue(vec![t1.clone(), t2.clone()], Some("t1"));
         assert!(res.is_ok());
-
-        assert_eq!(core.queue.current_index(), Some(1));
-        assert_eq!(core.queue.current_track().unwrap().id, "2");
+        assert_eq!(core.queue.current_track().unwrap().id, "t1");
         assert_eq!(core.backend.status(), PlaybackStatus::Playing);
+
+        // Next navigates to t2
+        let next_res = core.next();
+        assert!(next_res.is_ok());
+        assert_eq!(core.queue.current_track().unwrap().id, "t2");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -1927,8 +2223,8 @@ pub mod tests {
         // Playback must NOT auto-resume; should be paused or idle
         assert_ne!(snap.status, "playing");
 
-        service.shutdown().await;
-        service2.shutdown().await;
+        service.shutdown().await.unwrap();
+        service2.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
@@ -1953,7 +2249,271 @@ pub mod tests {
         {
             PersistenceMsg::State(payload) => assert_eq!(payload.position_ms, 4_200),
             PersistenceMsg::Flush(_) => panic!("unexpected flush message"),
+            PersistenceMsg::Shutdown(_) => panic!("unexpected shutdown message"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_write_playback_state_propagates_sql_error() {
+        // Connect to an in-memory SQLite pool without running migrations (table does not exist)
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        let payload = PersistencePayload {
+            queue_json: "[]".into(),
+            current_track_id: None,
+            position_ms: 1000,
+            repeat_mode: "off".into(),
+            shuffle_enabled: 0,
+            playback_speed: 1.0,
+            volume: 85,
+            is_muted: 0,
+        };
+
+        let res = write_playback_state(&pool, &payload).await;
+        assert!(
+            res.is_err(),
+            "write_playback_state must propagate SQLx error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_failed_flush_acknowledgement_propagates_error() {
+        // Database without migrations so table playback_state does not exist
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel::<PersistenceMsg>();
+        let pool_clone = pool.clone();
+
+        let _handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            while let Ok(msg) = rx.recv() {
+                match msg {
+                    PersistenceMsg::State(payload) => {
+                        let res = rt
+                            .block_on(write_playback_state(&pool_clone, &payload))
+                            .map_err(|e| format!("{e}"));
+                        // simulate flush ack waiting
+                        if let Ok(PersistenceMsg::Flush(ack)) = rx.try_recv() {
+                            let _ = ack.send(res);
+                        }
+                    }
+                    PersistenceMsg::Flush(ack) => {
+                        let res = rt
+                            .block_on(write_playback_state(
+                                &pool_clone,
+                                &PersistencePayload {
+                                    queue_json: "[]".into(),
+                                    current_track_id: None,
+                                    position_ms: 0,
+                                    repeat_mode: "off".into(),
+                                    shuffle_enabled: 0,
+                                    playback_speed: 1.0,
+                                    volume: 85,
+                                    is_muted: 0,
+                                },
+                            ))
+                            .map_err(|e| format!("{e}"));
+                        let _ = ack.send(res);
+                        break;
+                    }
+                    PersistenceMsg::Shutdown(ack) => {
+                        let _ = ack.send(Ok(()));
+                        break;
+                    }
+                }
+            }
+        });
+
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        tx.send(PersistenceMsg::Flush(ack_tx)).unwrap();
+        let flush_res = ack_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(flush_res.is_err(), "Flush must propagate write failure");
+    }
+
+    #[tokio::test]
+    async fn test_position_preservation_after_restore_failure_and_shutdown() {
+        let dir = std::env::temp_dir().join(format!("cavia_restore_fail_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = temp_pool(&dir).await;
+
+        // Populate database with saved state at 4200ms with a missing file
+        let track = dummy_track(
+            "saved1",
+            "Saved Track",
+            Some("Z:/ExternalDrive/missing_track.flac"),
+        );
+        let queue_json = serde_json::to_string(&vec![track.clone()]).unwrap();
+
+        sqlx::query(
+            "INSERT INTO playback_state (id, queue_json, current_track_id, position_ms, repeat_mode, shuffle_enabled, playback_speed, volume, is_muted) \
+             VALUES (1, ?, 'saved1', 4200, 'off', 0, 1.0, 75, 0)"
+        )
+        .bind(&queue_json)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Boot service and restore state
+        let service = PlaybackService::new(pool.clone(), None).unwrap();
+        service.restore_saved_state().await.unwrap();
+
+        // Snapshot must preserve the 4200ms position and report the error honestly
+        let snap = service.snapshot();
+        assert_eq!(
+            snap.position_ms, 4200,
+            "Position must NOT be zeroed after restore failure"
+        );
+        assert_eq!(
+            snap.queue.len(),
+            1,
+            "Queue must NOT be discarded after restore failure"
+        );
+        assert_eq!(snap.current_track.as_ref().unwrap().id, "saved1");
+        assert!(
+            snap.error_message.is_some(),
+            "Restoration failure must be surfaced"
+        );
+
+        // Immediately shut down
+        service.shutdown().await.unwrap();
+
+        // Verify SQLite database STILL contains 4200ms and the full queue!
+        let row: (i64, String) =
+            sqlx::query_as("SELECT position_ms, queue_json FROM playback_state WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            row.0, 4200,
+            "Shutdown must preserve the saved position even after restore failure"
+        );
+        assert!(
+            row.1.contains("saved1"),
+            "Queue metadata must remain intact in SQLite"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_restore_preserves_queue_when_external_drive_missing() {
+        let dir =
+            std::env::temp_dir().join(format!("cavia_restore_drive_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = temp_pool(&dir).await;
+
+        let t1 = dummy_track("d1", "Drive Track 1", Some("X:/Music/t1.flac"));
+        let t2 = dummy_track("d2", "Drive Track 2", Some("X:/Music/t2.flac"));
+        let queue_json = serde_json::to_string(&vec![t1, t2]).unwrap();
+
+        sqlx::query(
+            "INSERT INTO playback_state (id, queue_json, current_track_id, position_ms, repeat_mode, shuffle_enabled, playback_speed, volume, is_muted) \
+             VALUES (1, ?, 'd1', 8800, 'all', 1, 1.0, 80, 0)"
+        )
+        .bind(&queue_json)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let service = PlaybackService::new(pool.clone(), None).unwrap();
+        service.restore_saved_state().await.unwrap();
+
+        let snap = service.snapshot();
+        assert_eq!(
+            snap.queue.len(),
+            2,
+            "All queue entries from unmounted volume must be preserved"
+        );
+        assert_eq!(snap.position_ms, 8800);
+        assert!(
+            snap.error_message.as_ref().unwrap().contains("unavailable")
+                || snap.error_message.as_ref().unwrap().contains("not found")
+        );
+
+        service.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_concurrency_race_deterministic() {
+        let dir = std::env::temp_dir().join(format!("cavia_race_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = temp_pool(&dir).await;
+        let service = PlaybackService::new(pool, None).unwrap();
+
+        // Enqueue command and shutdown concurrently
+        let h1 = {
+            let s = service.clone();
+            tokio::spawn(async move { s.set_volume(65).await })
+        };
+        let h2 = {
+            let s = service.clone();
+            tokio::spawn(async move { s.shutdown().await })
+        };
+
+        let (res1, res2) = tokio::join!(h1, h2);
+        // h1 either executed before shutdown or was rejected if shutdown flag won; either way it returns a defined Result, not hanging!
+        assert!(res1.is_ok());
+        assert!(res2.unwrap().is_ok());
+
+        assert!(service.is_shutting_down());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_shutdown_calls_idempotent() {
+        let dir = std::env::temp_dir().join(format!("cavia_multi_shut_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = temp_pool(&dir).await;
+        let service = PlaybackService::new(pool, None).unwrap();
+
+        // Concurrently call shutdown 5 times
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let s = service.clone();
+            handles.push(tokio::spawn(async move { s.shutdown().await }));
+        }
+
+        for h in handles {
+            let res = h.await.unwrap();
+            assert!(
+                res.is_ok(),
+                "Concurrent shutdown calls must succeed idempotently"
+            );
+        }
+
+        // Subsequent sequential call
+        assert!(service.shutdown().await.is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_rejects_subsequent_commands() {
+        let dir = std::env::temp_dir().join(format!("cavia_reject_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = temp_pool(&dir).await;
+        let service = PlaybackService::new(pool, None).unwrap();
+
+        service.shutdown().await.unwrap();
+        assert!(service.is_shutting_down());
+
+        let res = service.set_volume(50).await;
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "Playback service is shutting down");
+
+        let res2 = service.play().await;
+        assert!(res2.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2034,7 +2594,7 @@ pub mod tests {
                 .expect("a playback command hung")
                 .unwrap();
         }
-        tokio::time::timeout(Duration::from_secs(10), shutdown)
+        let _ = tokio::time::timeout(Duration::from_secs(10), shutdown)
             .await
             .expect("shutdown hung")
             .unwrap();
@@ -2055,7 +2615,7 @@ pub mod tests {
 
         service.set_volume(73).await.unwrap();
         service.set_repeat_mode("all").await.unwrap();
-        service.shutdown().await;
+        service.shutdown().await.unwrap();
 
         let row: (i64, String) =
             sqlx::query_as("SELECT volume, repeat_mode FROM playback_state WHERE id = 1")

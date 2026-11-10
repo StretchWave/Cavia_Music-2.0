@@ -203,7 +203,7 @@ impl AudioBackend for IosAvPlayerBackend {
 
     fn validate_source(&self, _file_path: &str) -> Result<(), PlaybackError> {
         Err(PlaybackError::BackendUnavailable(
-            "Android Media3 native playback engine is not yet integrated into this build.".into(),
+            "iOS AVPlayer native playback engine is not yet integrated into this build.".into(),
         ))
     }
 

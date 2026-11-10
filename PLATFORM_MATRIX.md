@@ -15,6 +15,6 @@ Legend: **Verified** means exercised in this remediation on the stated platform.
 | Mid-stream device disconnect recovery | **Unsupported** — no detection; manual retry button only | **Unsupported** | N/A | N/A |
 | Network audio playback | Standby | Standby | Not implemented | Not implemented |
 | Background playback | Process open | Process open; runtime-unverified | Standby (needs Media3 foreground service) | Standby (needs AVAudioSession) |
-| System media controls | SMTC initialized; OS Play/Pause verified; Seek/Next/Previous mapped but not exercised; attach failures surfaced | Standby (needs physical macOS verification) | Standby (needs Media3 MediaSession) | Standby (needs MPRemoteCommandCenter) |
+| System media controls | SMTC initialized; immediate snapshot refresh; OS Play/Pause verified; Seek/Next/Previous mapped but not exercised; attach and runtime errors surfaced | Standby (needs physical macOS verification) | Standby (needs Media3 MediaSession) | Standby (needs MPRemoteCommandCenter) |
 
 **Verification scope:** Windows 11 desktop, current debug binary launched with the Vite dev server and driven through WebView2 UI Automation. macOS, Android and iOS were not run in this remediation. Android/iOS are explicitly not integrated rather than silently mocked. Mid-stream device-disconnect resilience is not claimed.

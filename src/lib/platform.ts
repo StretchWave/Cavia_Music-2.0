@@ -3,7 +3,9 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 export type PlatformHealth = {
   app_version: string;
   database_connected: boolean;
-  audio_backend: 'ready' | 'device_unavailable' | 'not_integrated' | 'error' | 'unsupported';
+  audio_backend: 'ready' | 'device_unavailable' | 'not_integrated' | 'error' | 'unsupported' | 'initializing';
+  backend_name?: string;
+  active_migration?: string;
   system_media_controls: boolean;
   platform: string;
 };

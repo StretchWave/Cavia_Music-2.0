@@ -118,6 +118,13 @@ export function App() {
   const [scanProgress, setScanProgress] = useState<ScanProgressEvent | null>(null);
   const [scanNotification, setScanNotification] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
+
+  const showPlaybackError = useCallback((message: string) => {
+    setPlaybackError(message);
+    setPlayback((prev) => ({ ...prev, errorMessage: message }));
+    setTimeout(() => setPlaybackError(null), 6000);
+  }, []);
 
   // UI Drawer & Modal States
   const urlParams = useMemo(() => new URLSearchParams(window.location.search), []);
@@ -369,7 +376,9 @@ export function App() {
     try {
       await playPause();
     } catch (err) {
-      console.error('Play/Pause failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Play/Pause failed:', msg);
+      showPlaybackError(`Playback failed: ${msg}`);
     }
   };
 
@@ -379,7 +388,9 @@ export function App() {
       const nextHealth = await getPlatformHealth();
       setHealth(nextHealth);
     } catch (err) {
-      console.error('Retry audio device failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Retry audio device failed:', msg);
+      showPlaybackError(`Device retry failed: ${msg}`);
     }
   };
 
@@ -387,7 +398,9 @@ export function App() {
     try {
       await setQueue(tracks.map((t) => t.id), trackId);
     } catch (err) {
-      console.error('Play track failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Play track failed:', msg);
+      showPlaybackError(`Playback failed: ${msg}`);
     }
   };
 
@@ -397,7 +410,9 @@ export function App() {
         await setQueue(tracks.map((t) => t.id));
       }
     } catch (err) {
-      console.error('Play all failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Play all failed:', msg);
+      showPlaybackError(`Playback failed: ${msg}`);
     }
   };
 
@@ -408,7 +423,9 @@ export function App() {
         await setQueue(tracks.map((t) => t.id));
       }
     } catch (err) {
-      console.error('Shuffle all failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Shuffle all failed:', msg);
+      showPlaybackError(`Shuffle all failed: ${msg}`);
     }
   };
 
@@ -416,7 +433,9 @@ export function App() {
     try {
       await setQueue(likedTracks.map((t) => t.id), trackId);
     } catch (err) {
-      console.error('Play liked track failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Play liked track failed:', msg);
+      showPlaybackError(`Playback failed: ${msg}`);
     }
   };
 
@@ -426,7 +445,9 @@ export function App() {
         await setQueue(likedTracks.map((t) => t.id));
       }
     } catch (err) {
-      console.error('Play all liked failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Play all liked failed:', msg);
+      showPlaybackError(`Playback failed: ${msg}`);
     }
   };
 
@@ -437,7 +458,9 @@ export function App() {
         await setQueue(likedTracks.map((t) => t.id));
       }
     } catch (err) {
-      console.error('Shuffle all liked failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Shuffle all liked failed:', msg);
+      showPlaybackError(`Shuffle all liked failed: ${msg}`);
     }
   };
 
@@ -449,7 +472,9 @@ export function App() {
         await setQueue(playlistTracks.map((t) => t.id), startId);
       }
     } catch (err) {
-      console.error('Play playlist tracks failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Play playlist tracks failed:', msg);
+      showPlaybackError(`Playback failed: ${msg}`);
     }
   };
 
@@ -457,7 +482,9 @@ export function App() {
     try {
       await nextTrack();
     } catch (err) {
-      console.error('Next track failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Next track failed:', msg);
+      showPlaybackError(`Next track failed: ${msg}`);
     }
   };
 
@@ -465,7 +492,9 @@ export function App() {
     try {
       await previousTrack();
     } catch (err) {
-      console.error('Previous track failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Previous track failed:', msg);
+      showPlaybackError(`Previous track failed: ${msg}`);
     }
   };
 
@@ -473,7 +502,9 @@ export function App() {
     try {
       await seek(positionMs, playback.generation);
     } catch (err) {
-      console.error('Seek failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Seek failed:', msg);
+      showPlaybackError(`Seek failed: ${msg}`);
     }
   };
 
@@ -481,7 +512,9 @@ export function App() {
     try {
       await setVolume(vol);
     } catch (err) {
-      console.error('Set volume failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Set volume failed:', msg);
+      showPlaybackError(`Volume change failed: ${msg}`);
     }
   };
 
@@ -489,7 +522,9 @@ export function App() {
     try {
       await toggleMute();
     } catch (err) {
-      console.error('Toggle mute failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Toggle mute failed:', msg);
+      showPlaybackError(`Toggle mute failed: ${msg}`);
     }
   };
 
@@ -498,7 +533,9 @@ export function App() {
       const next = playback.repeatMode === 'off' ? 'all' : playback.repeatMode === 'all' ? 'one' : 'off';
       await setRepeatMode(next);
     } catch (err) {
-      console.error('Cycle repeat failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Cycle repeat failed:', msg);
+      showPlaybackError(`Repeat mode change failed: ${msg}`);
     }
   };
 
@@ -506,7 +543,9 @@ export function App() {
     try {
       await setShuffle(!playback.isShuffle);
     } catch (err) {
-      console.error('Toggle shuffle failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Toggle shuffle failed:', msg);
+      showPlaybackError(`Shuffle toggle failed: ${msg}`);
     }
   };
 
@@ -517,7 +556,9 @@ export function App() {
       const nextSpeed = speeds[(curIdx + 1) % speeds.length];
       await setPlaybackSpeed(nextSpeed);
     } catch (err) {
-      console.error('Set speed failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Set speed failed:', msg);
+      showPlaybackError(`Playback speed change failed: ${msg}`);
     }
   };
 
@@ -525,7 +566,9 @@ export function App() {
     try {
       await clearQueue();
     } catch (err) {
-      console.error('Clear queue failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Clear queue failed:', msg);
+      showPlaybackError(`Clear queue failed: ${msg}`);
     }
   };
 
@@ -537,7 +580,9 @@ export function App() {
         await removeFromQueue(trackId);
       }
     } catch (err) {
-      console.error('Remove from queue failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Remove from queue failed:', msg);
+      showPlaybackError(`Remove track failed: ${msg}`);
     }
   };
 
@@ -545,7 +590,9 @@ export function App() {
     try {
       await reorderQueue(fromIndex, toIndex);
     } catch (err) {
-      console.error('Reorder queue failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Reorder queue failed:', msg);
+      showPlaybackError(`Reorder queue failed: ${msg}`);
     }
   };
 
@@ -553,7 +600,9 @@ export function App() {
     try {
       await playTrack(trackId);
     } catch (err) {
-      console.error('Select queue track failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Select queue track failed:', msg);
+      showPlaybackError(`Playback failed: ${msg}`);
     }
   };
 
@@ -794,6 +843,22 @@ export function App() {
           </div>
         )}
 
+        {/* Playback Error Toast */}
+        {playbackError && (
+          <div className="cavia-toast toast-error" role="alert">
+            <XCircle size={16} className="text-danger" />
+            <span>{playbackError}</span>
+            <button
+              type="button"
+              className="toast-close"
+              onClick={() => setPlaybackError(null)}
+              aria-label="Dismiss error"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
         {/* Dynamic Page Scroll Area */}
         <div className="cavia-page-scroll" key={page} tabIndex={-1}>
           {page === 'library' && (
@@ -931,6 +996,7 @@ export function App() {
         queue={playback.queue}
         isPlaying={playback.status === 'playing'}
         status={playback.status}
+        isBackendReady={isBackendReady}
         onClearQueue={handleClearQueue}
         onRemoveTrack={handleRemoveQueueTrack}
         onSelectTrack={handleSelectQueueTrack}

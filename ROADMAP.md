@@ -36,6 +36,7 @@
 - [x] Format/stream capability matrix documented in `docs/audio-backends.md`
 - [x] Milestone 3 Playback Remediation: Dedicated audio actor control thread, native seeking without fallback, speed-adjusted position model across 0.5x–2.0x, atomic queue transitions, bounded skip policy, debounced volume slider, and ComCtl32 v6 test manifest.
 - [x] Third audit remediation: single Windows manifest for app and tests, owned persistence runtime, Tauri exit shutdown with durable flush, 5 s position persistence, atomic `set_queue` decoder probe, desktop/mobile health distinction, SMTC attach/status/progress, shuffle regression coverage, and 36 unit + 1 integration tests.
+- [x] Final correctness remediation: durable persistence write error propagation, restore position preservation across unmounted drives and failed loads, idempotent FIFO shutdown handshake without lost-reply races, immediate SMTC cache refresh and error propagation, atomic `set_queue` with payload decodability validation, UI control disabling and command failure toast surfacing, dynamic settings information, and explicit physical audio hardware test annotations (43 passed, 5 ignored for physical output device, 0 failed).
 - [ ] Mid-stream audio-device disconnect detection and automatic recovery (manual retry exists; currently unsupported).
 
 ## Milestone 4 — Product features

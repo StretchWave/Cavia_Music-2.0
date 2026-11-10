@@ -300,9 +300,17 @@ impl AudioBackend for RodioBackend {
         let file = File::open(path).map_err(|e| {
             PlaybackError::DecoderError(format!("Could not open file for validation: {e}"))
         })?;
-        Decoder::try_from(file).map(|_| ()).map_err(|e| {
+        let mut decoder = Decoder::try_from(file).map_err(|e| {
             PlaybackError::DecoderError(format!("Could not decode audio stream: {e:?}"))
-        })
+        })?;
+        // Inspect the first sample to ensure the stream contains valid, decodable audio frames
+        // and is not merely an empty or truncated header.
+        if decoder.next().is_none() {
+            return Err(PlaybackError::DecoderError(
+                "Audio stream contains no decodable audio frames or is truncated".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn is_device_ready(&self) -> bool {
@@ -356,147 +364,147 @@ pub mod tests {
     }
 
     #[test]
+    #[ignore = "requires a physical audio output device"]
     fn test_playback_lifecycle_with_real_audio() {
-        if let Ok(mut backend) = RodioBackend::new() {
-            if !backend.is_device_ready() {
-                eprintln!(
-                    "Skipping audio lifecycle test: No audio device available in test environment"
-                );
-                return;
-            }
-            let temp_dir =
-                std::env::temp_dir().join(format!("cavia_test_audio_{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&temp_dir).unwrap();
-            let wav_path = temp_dir.join("tone.wav");
-            create_test_wav_with_duration(&wav_path, 0.5);
+        let mut backend = RodioBackend::new().expect("backend should initialize");
+        assert!(
+            backend.is_device_ready(),
+            "Physical audio output device required for this test"
+        );
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_test_audio_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let wav_path = temp_dir.join("tone.wav");
+        create_test_wav_with_duration(&wav_path, 0.5);
 
-            assert!(backend.load(wav_path.to_str().unwrap(), 0).is_ok());
-            assert_eq!(backend.status(), PlaybackStatus::Playing);
+        assert!(backend.load(wav_path.to_str().unwrap(), 0).is_ok());
+        assert_eq!(backend.status(), PlaybackStatus::Playing);
 
-            assert!(backend.pause().is_ok());
-            assert_eq!(backend.status(), PlaybackStatus::Paused);
+        assert!(backend.pause().is_ok());
+        assert_eq!(backend.status(), PlaybackStatus::Paused);
 
-            assert!(backend.resume().is_ok());
-            assert_eq!(backend.status(), PlaybackStatus::Playing);
+        assert!(backend.resume().is_ok());
+        assert_eq!(backend.status(), PlaybackStatus::Playing);
 
-            assert!(backend.set_volume(0.5).is_ok());
-            assert!(backend.set_speed(1.25).is_ok());
+        assert!(backend.set_volume(0.5).is_ok());
+        assert!(backend.set_speed(1.25).is_ok());
 
-            assert!(backend.seek(100).is_ok());
-            assert_eq!(backend.seek_offset_ms, 100);
+        assert!(backend.seek(100).is_ok());
+        assert_eq!(backend.seek_offset_ms, 100);
 
-            assert!(backend.stop().is_ok());
-            assert_eq!(backend.status(), PlaybackStatus::Stopped);
+        assert!(backend.stop().is_ok());
+        assert_eq!(backend.status(), PlaybackStatus::Stopped);
 
-            let _ = std::fs::remove_dir_all(&temp_dir);
-        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
+    #[ignore = "requires a physical audio output device"]
     fn test_seeking_on_real_audio_fixture() {
-        if let Ok(mut backend) = RodioBackend::new() {
-            if !backend.is_device_ready() {
-                eprintln!("Skipping seek test: No audio device available");
-                return;
-            }
+        let mut backend = RodioBackend::new().expect("backend should initialize");
+        assert!(
+            backend.is_device_ready(),
+            "Physical audio output device required for this test"
+        );
 
-            let temp_dir =
-                std::env::temp_dir().join(format!("cavia_seek_test_{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&temp_dir).unwrap();
-            let wav_path = temp_dir.join("long_audio.wav");
-            // Create 5-second PCM WAV file
-            create_test_wav_with_duration(&wav_path, 5.0);
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_seek_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let wav_path = temp_dir.join("long_audio.wav");
+        // Create 5-second PCM WAV file
+        create_test_wav_with_duration(&wav_path, 5.0);
 
-            assert!(backend.load(wav_path.to_str().unwrap(), 0).is_ok());
-            assert_eq!(backend.duration_ms(), 5000);
+        assert!(backend.load(wav_path.to_str().unwrap(), 0).is_ok());
+        assert_eq!(backend.duration_ms(), 5000);
 
-            // Seek near start (500ms)
-            assert!(backend.seek(500).is_ok());
-            assert_eq!(backend.seek_offset_ms, 500);
-            assert_eq!(backend.position_ms(), 500);
+        // Seek near start (500ms)
+        assert!(backend.seek(500).is_ok());
+        assert_eq!(backend.seek_offset_ms, 500);
+        assert_eq!(backend.position_ms(), 500);
 
-            // Seek in middle (2500ms)
-            assert!(backend.seek(2500).is_ok());
-            assert_eq!(backend.seek_offset_ms, 2500);
-            assert_eq!(backend.position_ms(), 2500);
+        // Seek in middle (2500ms)
+        assert!(backend.seek(2500).is_ok());
+        assert_eq!(backend.seek_offset_ms, 2500);
+        assert_eq!(backend.position_ms(), 2500);
 
-            // Seek near end (4800ms)
-            assert!(backend.seek(4800).is_ok());
-            assert_eq!(backend.seek_offset_ms, 4800);
-            assert_eq!(backend.position_ms(), 4800);
+        // Seek near end (4800ms)
+        assert!(backend.seek(4800).is_ok());
+        assert_eq!(backend.seek_offset_ms, 4800);
+        assert_eq!(backend.position_ms(), 4800);
 
-            // Seek beyond duration (clamps to 5000ms)
-            assert!(backend.seek(10000).is_ok());
-            assert_eq!(backend.seek_offset_ms, 5000);
-            assert_eq!(backend.position_ms(), 5000);
+        // Seek beyond duration (clamps to 5000ms)
+        assert!(backend.seek(10000).is_ok());
+        assert_eq!(backend.seek_offset_ms, 5000);
+        assert_eq!(backend.position_ms(), 5000);
 
-            let _ = backend.stop();
-            let _ = std::fs::remove_dir_all(&temp_dir);
-        }
+        let _ = backend.stop();
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
+    #[ignore = "requires a physical audio output device"]
     fn test_position_and_seeking_at_multiple_speeds() {
-        if let Ok(mut backend) = RodioBackend::new() {
-            if !backend.is_device_ready() {
-                return;
-            }
+        let mut backend = RodioBackend::new().expect("backend should initialize");
+        assert!(
+            backend.is_device_ready(),
+            "Physical audio output device required for this test"
+        );
 
-            let temp_dir =
-                std::env::temp_dir().join(format!("cavia_speed_test_{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&temp_dir).unwrap();
-            let wav_path = temp_dir.join("speed_audio.wav");
-            create_test_wav_with_duration(&wav_path, 10.0);
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_speed_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let wav_path = temp_dir.join("speed_audio.wav");
+        create_test_wav_with_duration(&wav_path, 10.0);
 
-            assert!(backend.load(wav_path.to_str().unwrap(), 0).is_ok());
+        assert!(backend.load(wav_path.to_str().unwrap(), 0).is_ok());
 
-            let test_speeds = [0.5f32, 1.0f32, 1.25f32, 2.0f32];
-            for &spd in &test_speeds {
-                assert!(backend.set_speed(spd).is_ok());
-                // Seek to 3000ms in media timeline
-                assert!(backend.seek(3000).is_ok());
+        let test_speeds = [0.5f32, 1.0f32, 1.25f32, 2.0f32];
+        for &spd in &test_speeds {
+            assert!(backend.set_speed(spd).is_ok());
+            // Seek to 3000ms in media timeline
+            assert!(backend.seek(3000).is_ok());
 
-                // Media position immediately after seek must be 3000ms (+/- 50ms tolerance)
-                let pos = backend.position_ms();
-                assert!(
-                    (pos as i64 - 3000).abs() <= 50,
-                    "Expected ~3000ms at {spd}x speed, got {pos}ms"
-                );
-            }
-
-            let _ = backend.stop();
-            let _ = std::fs::remove_dir_all(&temp_dir);
+            // Media position immediately after seek must be 3000ms (+/- 50ms tolerance)
+            let pos = backend.position_ms();
+            assert!(
+                (pos as i64 - 3000).abs() <= 50,
+                "Expected ~3000ms at {spd}x speed, got {pos}ms"
+            );
         }
+
+        let _ = backend.stop();
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
+    #[ignore = "requires a physical audio output device"]
     fn test_seek_latency_on_long_audio_is_instantaneous() {
-        if let Ok(mut backend) = RodioBackend::new() {
-            if !backend.is_device_ready() {
-                return;
-            }
+        let mut backend = RodioBackend::new().expect("backend should initialize");
+        assert!(
+            backend.is_device_ready(),
+            "Physical audio output device required for this test"
+        );
 
-            let temp_dir =
-                std::env::temp_dir().join(format!("cavia_latency_test_{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&temp_dir).unwrap();
-            let wav_path = temp_dir.join("long_audio_30s.wav");
-            create_test_wav_with_duration(&wav_path, 30.0);
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_latency_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let wav_path = temp_dir.join("long_audio_30s.wav");
+        create_test_wav_with_duration(&wav_path, 30.0);
 
-            assert!(backend.load(wav_path.to_str().unwrap(), 0).is_ok());
+        assert!(backend.load(wav_path.to_str().unwrap(), 0).is_ok());
 
-            let start = std::time::Instant::now();
-            assert!(backend.seek(25000).is_ok());
-            let elapsed = start.elapsed();
+        let start = std::time::Instant::now();
+        assert!(backend.seek(25000).is_ok());
+        let elapsed = start.elapsed();
 
-            // Native seek must complete quickly without decoding 25 seconds of PCM samples
-            assert!(
-                elapsed < Duration::from_millis(500),
-                "Seek took too long ({elapsed:?}), slow fallback detected"
-            );
+        // Native seek must complete quickly without decoding 25 seconds of PCM samples
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "Seek took too long ({elapsed:?}), slow fallback detected"
+        );
 
-            let _ = backend.stop();
-            let _ = std::fs::remove_dir_all(&temp_dir);
-        }
+        let _ = backend.stop();
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

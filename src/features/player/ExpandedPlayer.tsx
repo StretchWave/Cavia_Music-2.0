@@ -28,7 +28,7 @@ interface ExpandedPlayerProps {
   onClose: () => void;
   playback: PlaybackState;
   isBackendReady: boolean;
-  audioBackendStatus?: 'ready' | 'device_unavailable' | 'not_integrated' | 'error' | 'unsupported';
+  audioBackendStatus?: 'ready' | 'device_unavailable' | 'not_integrated' | 'error' | 'unsupported' | 'initializing';
   onOpenQueue: () => void;
   onOpenLyrics: () => void;
   onTogglePlay?: () => void;
@@ -116,8 +116,29 @@ export function ExpandedPlayer({
         </div>
 
         <div className="expanded-header-actions">
-          <Badge variant={isBackendReady ? 'ready' : 'outline'} size="sm">
-            {isBackendReady ? 'NATIVE AUDIO ENGINE CONNECTED' : 'AUDIO ENGINE STANDBY'}
+          <Badge
+            variant={
+              isBackendReady
+                ? 'ready'
+                : audioBackendStatus === 'error'
+                ? 'warn'
+                : 'outline'
+            }
+            size="sm"
+          >
+            {isBackendReady
+              ? 'NATIVE AUDIO ENGINE CONNECTED'
+              : audioBackendStatus === 'device_unavailable'
+              ? 'AUDIO DEVICE UNAVAILABLE'
+              : audioBackendStatus === 'not_integrated'
+              ? 'BACKEND NOT INTEGRATED'
+              : audioBackendStatus === 'error'
+              ? 'ENGINE ERROR'
+              : audioBackendStatus === 'unsupported'
+              ? 'BACKEND UNSUPPORTED'
+              : audioBackendStatus === 'initializing'
+              ? 'ENGINE INITIALIZING'
+              : 'AUDIO ENGINE STANDBY'}
           </Badge>
           <IconButton
             label="Share track"
@@ -217,8 +238,9 @@ export function ExpandedPlayer({
                 <button
                   type="button"
                   className="badge-speed-btn"
+                  disabled={!isBackendReady}
                   onClick={onCycleSpeed}
-                  title="Click to change playback speed"
+                  title={!isBackendReady ? 'Playback engine unavailable' : 'Click to change playback speed'}
                 >
                   <Badge variant="outline" size="sm">
                     RATE: {playbackSpeed}x
@@ -230,12 +252,41 @@ export function ExpandedPlayer({
                 <Badge variant="outline" size="sm">
                   AUDIO STANDBY
                 </Badge>
-                <Badge variant="neutral" size="sm">
-                  {isBackendReady ? 'ENGINE READY' : audioBackendStatus === 'device_unavailable' ? 'NO AUDIO DEVICE' : 'ENGINE INITIALIZING'}
+                <Badge
+                  variant={
+                    isBackendReady
+                      ? 'ready'
+                      : audioBackendStatus === 'error'
+                      ? 'warn'
+                      : 'neutral'
+                  }
+                  size="sm"
+                >
+                  {isBackendReady
+                    ? 'ENGINE READY'
+                    : audioBackendStatus === 'device_unavailable'
+                    ? 'DEVICE UNAVAILABLE'
+                    : audioBackendStatus === 'not_integrated'
+                    ? 'BACKEND NOT INTEGRATED'
+                    : audioBackendStatus === 'error'
+                    ? 'ENGINE ERROR'
+                    : audioBackendStatus === 'unsupported'
+                    ? 'UNSUPPORTED'
+                    : audioBackendStatus === 'initializing'
+                    ? 'ENGINE INITIALIZING'
+                    : 'ENGINE STANDBY'}
                 </Badge>
-                <Badge variant="outline" size="sm">
-                  RATE: {playbackSpeed}x
-                </Badge>
+                <button
+                  type="button"
+                  className="badge-speed-btn"
+                  disabled={!isBackendReady}
+                  onClick={onCycleSpeed}
+                  title={!isBackendReady ? 'Playback engine unavailable' : 'Click to change playback speed'}
+                >
+                  <Badge variant="outline" size="sm">
+                    RATE: {playbackSpeed}x
+                  </Badge>
+                </button>
               </>
             )}
           </div>
@@ -370,8 +421,26 @@ export function ExpandedPlayer({
 
       <footer className="expanded-footer">
         <div className="expanded-pipeline-note">
-          <span className="pipeline-dot ready" />
-          <span>AUDIO ENGINE: NATIVE ZERO-DEPENDENCY ENGINE (RODIO / CPAL WASAPI) · VERIFIED</span>
+          <span
+            className={`pipeline-dot ${
+              isBackendReady ? 'ready' : audioBackendStatus === 'error' ? 'error' : 'muted'
+            }`}
+          />
+          <span>
+            {isBackendReady
+              ? 'AUDIO ENGINE: NATIVE ZERO-DEPENDENCY ENGINE (RODIO / CPAL WASAPI) · VERIFIED'
+              : audioBackendStatus === 'device_unavailable'
+              ? 'AUDIO ENGINE: PHYSICAL AUDIO OUTPUT DEVICE UNAVAILABLE'
+              : audioBackendStatus === 'not_integrated'
+              ? 'AUDIO ENGINE: BACKEND NOT INTEGRATED FOR THIS PLATFORM'
+              : audioBackendStatus === 'error'
+              ? 'AUDIO ENGINE: INITIALIZATION ERROR'
+              : audioBackendStatus === 'unsupported'
+              ? 'AUDIO ENGINE: UNSUPPORTED'
+              : audioBackendStatus === 'initializing'
+              ? 'AUDIO ENGINE: INITIALIZING'
+              : 'AUDIO ENGINE: STANDBY'}
+          </span>
         </div>
       </footer>
     </div>

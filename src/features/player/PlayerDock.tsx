@@ -26,7 +26,7 @@ import type { PlaybackState } from '../../lib/types';
 interface PlayerDockProps {
   playback: PlaybackState;
   isBackendReady: boolean;
-  audioBackendStatus?: 'ready' | 'device_unavailable' | 'not_integrated' | 'error' | 'unsupported';
+  audioBackendStatus?: 'ready' | 'device_unavailable' | 'not_integrated' | 'error' | 'unsupported' | 'initializing';
   onRetryDevice?: () => void;
   onOpenExpanded: () => void;
   onOpenQueue: () => void;
@@ -80,10 +80,16 @@ export function PlayerDock({
   const engineTooltip = isBackendReady
     ? undefined
     : audioBackendStatus === 'device_unavailable'
-      ? 'No audio output device found'
+      ? 'Audio device unavailable'
       : audioBackendStatus === 'not_integrated'
-        ? 'Audio backend not integrated for this platform'
-        : 'Audio engine is initializing';
+        ? 'Audio backend not integrated'
+        : audioBackendStatus === 'error'
+          ? 'Audio engine error'
+          : audioBackendStatus === 'unsupported'
+            ? 'Backend capability unsupported'
+            : audioBackendStatus === 'initializing'
+              ? 'Audio engine initializing'
+              : 'Audio engine standby';
 
   return (
     <footer className="cavia-player-dock" role="region" aria-label="Audio player">
@@ -226,12 +232,24 @@ export function PlayerDock({
               ? 'Active audio backend: Native Rodio (WASAPI / CoreAudio via Symphonia)'
               : audioBackendStatus === 'device_unavailable'
               ? 'No audio output device found on system'
-              : 'Audio engine is standby or initializing'
+              : audioBackendStatus === 'not_integrated'
+              ? 'Audio backend not integrated for this platform'
+              : audioBackendStatus === 'error'
+              ? 'Audio engine initialization error'
+              : audioBackendStatus === 'unsupported'
+              ? 'Audio backend unsupported'
+              : audioBackendStatus === 'initializing'
+              ? 'Audio engine is initializing'
+              : 'Audio engine standby'
           }
         >
           <span
             className={`status-indicator-dot ${
-              playback.errorMessage ? 'error' : isBackendReady ? 'ready' : 'muted'
+              playback.errorMessage || audioBackendStatus === 'error'
+                ? 'error'
+                : isBackendReady
+                ? 'ready'
+                : 'muted'
             }`}
           />
           <span className="engine-status-text">
@@ -240,7 +258,15 @@ export function PlayerDock({
               : isBackendReady
               ? 'ENGINE READY'
               : audioBackendStatus === 'device_unavailable'
-              ? 'NO AUDIO DEVICE'
+              ? 'DEVICE UNAVAILABLE'
+              : audioBackendStatus === 'not_integrated'
+              ? 'BACKEND NOT INTEGRATED'
+              : audioBackendStatus === 'error'
+              ? 'ENGINE ERROR'
+              : audioBackendStatus === 'unsupported'
+              ? 'UNSUPPORTED'
+              : audioBackendStatus === 'initializing'
+              ? 'ENGINE INITIALIZING'
               : 'ENGINE STANDBY'}
           </span>
         </div>
@@ -258,7 +284,8 @@ export function PlayerDock({
         <button
           type="button"
           className="dock-speed-pill"
-          title="Click to cycle playback rate"
+          disabled={!isBackendReady}
+          title={!isBackendReady ? 'Playback engine unavailable' : 'Click to cycle playback rate'}
           onClick={onCycleSpeed}
         >
           <span>{playbackSpeed}x</span>

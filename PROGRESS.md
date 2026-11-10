@@ -347,3 +347,69 @@ This section supersedes earlier test counts and device-resilience/SMTC claims wh
 - SMTC overlay visuals and media-key Next/Previous/Seek were not exercised; Play/Pause were.
 - UI automation covered the 1440×900 desktop window; responsive viewports and reduced-motion states were not re-reviewed in this remediation.
 - No Milestone 4 work was started.
+
+---
+
+## 10. Milestone 3 Final Correctness Remediation (current)
+
+This section documents the final correctness remediation addressing all blockers identified in the independent DeepSeek audit.
+
+### A. Persistence Write Failure Propagation (Priority 0)
+- `write_playback_state()` now returns `Result<(), sqlx::Error>` and propagates database errors.
+- `PersistenceMsg::Flush(Sender<Result<(), String>>)` and `PersistenceMsg::Shutdown(Sender<Result<(), String>>)` acknowledge flush only after the database write succeeds, returning explicit errors if the write fails.
+- Persistence worker thread lifecycle handshake (`init_tx`) verifies Tokio runtime creation before `PlaybackService::new` returns. If runtime initialization fails, initialization returns an explicit `Err`.
+- Added regression tests:
+  - `test_write_playback_state_propagates_sql_error`: verifies direct SQLx query errors are propagated.
+  - `test_failed_flush_acknowledgement_propagates_error`: verifies flush failure acknowledgement propagation.
+
+### B. Restoration Position Preservation Across Media Failures (Priority 0)
+- `PlaybackCore` introduces `restored_position_ms: Option<i64>`. When restoring a saved session, `restored_position_ms` preserves `saved_position_ms` even if `backend.load()` fails due to unmounted drives, deleted files, or decoder errors.
+- `snapshot()` and `persist_state()` prioritize `restored_position_ms` over `backend.position_ms()` (which reads zero when no audio is loaded), preventing zero-overwrites when media is temporarily inaccessible.
+- Distinguishes unmounted drives (`External media volume unavailable`) from missing files (`Media file not found`).
+- Restores full queue metadata from `queue_json` without silently dropping unmounted drive tracks.
+- Added regression tests:
+  - `test_position_preservation_after_restore_failure_and_shutdown`: verifies non-zero saved resume position survives restore failure and subsequent shutdown write.
+  - `test_restore_preserves_queue_when_external_drive_missing`: verifies complete queue persistence when external volume is detached.
+
+### C. Shutdown Handshake Protocol & Race Resolution (Priority 0)
+- Redesigned shutdown protocol to be idempotent and deterministic:
+  - `is_shutting_down` atomic flag blocks incoming external commands (`guard_shutdown!`).
+  - Worker actor loop executes a continuous `loop`, exiting **only** upon receiving `PlaybackCommand::Shutdown` or channel disconnect, guaranteeing that in-flight commands are drained and the shutdown command is consumed.
+  - `shutdown()` sends `PlaybackCommand::Shutdown(reply_tx)` and awaits the reply with a 5-second timeout, joins actor and persistence threads safely, and returns `Result<(), String>`.
+  - Persistence worker flushes pending state and replies to `PersistenceMsg::Shutdown` before terminating.
+- Added concurrency tests:
+  - `test_shutdown_concurrency_race_deterministic`: forces normal command execution concurrently with shutdown, verifying defined response and clean termination.
+  - `test_multiple_shutdown_calls_idempotent`: verifies concurrent and repeated shutdown calls return `Ok(())`.
+  - `test_shutdown_rejects_subsequent_commands`: verifies commands after shutdown return explicit error.
+
+### D. SMTC Health, Immediate Refresh & Error Propagation (Priority 1)
+- `init_media_controls()` immediately calls `update_snapshot_cache()` and `emit_state()` upon successful initialization, eliminating stale `SMTC UNAVAILABLE` status on startup.
+- Runtime errors from `souvlaki` operations (`attach()`, `set_metadata()`, `set_playback()`, `sync_media_playback_state()`) are captured and logged with warnings rather than discarded.
+- Audio backend and capability reporting reflect actual attachment without requiring an unrelated user interaction.
+
+### E. Atomic `set_queue` Semantics & Decodable Frame Validation (Priority 1)
+- Removed bounded-skip fallback on initial track selection in `set_queue()`.
+- Implemented transactional candidate validation: verifies track existence and calls `AudioBackend::validate_source()` before mutating the player or queue.
+- `validate_source()` now probes both the container header and inspects the first decodable audio sample (`decoder.next().is_none()`), detecting empty or truncated audio payloads that pass header-only checks.
+- If target track fails validation, previous queue, track selection, and playback state remain completely untouched.
+- Added regression tests:
+  - `test_set_queue_fails_atomically_on_missing_track_preserving_previous_queue`
+  - `test_set_queue_fails_atomically_on_corrupt_header_preserving_previous_queue`
+  - `test_set_queue_fails_atomically_on_valid_header_with_truncated_audio_preserving_previous_queue`
+  - `test_set_queue_fails_atomically_on_unsupported_codec_preserving_previous_queue`
+  - `test_set_queue_succeeds_on_valid_track_and_supports_normal_navigation`
+
+### F. Frontend UI Correctness & Failure Surfacing (Priority 1)
+- Accurate status reporting across `PlayerDock`, `ExpandedPlayer`, and `SettingsView`: honest mapping of `ready`, `device_unavailable`, `not_integrated`, `error`, `unsupported`, and `initializing`.
+- Controls disabled when playback backend unavailable: speed controls and queue selection disabled when `!isBackendReady`.
+- Playback command failures surfaced to the user via Cavia-styled toast notifications (`cavia-toast toast-error`) with auto-dismiss.
+- Settings updated: backend displayed as native Rodio (CPAL WASAPI + Symphonia on Windows; CoreAudio on macOS), active SQLx migration dynamically queried from `_sqlx_migrations`.
+- iOS stub error message corrected to reference iOS AVPlayer.
+
+### G. Physical Hardware Test Annotations & Verification Suite (Priority 2)
+- All physical audio hardware tests explicitly annotated with `#[ignore = "requires a physical audio output device"]` and explicit `assert!(backend.is_device_ready())`.
+- Test suite summary:
+  - **43 unit tests passed, 0 failed, 5 ignored (physical audio device required)**
+  - **1 integration smoke test passed**
+  - **`npm run build` passing cleanly**
+  - **`cargo fmt --check` and `cargo check --all-targets` passing cleanly**

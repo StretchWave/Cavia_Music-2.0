@@ -121,7 +121,7 @@ pub fn run() {
             api.prevent_exit();
 
             let state = app_handle.state::<AppState>();
-            tauri::async_runtime::block_on(state.playback.shutdown());
+            let _ = tauri::async_runtime::block_on(state.playback.shutdown());
             app_handle.exit(0);
         }
     });

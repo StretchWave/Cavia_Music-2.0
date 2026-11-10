@@ -20,6 +20,7 @@ interface QueueDrawerProps {
   queue: Track[];
   isPlaying?: boolean;
   status?: string;
+  isBackendReady?: boolean;
   onClearQueue?: () => void;
   onRemoveTrack?: (id: string, index?: number) => void;
   onSelectTrack?: (id: string) => void;
@@ -34,6 +35,7 @@ export function QueueDrawer({
   queue,
   isPlaying = false,
   status = 'idle',
+  isBackendReady = true,
   onClearQueue,
   onRemoveTrack,
   onSelectTrack,
@@ -126,7 +128,8 @@ export function QueueDrawer({
                   <button
                     type="button"
                     className="queue-action-link"
-                    title="Shuffle upcoming queue"
+                    title={!isBackendReady ? 'Audio engine unavailable' : 'Shuffle upcoming queue'}
+                    disabled={!isBackendReady}
                     onClick={onShuffleQueue}
                   >
                     <Shuffle size={13} />
@@ -155,8 +158,13 @@ export function QueueDrawer({
                       key={`${track.id}-${index}`}
                       className={`queue-item ${isCurrent ? 'active-queue-item' : ''} ${
                         isDragging ? 'dragging' : ''
-                      } ${isDragOver ? 'drag-over' : ''}`}
-                      onClick={() => onSelectTrack?.(track.id)}
+                      } ${isDragOver ? 'drag-over' : ''} ${!isBackendReady ? 'disabled' : ''}`}
+                      onClick={() => {
+                        if (isBackendReady) {
+                          onSelectTrack?.(track.id);
+                        }
+                      }}
+                      title={!isBackendReady ? 'Audio engine unavailable' : undefined}
                       role="button"
                       tabIndex={0}
                       draggable

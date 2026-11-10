@@ -261,7 +261,7 @@ export function SettingsView({
             <div className="banner-content">
               <strong>Playback Engine Boundary Architecture</strong>
               <p>
-                All platforms share a common Cavia audio contract. Windows and macOS utilize the <code>rsmpv</code> libmpv candidate; Android utilizes Media3 / ExoPlayer; iOS utilizes AVPlayer. Controls remain safely disabled until concrete backend initialization occurs.
+                All platforms share a common Cavia audio contract. Windows utilizes native Rodio (CPAL WASAPI + Symphonia); macOS utilizes Rodio (CPAL CoreAudio); Android and iOS native playback engines are unintegrated in this desktop build. Controls remain safely disabled until concrete backend initialization occurs.
               </p>
             </div>
             <Badge variant="warn" size="sm">
@@ -275,7 +275,7 @@ export function SettingsView({
                 <Sliders size={18} className="card-icon" />
                 <div>
                   <h3>Audio Backend Status</h3>
-                  <p>Target: {health?.platform ?? 'Windows x86_64'}</p>
+                  <p>Target: {health?.platform ?? 'Windows x86_64'} · Backend: <code>{health?.backend_name ?? 'rodio_native'}</code></p>
                 </div>
               </div>
               <div className="setting-status-line">
@@ -297,7 +297,11 @@ export function SettingsView({
                         ? 'BACKEND NOT INTEGRATED'
                         : health?.audio_backend === 'error'
                           ? 'INITIALIZATION ERROR'
-                          : 'STANDBY'}
+                          : health?.audio_backend === 'unsupported'
+                            ? 'UNSUPPORTED'
+                            : health?.audio_backend === 'initializing'
+                              ? 'INITIALIZING'
+                              : 'STANDBY'}
                 </Badge>
                 <span className="text-muted-xs">
                   {health?.system_media_controls ? 'SMTC ACTIVE' : 'SMTC UNAVAILABLE'} · No mock audio
@@ -344,7 +348,7 @@ export function SettingsView({
               </div>
               <div className="sqlite-stat-box">
                 <span className="box-label">SCHEMA MIGRATION</span>
-                <strong className="box-val">0001_initial.sql (Active)</strong>
+                <strong className="box-val">{health?.active_migration ?? '0002_playback_state_volume.sql (Active)'}</strong>
               </div>
               <div className="sqlite-stat-box">
                 <span className="box-label">SQLITE JOURNAL</span>
