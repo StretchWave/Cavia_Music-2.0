@@ -60,6 +60,7 @@ impl RodioBackend {
             PlaybackError::DeviceError(format!("Failed to open default audio output sink: {e:?}"))
         })?;
         let player = Player::connect_new(&sink.mixer());
+        player.pause();
         Ok((sink, player))
     }
 
@@ -117,8 +118,9 @@ impl AudioBackend for RodioBackend {
         self.ensure_player_ready()?;
         let sink = self.sink.as_ref().unwrap();
 
-        // Connect candidate player to the mixer
+        // Connect candidate player to the mixer in paused state to prevent audio leak
         let player = Player::connect_new(&sink.mixer());
+        player.pause();
         player.set_volume(self.volume);
         player.set_speed(self.speed);
         player.append(decoder);
@@ -150,17 +152,22 @@ impl AudioBackend for RodioBackend {
             0
         };
 
-        // Candidate successfully prepared: atomically stop previous player and switch
+        // Candidate successfully prepared: atomically stop previous player before starting new one
         if let Some(old_player) = self.player.take() {
             old_player.stop();
         }
 
-        player.play();
+        let should_play = self.status != PlaybackStatus::Paused;
+        if should_play {
+            player.play();
+            self.status = PlaybackStatus::Playing;
+        } else {
+            self.status = PlaybackStatus::Paused;
+        }
         self.player = Some(player);
         self.current_path = Some(path.to_path_buf());
         self.current_duration_ms = total_dur;
         self.seek_offset_ms = clamped_start;
-        self.status = PlaybackStatus::Playing;
         Ok(())
     }
 
@@ -377,6 +384,116 @@ pub mod tests {
             assert!(matches!(res, Err(PlaybackError::FileNotFound(_))));
             assert_eq!(backend.status(), PlaybackStatus::Error);
         }
+    }
+
+    #[test]
+    fn test_candidate_player_is_paused_during_initialization() {
+        if let Ok((_sink, player)) = RodioBackend::init_device() {
+            assert!(
+                player.is_paused(),
+                "Candidate player must be paused immediately upon creation before appending audio"
+            );
+        }
+    }
+
+    #[test]
+    fn test_decoder_failure_preserves_old_player() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_dec_fail_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let valid_wav = temp_dir.join("valid.wav");
+        create_test_wav_with_duration(&valid_wav, 0.5);
+
+        let corrupt_wav = temp_dir.join("corrupt.wav");
+        std::fs::write(
+            &corrupt_wav,
+            b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00corrupt_data",
+        )
+        .unwrap();
+
+        if let Ok(mut backend) = RodioBackend::new() {
+            if backend.is_device_ready() {
+                // 1. Establish active playback with valid track
+                let res1 = backend.load(valid_wav.to_str().unwrap(), 0);
+                assert!(res1.is_ok());
+                assert_eq!(backend.status(), PlaybackStatus::Playing);
+                assert_eq!(backend.current_path.as_ref(), Some(&valid_wav));
+
+                // 2. Attempt to load corrupt track
+                let res2 = backend.load(corrupt_wav.to_str().unwrap(), 0);
+                assert!(res2.is_err(), "Corrupt audio must fail decoding");
+
+                // 3. Old player must be retained and active; status must remain Playing
+                assert_eq!(backend.status(), PlaybackStatus::Playing);
+                assert_eq!(backend.current_path.as_ref(), Some(&valid_wav));
+                assert!(backend.player.is_some());
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_candidate_lifecycle_paused_state_preserved() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_pause_pres_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let track1 = temp_dir.join("t1.wav");
+        let track2 = temp_dir.join("t2.wav");
+        create_test_wav_with_duration(&track1, 0.5);
+        create_test_wav_with_duration(&track2, 0.5);
+
+        if let Ok(mut backend) = RodioBackend::new() {
+            if backend.is_device_ready() {
+                // 1. Start track 1 then pause
+                backend.load(track1.to_str().unwrap(), 0).unwrap();
+                backend.pause().unwrap();
+                assert_eq!(backend.status(), PlaybackStatus::Paused);
+
+                // 2. Load track 2 while paused: candidate must remain paused
+                backend.load(track2.to_str().unwrap(), 0).unwrap();
+                assert_eq!(
+                    backend.status(),
+                    PlaybackStatus::Paused,
+                    "Loading track while paused must leave candidate player paused"
+                );
+                assert!(
+                    backend.player.as_ref().unwrap().is_paused(),
+                    "Candidate rodio player must be paused"
+                );
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_rapid_track_changes_prevent_audio_overlap() {
+        let temp_dir = std::env::temp_dir().join(format!("cavia_rapid_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let mut tracks = Vec::new();
+        for i in 0..5 {
+            let p = temp_dir.join(format!("t{i}.wav"));
+            create_test_wav_with_duration(&p, 0.3);
+            tracks.push(p);
+        }
+
+        if let Ok(mut backend) = RodioBackend::new() {
+            if backend.is_device_ready() {
+                for t in &tracks {
+                    let res = backend.load(t.to_str().unwrap(), 0);
+                    assert!(res.is_ok());
+                    assert_eq!(backend.status(), PlaybackStatus::Playing);
+                    assert!(backend.player.is_some());
+                }
+                assert_eq!(backend.current_path.as_ref(), Some(&tracks[4]));
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

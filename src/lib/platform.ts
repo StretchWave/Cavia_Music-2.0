@@ -9,6 +9,8 @@ export type PlatformHealth = {
   system_media_controls: boolean;
   smtc_status?: string;
   smtc_error?: string | null;
+  persistence_status: 'healthy' | 'write_pending' | 'write_failed' | 'worker_unavailable' | 'shutting_down' | string;
+  persistence_error?: string | null;
   platform: string;
 };
 

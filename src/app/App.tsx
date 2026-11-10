@@ -54,6 +54,7 @@ import {
   retryAudioDevice,
   retryShutdown,
   forceExit,
+  type ShutdownErrorPayload,
   seek,
   setPlaybackSpeed,
   setQueue,
@@ -78,6 +79,7 @@ import { PlayerDock } from '../features/player/PlayerDock';
 import { ExpandedPlayer } from '../features/player/ExpandedPlayer';
 import { QueueDrawer } from '../features/player/QueueDrawer';
 import { LyricsDrawer } from '../features/player/LyricsDrawer';
+import { AddToPlaylistModal } from '../features/library/AddToPlaylistModal';
 
 const pageLabels: Record<Page, string> = {
   library: 'Personal Archive',
@@ -136,6 +138,16 @@ export function App() {
   const [isLyricsOpen, setIsLyricsOpen] = useState(urlParams.get('lyrics') === 'true');
   const [shutdownError, setShutdownError] = useState<string | null>(null);
   const [isRetryingShutdown, setIsRetryingShutdown] = useState(false);
+
+  // Add to Playlist modal state
+  const [addToPlaylistData, setAddToPlaylistData] = useState<{
+    isOpen: boolean;
+    tracks: Track[];
+    contextLabel?: string;
+  }>({
+    isOpen: false,
+    tracks: [],
+  });
 
   // Appearance preferences
   const [density, setDensity] = useState<'standard' | 'compact'>('standard');
@@ -295,7 +307,7 @@ export function App() {
     });
 
     let unlistenShutdown: (() => void) | undefined;
-    listen<{ error: string }>('app:shutdown-error', (event) => {
+    listen<ShutdownErrorPayload>('app:shutdown-error', (event) => {
       setShutdownError(event.payload.error);
     }).then((fn) => {
       unlistenShutdown = fn;
@@ -403,6 +415,31 @@ export function App() {
       console.error('Error deleting playlist from SQLite:', err);
     }
   };
+
+  const handleOpenAddToPlaylist = useCallback((track: Track) => {
+    setAddToPlaylistData({
+      isOpen: true,
+      tracks: [track],
+      contextLabel: `Track: ${track.title}`,
+    });
+  }, []);
+
+  const handleOpenAddAlbumToPlaylist = useCallback(
+    (album: Album) => {
+      const albumTracks = tracks.filter(
+        (t) =>
+          t.album.toLowerCase() === album.title.toLowerCase() &&
+          (t.albumArtist?.toLowerCase() === album.artist.toLowerCase() ||
+            t.artist.toLowerCase() === album.artist.toLowerCase())
+      );
+      setAddToPlaylistData({
+        isOpen: true,
+        tracks: albumTracks.length > 0 ? albumTracks : [],
+        contextLabel: `Album: ${album.title}`,
+      });
+    },
+    [tracks]
+  );
 
   // Playback transport handlers (native Rust backend authoritative)
   const handleTogglePlay = async () => {
@@ -919,6 +956,7 @@ export function App() {
               onShuffleAll={handleShuffleAll}
               currentTrackId={playback.currentTrack?.id}
               isPlaying={playback.status === 'playing'}
+              onAddToPlaylist={handleOpenAddToPlaylist}
             />
           )}
 
@@ -929,6 +967,7 @@ export function App() {
               onDeletePlaylist={handleDeletePlaylist}
               isBackendReady={isBackendReady}
               onPlayTracks={handlePlayPlaylistTracks}
+              onPlaylistUpdated={refreshLibrary}
             />
           )}
 
@@ -937,6 +976,7 @@ export function App() {
               albums={albums}
               onImportFolder={handleImportFolder}
               isScanning={isScanning}
+              onAddAlbumToPlaylist={handleOpenAddAlbumToPlaylist}
             />
           )}
 
@@ -958,6 +998,7 @@ export function App() {
               onShuffleAll={handleShuffleAllLiked}
               currentTrackId={playback.currentTrack?.id}
               isPlaying={playback.status === 'playing'}
+              onAddToPlaylist={handleOpenAddToPlaylist}
             />
           )}
 
@@ -1042,6 +1083,18 @@ export function App() {
         isOpen={isLyricsOpen}
         onClose={() => setIsLyricsOpen(false)}
         currentTrack={playback.currentTrack}
+      />
+
+      {/* Add Track to Playlist Modal */}
+      <AddToPlaylistModal
+        isOpen={addToPlaylistData.isOpen}
+        onClose={() =>
+          setAddToPlaylistData((prev) => ({ ...prev, isOpen: false }))
+        }
+        tracksToAdd={addToPlaylistData.tracks}
+        contextLabel={addToPlaylistData.contextLabel}
+        playlists={playlists}
+        onPlaylistUpdated={refreshLibrary}
       />
 
       {/* Mobile Bottom Navigation Bar */}

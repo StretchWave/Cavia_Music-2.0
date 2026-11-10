@@ -38,11 +38,12 @@
 - [x] Third audit remediation: single Windows manifest for app and tests, owned persistence runtime, Tauri exit shutdown with durable flush, 5 s position persistence, atomic `set_queue` decoder probe, desktop/mobile health distinction, SMTC attach/status/progress, shuffle regression coverage, and 36 unit + 1 integration tests.
 - [x] Final correctness remediation: durable persistence write error propagation, restore position preservation across unmounted drives and failed loads, idempotent FIFO shutdown handshake without lost-reply races, immediate SMTC cache refresh and error propagation, atomic `set_queue` with payload decodability validation, UI control disabling and command failure toast surfacing, dynamic settings information, and explicit physical audio hardware test annotations (43 passed, 5 ignored for physical output device, 0 failed).
 - [x] Final remediation audit: persistent pending payload tracking with flush/shutdown retry, two-phase shutdown error propagation with `RunEvent::ExitRequested` prevention and retry/force-exit UI recovery, typed `SmtcStatus` health and runtime error isolation via `MediaControlsHost` abstraction, transactional track replacement preserving active audio sessions across loading failures, and full sequential verification suite (72 passed, 5 ignored for physical output device, 0 failed).
+- [x] Final audit corrections: typed shutdown error event contract, watch-channel lost-wakeup race elimination, paused candidate player initialization preventing audio overlap, persistence health exposure in AppHealth/SettingsView, and SMTC diagnostics display with Initializing audit (86 passed, 5 hardware tests passed, 0 failed, 10 node contract tests passed).
 - [ ] Mid-stream audio-device disconnect detection and automatic recovery (manual retry exists; currently unsupported).
 
 ## Milestone 4 — Product features
 - [ ] Search orchestration and provider adapters
-- [ ] Playlist management and liked tracks
+- [x] Playlist management and liked tracks (Milestone 4.1: complete local playlist management, transactional addition with duplicate support, collision-proof compaction removal, accessible reordering, metadata editing, and instant count synchronization)
 - [ ] LRCLIB lyrics and synced scrolling
 - [ ] Artwork cache and audio cache where permitted
 - [ ] Spotify PKCE playlist metadata import

@@ -84,7 +84,6 @@ impl Default for PersistenceHealthInfo {
 #[serde(rename_all = "snake_case")]
 pub enum SmtcStatus {
     Ready,
-    Initializing,
     Unavailable,
     Unsupported,
     Error,
@@ -94,7 +93,6 @@ impl SmtcStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Ready => "ready",
-            Self::Initializing => "initializing",
             Self::Unavailable => "unavailable",
             Self::Unsupported => "unsupported",
             Self::Error => "error",
@@ -1338,7 +1336,7 @@ pub struct PlaybackService {
     database: SqlitePool,
     shutdown_flag: Arc<AtomicBool>,
     shutdown_state: Arc<Mutex<ShutdownProgress>>,
-    shutdown_notify: Arc<tokio::sync::Notify>,
+    pub shutdown_watch: Arc<tokio::sync::watch::Sender<ShutdownProgress>>,
     command_gate: Arc<std::sync::RwLock<()>>,
     persistence_health: Arc<RwLock<PersistenceHealthInfo>>,
     _worker_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
@@ -1523,7 +1521,8 @@ impl PlaybackService {
         let snapshot_cache = Arc::new(RwLock::new(initial_snapshot));
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let shutdown_state = Arc::new(Mutex::new(ShutdownProgress::Idle));
-        let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+        let (shutdown_watch_tx, _) = tokio::sync::watch::channel(ShutdownProgress::Idle);
+        let shutdown_watch = Arc::new(shutdown_watch_tx);
         let command_gate = Arc::new(std::sync::RwLock::new(()));
         let persistence_health = Arc::new(RwLock::new(PersistenceHealthInfo::default()));
 
@@ -1698,7 +1697,7 @@ impl PlaybackService {
             database,
             shutdown_flag,
             shutdown_state,
-            shutdown_notify,
+            shutdown_watch,
             command_gate,
             persistence_health,
             _worker_thread: Arc::new(Mutex::new(Some(worker_join))),
@@ -2008,24 +2007,43 @@ impl PlaybackService {
 
     pub async fn shutdown(&self) -> Result<(), String> {
         loop {
-            let wait_notification = {
+            let mut rx = self.shutdown_watch.subscribe();
+            let is_in_progress = {
                 let mut state = self.shutdown_state.lock().unwrap();
                 match &*state {
                     ShutdownProgress::Completed => return Ok(()),
                     ShutdownProgress::InProgress => true,
                     ShutdownProgress::Idle | ShutdownProgress::Failed(_) => {
                         *state = ShutdownProgress::InProgress;
+                        let _ = self.shutdown_watch.send(ShutdownProgress::InProgress);
                         false
                     }
                 }
             };
 
-            if wait_notification {
-                self.shutdown_notify.notified().await;
-                continue;
+            if is_in_progress {
+                // Wait for the in-progress shutdown to reach a terminal state (Completed or Failed).
+                // Because watch channel retains the latest state, wait_for returns immediately
+                // without lost wakeups if the transition completed before this line is reached.
+                let wait_res = rx
+                    .wait_for(|val| {
+                        matches!(
+                            val,
+                            ShutdownProgress::Completed | ShutdownProgress::Failed(_)
+                        )
+                    })
+                    .await;
+                match wait_res {
+                    Ok(val) => match &*val {
+                        ShutdownProgress::Completed => return Ok(()),
+                        ShutdownProgress::Failed(err) => return Err(err.clone()),
+                        _ => continue,
+                    },
+                    Err(_) => return Err("Shutdown watch channel closed".into()),
+                }
             }
 
-            let (tx, rx) = oneshot::channel();
+            let (tx, rx_reply) = oneshot::channel();
             let send_res = {
                 let _gate = self
                     .command_gate
@@ -2036,7 +2054,7 @@ impl PlaybackService {
             };
 
             let res = match send_res {
-                Ok(()) => match tokio::time::timeout(Duration::from_secs(5), rx).await {
+                Ok(()) => match tokio::time::timeout(Duration::from_secs(5), rx_reply).await {
                     Ok(Ok(inner_res)) => inner_res,
                     Ok(Err(_)) => Err("Audio worker thread dropped shutdown reply".into()),
                     Err(_) => Err("Audio worker shutdown timed out".into()),
@@ -2050,11 +2068,13 @@ impl PlaybackService {
                     let mut state = self.shutdown_state.lock().unwrap();
                     if let Err(e) = join_res {
                         *state = ShutdownProgress::Failed(e.clone());
-                        self.shutdown_notify.notify_waiters();
+                        let _ = self
+                            .shutdown_watch
+                            .send(ShutdownProgress::Failed(e.clone()));
                         return Err(e);
                     } else {
                         *state = ShutdownProgress::Completed;
-                        self.shutdown_notify.notify_waiters();
+                        let _ = self.shutdown_watch.send(ShutdownProgress::Completed);
                         return Ok(());
                     }
                 }
@@ -2062,7 +2082,9 @@ impl PlaybackService {
                     self.shutdown_flag.store(false, Ordering::SeqCst);
                     let mut state = self.shutdown_state.lock().unwrap();
                     *state = ShutdownProgress::Failed(err_msg.clone());
-                    self.shutdown_notify.notify_waiters();
+                    let _ = self
+                        .shutdown_watch
+                        .send(ShutdownProgress::Failed(err_msg.clone()));
                     return Err(err_msg);
                 }
             }
@@ -2637,6 +2659,127 @@ pub mod tests {
         // Service must NOT be permanently shut down; threads should still be present for retry
         assert!(service._worker_thread.lock().unwrap().is_some());
         assert!(service._persist_thread.lock().unwrap().is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_lost_wakeup_deterministic() {
+        let dir = std::env::temp_dir().join(format!("cavia_lost_wakeup_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = temp_pool(&dir).await;
+        let service = PlaybackService::new(pool.clone(), None).unwrap();
+
+        // 1. Caller B subscribes when shutdown is InProgress:
+        let mut rx = service.shutdown_watch.subscribe();
+        {
+            let mut state = service.shutdown_state.lock().unwrap();
+            *state = ShutdownProgress::InProgress;
+            let _ = service.shutdown_watch.send(ShutdownProgress::InProgress);
+        }
+
+        // 2. Caller A finishes shutdown completely before Caller B awaits the watcher:
+        {
+            let mut state = service.shutdown_state.lock().unwrap();
+            *state = ShutdownProgress::Completed;
+            let _ = service.shutdown_watch.send(ShutdownProgress::Completed);
+        }
+
+        // 3. Caller B now awaits terminal state:
+        // With watch channels, wait_for observes the latest value immediately without losing the wakeup.
+        let wait_res = tokio::time::timeout(
+            Duration::from_millis(500),
+            rx.wait_for(|val| {
+                matches!(
+                    val,
+                    ShutdownProgress::Completed | ShutdownProgress::Failed(_)
+                )
+            }),
+        )
+        .await;
+
+        assert!(
+            wait_res.is_ok(),
+            "Watch channel must wake immediately on existing terminal state without timing out"
+        );
+        assert_eq!(*wait_res.unwrap().unwrap(), ShutdownProgress::Completed);
+
+        // A call to shutdown() by Caller B also returns Ok(()) immediately:
+        let shut_res = tokio::time::timeout(Duration::from_millis(500), service.shutdown()).await;
+        assert!(shut_res.is_ok());
+        assert!(shut_res.unwrap().is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_concurrent_failed_callers() {
+        let dir = std::env::temp_dir().join(format!("cavia_shut_fail_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = temp_pool(&dir).await;
+        let service = PlaybackService::new(pool.clone(), None).unwrap();
+
+        // Inject SQL failure trigger on playback_state
+        sqlx::query(
+            "CREATE TRIGGER force_playback_state_failure_concurrent \
+             BEFORE INSERT ON playback_state \
+             BEGIN \
+                 SELECT RAISE(FAIL, 'Injected concurrent failure'); \
+             END;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let _ = service.set_volume(42).await;
+
+        // Spawn 10 concurrent callers attempting shutdown simultaneously
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let s = service.clone();
+            handles.push(tokio::spawn(async move { s.shutdown().await }));
+        }
+
+        let mut errors = Vec::new();
+        for h in handles {
+            let res = h.await.unwrap();
+            assert!(
+                res.is_err(),
+                "All concurrent callers must observe Err during failed shutdown"
+            );
+            errors.push(res.unwrap_err());
+        }
+
+        // All 10 callers must have received the same consistent error message
+        let first_err = &errors[0];
+        assert!(first_err.contains("Injected concurrent failure"));
+        for err in &errors {
+            assert_eq!(
+                err, first_err,
+                "All concurrent callers must receive identical error"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_repeated_after_completion() {
+        let dir = std::env::temp_dir().join(format!("cavia_shut_rep_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = temp_pool(&dir).await;
+        let service = PlaybackService::new(pool.clone(), None).unwrap();
+
+        // Perform initial shutdown
+        let initial_res = service.shutdown().await;
+        assert!(initial_res.is_ok());
+
+        // Repeated subsequent calls must return Ok immediately without blocking
+        for _ in 0..5 {
+            let res = tokio::time::timeout(Duration::from_millis(200), service.shutdown()).await;
+            assert!(res.is_ok(), "Repeated shutdown must not hang");
+            assert!(res.unwrap().is_ok());
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3945,6 +4088,21 @@ pub mod tests {
         // SMTC reports failure truthfully
         assert_eq!(snap.smtc_status, "error");
         assert_eq!(snap.system_media_controls, false);
+    }
+
+    #[test]
+    fn test_smtc_status_audit_no_phantom_initializing() {
+        assert_eq!(SmtcStatus::Ready.as_str(), "ready");
+        assert_eq!(SmtcStatus::Unavailable.as_str(), "unavailable");
+        assert_eq!(SmtcStatus::Unsupported.as_str(), "unsupported");
+        assert_eq!(SmtcStatus::Error.as_str(), "error");
+
+        // Phantom 'initializing' state is completely eliminated
+        let parse_init: Result<SmtcStatus, _> = serde_json::from_str(r#""initializing""#);
+        assert!(
+            parse_init.is_err(),
+            "Phantom 'initializing' state must not exist in SmtcStatus"
+        );
     }
 
     pub struct TransactionalTestBackend {

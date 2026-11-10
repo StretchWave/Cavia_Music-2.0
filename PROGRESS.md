@@ -455,3 +455,110 @@ This remediation completed all remaining items identified in the DeepSeek audit 
   - Updated `RodioBackend::load` to prepare candidate players and initial seek offsets before stopping the previous player, and only swap active players once preparation is 100% complete.
   - If candidate loading fails, the previous active session remains `Playing` with its queue selection, position, and persistence completely intact.
   - Verified via tests: `test_queue_test_a_missing_candidate` through `test_queue_test_h_play_track_failure_preserves_session`.
+
+---
+
+## 12. Milestone 3 Audit Corrections: Shutdown, Concurrency, Audio Transition & Health Visibility
+
+All five deficiencies identified in the final audit were corrected and verified using a strict test-first sequential protocol:
+
+### Issue 1: Shutdown Error Event Contract Mismatch (Priority 0)
+- **Problem:** `src-tauri/src/lib.rs` emitted a bare JSON string (`format!("Failed to save playback state: {err}")`) on shutdown error, while `src/app/App.tsx` listened for `{ error: string }`. `event.payload.error` was `undefined`, preventing the recovery modal from rendering.
+- **Resolution:**
+  - Defined `ShutdownErrorPayload { error: String }` in `src-tauri/src/domain.rs`.
+  - Backend emits structured `ShutdownErrorPayload { error: ... }`.
+  - Frontend strongly types listener with `ShutdownErrorPayload` in `src/lib/playback.ts` and `src/app/App.tsx`.
+  - Regression verified via `test_shutdown_error_payload_contract` and Node.js contract test in `test/shutdown_event.test.mjs`.
+
+### Issue 2: Shutdown Notify Lost-Wakeup Race Elimination (Priority 1)
+- **Problem:** `PlaybackService::shutdown()` dropped `shutdown_state` lock before calling `.notified().await`. If the in-progress shutdown finished and called `notify_waiters()` in that gap, the notification was missed, causing waiters to hang indefinitely.
+- **Resolution:**
+  - Replaced `tokio::sync::Notify` with `tokio::sync::watch::channel<ShutdownProgress>`.
+  - Callers subscribe to the watch channel and await `rx.wait_for(|val| matches!(val, ShutdownProgress::Completed | ShutdownProgress::Failed(_)))`. Because watch channels retain the latest value indefinitely, there is zero window for lost wakeups.
+  - Concurrent callers during in-progress shutdown cleanly receive the final outcome (`Ok(())` or `Err(...)`).
+  - Retried shutdown after failure succeeds cleanly; calls after `Completed` return immediately without re-running workers.
+  - Regression verified via `test_shutdown_lost_wakeup_deterministic`, `test_shutdown_concurrent_failed_callers`, and `test_shutdown_repeated_after_completion`.
+
+### Issue 3: Rodio Candidate Player Lifecycle & Overlap Prevention (Priority 1)
+- **Problem:** Rodio 0.23 `Player::connect_new(&sink.mixer())` initializes with `is_paused() == false`. During `load()`, appending the decoder and seeking to offset occurred before stopping the old player, producing simultaneous overlapping audio and clicks.
+- **Resolution:**
+  - Explicitly paused candidate player immediately upon creation: `player.pause()`.
+  - Decoder append and initial seek run while paused, producing zero frames to the mixer.
+  - If seek or decode fails, candidate is dropped without producing audio, and old player continues unaffected.
+  - On success, old player is cleanly stopped, candidate committed to `self.player`, and resumed only if requested status is `Playing` (or preserved paused if `Paused`).
+  - Documented in `docs/audio-backends.md`.
+  - Regression verified via `test_candidate_player_is_paused_during_initialization`, `test_decoder_failure_preserves_old_player`, `test_candidate_lifecycle_paused_state_preserved`, and `test_rapid_track_changes_prevent_audio_overlap`.
+
+### Issue 4: Persistence Health Visibility to Frontend (Priority 2)
+- **Problem:** Rust tracked `PersistenceHealthInfo` with typed `PersistenceHealthStatus`, but never exposed it in `AppHealth`, leaving the frontend blind to persistence failures until application exit.
+- **Resolution:**
+  - Added `persistence_status: String` and `persistence_error: Option<String>` to `AppHealth` in `src-tauri/src/commands/app.rs`.
+  - Updated `PlatformHealth` in `src/lib/platform.ts`.
+  - Added State Persistence Engine diagnostics card to `SettingsView.tsx` with semantic badges (`PERSISTENCE READY`, `SAVING PLAYBACK STATE`, `SAVE FAILED`, `PERSISTENCE UNAVAILABLE`, `SAVING BEFORE EXIT`) and failure messages.
+  - Regression verified via 5 tests in `commands::app::tests` and frontend contract tests in `test/persistence_health.test.mjs`.
+
+### Issue 5: SMTC Diagnostics for Unavailable States & Audit of `Initializing` (Priority 2)
+- **Problem:** `SettingsView.tsx` displayed generic `'SMTC UNAVAILABLE'` and swallowed `health.smtc_error`. Additionally, `SmtcStatus::Initializing` was a phantom variant never assigned anywhere in the codebase.
+- **Resolution:**
+  - `SettingsView.tsx` now formats SMTC status with `health.smtc_error` when `unavailable` or `error`.
+  - Audited SMTC initialization lifecycle: since HWND attachment is synchronous, `Initializing` was removed from Rust `SmtcStatus` and TypeScript types to reflect reality.
+  - Regression verified via `test_smtc_status_audit_no_phantom_initializing` and contract tests in `test/smtc_diagnostics.test.mjs`.
+
+### Test Suite Summary
+- **86 unit tests passed, 0 failed**
+- **5 hardware audio output tests passed**
+- **1 integration smoke test passed**
+- **10 Node.js frontend contract tests passed**
+- **`cargo fmt --check` and `cargo check --all-targets` clean**
+- **`npm run build` and `cargo build --bin cavia-music` clean**
+- **Windows desktop runtime binary verified running (`cavia-music.exe`)**
+
+---
+
+## 7. Milestone 4.1 Implementation: Complete Local Playlist Management
+
+### Backend Persistence & Operations (`services::library`, `commands::library`)
+- **Add Track to Playlist (`add_track_to_playlist`):**
+  - Transactional append using `COALESCE(MAX(position) + 1, 0)`.
+  - Full validation: checks playlist exists and `is_deleted = 0`, track exists and `is_deleted = 0`.
+  - Explicit duplicate policy: duplicates permitted at distinct positions in accordance with standard music players and SQLite `UNIQUE(playlist_id, position)` schema.
+  - Updates `playlists.updated_at = CURRENT_TIMESTAMP` atomically.
+- **Remove Track from Playlist (`remove_track_from_playlist`):**
+  - Unambiguously identifies target entry by playlist position, supporting removal of specific duplicate instances.
+  - Collision-proof two-phase disjoint position compaction: shifts rows `> position` into temporary offset space (`position + 1000000`) before shifting down to `position - 1`, avoiding transient `UNIQUE(playlist_id, position)` collisions while respecting `CHECK(position >= 0)`.
+  - Updates `playlists.updated_at` atomically.
+- **Reorder Playlist Tracks (`reorder_playlist_tracks`):**
+  - Supports moving any entry from `from_pos` to `to_pos` with bounds validation (`0 <= pos < count`).
+  - Two-phase disjoint reindexing strategy: target item isolated to temporary position `1000000`, intervening items shifted via disjoint high range `2000000+`, and target item placed at destination `to_pos`.
+  - Full transactional rollback on failure.
+- **Edit Playlist Metadata (`update_playlist`):**
+  - Updates name and description with validation (`name.trim()` must be non-empty).
+  - Preserves unmodified fields and updates `updated_at`.
+- **Exposed Tauri Commands:**
+  - `add_track_to_playlist`, `remove_track_from_playlist`, `reorder_playlist_tracks`, `update_playlist`.
+
+### Frontend User Interface & Workflows
+- **`AddToPlaylistModal` (`src/features/library/AddToPlaylistModal.tsx`):**
+  - Integrated into `TracksView`, `LikedTracksView`, and `AlbumsView`.
+  - Single-track and multi-track (album-level) batch addition.
+  - Shows existing playlists with instant track counts, single-click add action with checkmark confirmation.
+  - Built-in inline "New Playlist" creation allowing instant creation and addition in a single flow.
+- **Enhanced `PlaylistDetailModal` (`src/features/library/PlaylistDetailModal.tsx`):**
+  - Accessible reordering: Up and Down chevron controls on every row with disabled bounds indicators and keyboard support.
+  - Track removal: dedicated delete button on each track row with optimistic UI update and backend persistence.
+  - Playlist metadata editing: "Edit Details" modal to rename and update descriptions without leaving the view.
+  - Immediate track count synchronization reflecting additions and removals without app restarts.
+- **Library Views Integration:**
+  - `TracksView`: `ListPlus` inline action button beside like heart on every track row.
+  - `LikedTracksView`: `ListPlus` inline action button beside like heart on every favorite track row.
+  - `AlbumsView`: "Playlist" action on album cards to add all tracks in the album to a playlist.
+  - `PlaylistsView`: real-time track count updates on playlist cards via `onPlaylistUpdated` callback.
+- **Aesthetic Fidelity:**
+  - Fully compliant with Obsidian / Aged Ivory / Restrained Vermilion design system. Zero extraneous themes or generic dashboard elements.
+
+### Verification Results
+- **92 Rust unit tests passed (including 6 new exhaustive playlist management tests)**
+- **1 integration smoke test passed**
+- **19 Node.js contract tests passed (including 9 new playlist management tests in `test/playlist_management.test.mjs`)**
+- **`cargo fmt --check` and `cargo check --all-targets` passed cleanly**
+- **`npm run build` and `cargo build --bin cavia-music` passed cleanly**

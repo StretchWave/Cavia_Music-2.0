@@ -94,6 +94,44 @@ pub async fn delete_playlist(
 }
 
 #[tauri::command]
+pub async fn add_track_to_playlist(
+    state: State<'_, AppState>,
+    playlist_id: String,
+    track_id: String,
+) -> Result<String, String> {
+    lib_service::add_track_to_playlist(&state.database, &playlist_id, &track_id).await
+}
+
+#[tauri::command]
+pub async fn remove_track_from_playlist(
+    state: State<'_, AppState>,
+    playlist_id: String,
+    position: i64,
+) -> Result<(), String> {
+    lib_service::remove_track_from_playlist(&state.database, &playlist_id, position).await
+}
+
+#[tauri::command]
+pub async fn reorder_playlist_tracks(
+    state: State<'_, AppState>,
+    playlist_id: String,
+    from_pos: i64,
+    to_pos: i64,
+) -> Result<(), String> {
+    lib_service::reorder_playlist_tracks(&state.database, &playlist_id, from_pos, to_pos).await
+}
+
+#[tauri::command]
+pub async fn update_playlist(
+    state: State<'_, AppState>,
+    playlist_id: String,
+    name: String,
+    description: String,
+) -> Result<Playlist, String> {
+    lib_service::update_playlist(&state.database, &playlist_id, &name, &description).await
+}
+
+#[tauri::command]
 pub async fn scan_music_directory(
     app: AppHandle,
     state: State<'_, AppState>,

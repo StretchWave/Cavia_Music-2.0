@@ -103,6 +103,10 @@ pub fn run() {
             commands::library::get_playlist_tracks,
             commands::library::create_playlist,
             commands::library::delete_playlist,
+            commands::library::add_track_to_playlist,
+            commands::library::remove_track_from_playlist,
+            commands::library::reorder_playlist_tracks,
+            commands::library::update_playlist,
             commands::library::scan_music_directory,
             commands::library::cancel_scan,
             commands::playback::get_playback_state,
@@ -150,12 +154,41 @@ pub fn run() {
                 ExitDecision::BlockExitAndReport(err) => {
                     SHUTDOWN_STARTED.store(false, Ordering::SeqCst);
                     eprintln!("[Cavia Exit] Graceful shutdown failed: {err}");
-                    let _ = app_handle.emit(
-                        "app:shutdown-error",
-                        format!("Failed to save playback state: {err}"),
-                    );
+                    let payload = domain::ShutdownErrorPayload {
+                        error: format!("Failed to save playback state: {err}"),
+                    };
+                    let _ = app_handle.emit("app:shutdown-error", &payload);
                 }
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::domain::ShutdownErrorPayload;
+
+    #[test]
+    fn test_shutdown_error_payload_contract() {
+        let err = "database disk image is malformed (code 11)";
+        let payload = ShutdownErrorPayload {
+            error: format!("Failed to save playback state: {err}"),
+        };
+        let json_emitted =
+            serde_json::to_string(&payload).expect("Failed to serialize ShutdownErrorPayload");
+
+        // Verify exact emitted JSON string structure
+        assert_eq!(
+            json_emitted,
+            r#"{"error":"Failed to save playback state: database disk image is malformed (code 11)"}"#
+        );
+
+        // Verify frontend contract deserialization succeeds
+        let parsed: ShutdownErrorPayload = serde_json::from_str(&json_emitted)
+            .expect("Payload emitted by backend must deserialize into ShutdownErrorPayload");
+        assert_eq!(
+            parsed.error,
+            "Failed to save playback state: database disk image is malformed (code 11)"
+        );
+    }
 }

@@ -19,6 +19,7 @@ interface PlaylistsViewProps {
   onDeletePlaylist?: (playlistId: string) => void;
   isBackendReady: boolean;
   onPlayTracks?: (tracks: Track[], startIndex?: number, shuffle?: boolean) => void;
+  onPlaylistUpdated?: () => void;
 }
 
 export function PlaylistsView({
@@ -27,11 +28,17 @@ export function PlaylistsView({
   onDeletePlaylist,
   isBackendReady,
   onPlayTracks,
+  onPlaylistUpdated,
 }: PlaylistsViewProps) {
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
+
+  // Keep selected playlist in sync when parent playlists array refreshes
+  const activePlaylist = selectedPlaylist
+    ? playlists.find((p) => p.id === selectedPlaylist.id) || selectedPlaylist
+    : null;
 
   const handleCreateSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -189,12 +196,13 @@ export function PlaylistsView({
 
       {/* Playlist Details Modal */}
       <PlaylistDetailModal
-        playlist={selectedPlaylist}
-        isOpen={!!selectedPlaylist}
+        playlist={activePlaylist}
+        isOpen={!!activePlaylist}
         onClose={() => setSelectedPlaylist(null)}
         isBackendReady={isBackendReady}
         onDeletePlaylist={onDeletePlaylist}
         onPlayTracks={onPlayTracks}
+        onPlaylistUpdated={onPlaylistUpdated}
       />
     </section>
   );

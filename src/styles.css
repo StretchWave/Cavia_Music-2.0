@@ -1196,7 +1196,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .tracks-table-head {
   display: grid;
-  grid-template-columns: 40px 2fr 1.5fr 1.5fr 70px 40px;
+  grid-template-columns: 40px 2fr 1.5fr 1.5fr 70px 64px;
   align-items: center;
   padding: 10px 16px;
   font-family: var(--font-mono);
@@ -1208,7 +1208,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .track-row {
   display: grid;
-  grid-template-columns: 40px 2fr 1.5fr 1.5fr 70px 40px;
+  grid-template-columns: 40px 2fr 1.5fr 1.5fr 70px 64px;
   align-items: center;
   padding: 10px 16px;
   border-radius: var(--radius-sm);
@@ -1267,7 +1267,27 @@ h1, h2, h3, h4, h5, h6 {
 
 .col-action {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 4px;
+}
+
+.track-action-inline-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border-radius: var(--radius-xs);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.track-action-inline-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .track-like-inline-btn {
@@ -3655,6 +3675,243 @@ h1, h2, h3, h4, h5, h6 {
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+
+/* Playlist Table Grid & Actions */
+.playlist-table-grid {
+  grid-template-columns: 36px 2fr 1.5fr 1.5fr 60px 84px !important;
+}
+
+.col-playlist-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.playlist-track-action-btn {
+  background: none;
+  border: 1px solid transparent;
+  cursor: pointer;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-xs);
+  transition: all var(--transition-fast);
+}
+
+.playlist-track-action-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--border-subtle);
+}
+
+.playlist-track-action-btn.btn-danger-hover:hover:not(:disabled) {
+  color: var(--accent-vermilion);
+  background: rgba(223, 88, 73, 0.12);
+  border-color: rgba(223, 88, 73, 0.3);
+}
+
+.playlist-track-action-btn:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+/* Album Card Playlist Action */
+.album-add-playlist-inline-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  margin-left: 4px;
+  transition: all var(--transition-fast);
+}
+
+.album-add-playlist-inline-btn:hover {
+  color: var(--accent-vermilion);
+  background: rgba(223, 88, 73, 0.1);
+}
+
+/* Add to Playlist Modal */
+.add-to-pl-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.add-to-pl-target-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-subtle);
+}
+
+.add-to-pl-thumb {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+}
+
+.add-to-pl-thumb-placeholder {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+}
+
+.add-to-pl-target-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.add-to-pl-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.add-to-pl-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.add-to-pl-inline-form {
+  padding: 14px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-default);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.add-to-pl-inline-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.add-to-pl-list-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.add-to-pl-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.add-to-pl-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.add-to-pl-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--border-default);
+}
+
+.add-to-pl-row.added {
+  border-color: var(--accent-vermilion);
+  background: rgba(223, 88, 73, 0.05);
+}
+
+.add-to-pl-row-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.add-to-pl-row-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-xs);
+  background: rgba(255, 255, 255, 0.04);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.add-to-pl-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.add-to-pl-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.add-to-pl-count {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+
+.add-to-pl-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.add-to-pl-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
 }
 
 /* Reduced Motion Preference */

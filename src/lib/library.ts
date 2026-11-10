@@ -84,6 +84,30 @@ export async function deletePlaylist(playlistId: string): Promise<void> {
   return invoke<void>('delete_playlist', { playlistId });
 }
 
+export async function addTrackToPlaylist(playlistId: string, trackId: string): Promise<string> {
+  return invoke<string>('add_track_to_playlist', { playlistId, trackId });
+}
+
+export async function removeTrackFromPlaylist(playlistId: string, position: number): Promise<void> {
+  return invoke<void>('remove_track_from_playlist', { playlistId, position });
+}
+
+export async function reorderPlaylistTracks(
+  playlistId: string,
+  fromPos: number,
+  toPos: number
+): Promise<void> {
+  return invoke<void>('reorder_playlist_tracks', { playlistId, fromPos, toPos });
+}
+
+export async function updatePlaylist(
+  playlistId: string,
+  name: string,
+  description: string
+): Promise<Playlist> {
+  return invoke<Playlist>('update_playlist', { playlistId, name, description });
+}
+
 export function formatArtworkUri(uri?: string): string | undefined {
   if (!uri) return undefined;
   if (uri.startsWith('http://') || uri.startsWith('https://') || uri.startsWith('data:')) {

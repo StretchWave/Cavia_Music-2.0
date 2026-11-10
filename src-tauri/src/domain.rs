@@ -77,3 +77,9 @@ pub struct ScanResult {
     pub errors: usize,
     pub cancelled: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShutdownErrorPayload {
+    pub error: String,
+}

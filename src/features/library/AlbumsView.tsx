@@ -1,4 +1,4 @@
-import { Disc3, FolderPlus } from 'lucide-react';
+import { Disc3, FolderPlus, ListPlus } from 'lucide-react';
 import { EmptyState } from '../../components/EmptyState';
 import { Button } from '../../components/Button';
 import { formatArtworkUri } from '../../lib/library';
@@ -8,9 +8,15 @@ interface AlbumsViewProps {
   albums: Album[];
   onImportFolder?: () => void;
   isScanning?: boolean;
+  onAddAlbumToPlaylist?: (album: Album) => void;
 }
 
-export function AlbumsView({ albums, onImportFolder, isScanning }: AlbumsViewProps) {
+export function AlbumsView({
+  albums,
+  onImportFolder,
+  isScanning,
+  onAddAlbumToPlaylist,
+}: AlbumsViewProps) {
   return (
     <section className="cavia-subpage albums-page">
       <div className="subpage-header">
@@ -69,6 +75,19 @@ export function AlbumsView({ albums, onImportFolder, isScanning }: AlbumsViewPro
                     {album.year && <span>{album.year}</span>}
                     {album.year && <span>·</span>}
                     <span>{album.trackCount} {album.trackCount === 1 ? 'track' : 'tracks'}</span>
+                    <button
+                      type="button"
+                      className="album-add-playlist-inline-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onAddAlbumToPlaylist?.(album);
+                      }}
+                      title={`Add all tracks from ${album.title} to playlist`}
+                      aria-label={`Add all tracks from ${album.title} to playlist`}
+                    >
+                      <ListPlus size={13} />
+                      <span>Playlist</span>
+                    </button>
                   </div>
                 </div>
               </article>

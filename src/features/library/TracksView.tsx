@@ -1,4 +1,4 @@
-import { FolderPlus, Heart, Music2, Play, Shuffle } from 'lucide-react';
+import { FolderPlus, Heart, ListPlus, Music2, Play, Shuffle } from 'lucide-react';
 import { EmptyState } from '../../components/EmptyState';
 import { Button } from '../../components/Button';
 import { formatArtworkUri } from '../../lib/library';
@@ -15,6 +15,7 @@ interface TracksViewProps {
   onShuffleAll?: () => void;
   currentTrackId?: string;
   isPlaying?: boolean;
+  onAddToPlaylist?: (track: Track) => void;
 }
 
 export function TracksView({
@@ -28,6 +29,7 @@ export function TracksView({
   onShuffleAll,
   currentTrackId,
   isPlaying,
+  onAddToPlaylist,
 }: TracksViewProps) {
   const formatTime = (ms: number) => {
     if (!ms || ms <= 0) return '0:00';
@@ -140,6 +142,15 @@ export function TracksView({
                   <span className="col-album">{track.album || 'Unknown Album'}</span>
                   <span className="col-duration">{formatTime(track.durationMs)}</span>
                   <span className="col-action" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      className="track-action-inline-btn"
+                      onClick={() => onAddToPlaylist?.(track)}
+                      aria-label={`Add ${track.title} to playlist`}
+                      title="Add to playlist"
+                    >
+                      <ListPlus size={15} />
+                    </button>
                     <button
                       type="button"
                       className={`track-like-inline-btn ${track.isLiked ? 'active' : ''}`}

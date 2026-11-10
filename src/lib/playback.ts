@@ -19,7 +19,7 @@ export interface BackendPlaybackSnapshot {
   deviceReady?: boolean;
   backendHealth?: string;
   systemMediaControls?: boolean;
-  smtcStatus?: 'ready' | 'initializing' | 'unavailable' | 'unsupported' | 'error' | string;
+  smtcStatus?: 'ready' | 'unavailable' | 'unsupported' | 'error' | string;
   smtcError?: string | null;
 }
 
@@ -29,6 +29,11 @@ export interface PositionUpdatePayload {
   positionMs: number;
   durationMs: number;
 }
+
+export interface ShutdownErrorPayload {
+  error: string;
+}
+
 
 export async function getPlaybackState(): Promise<BackendPlaybackSnapshot | null> {
   if (!isNativeApp()) return null;

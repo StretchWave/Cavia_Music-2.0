@@ -16,5 +16,6 @@ Legend: **Verified** means exercised in this remediation on the stated platform.
 | Network audio playback | Standby | Standby | Not implemented | Not implemented |
 | Background playback | Process open | Process open; runtime-unverified | Standby (needs Media3 foreground service) | Standby (needs AVAudioSession) |
 | System media controls | SMTC initialized; typed `SmtcStatus` (`ready`/`error`/`unavailable`/`unsupported`); `MediaControlsHost` abstraction; OS Play/Pause verified; Seek/Next/Previous mapped but not exercised; attach and runtime errors isolated from audio engine | Standby (needs physical macOS verification) | Standby (needs Media3 MediaSession) | Standby (needs MPRemoteCommandCenter) |
+| Playback state persistence | Verified (SQLx WAL; durable debounced worker; typed status `healthy`/`write_pending`/`write_failed`/`worker_unavailable`/`shutting_down`; retry on failure; honest flush/shutdown) | Shared code; runtime-unverified | Not integrated | Not integrated |
 
 **Verification scope:** Windows 11 desktop, current debug binary launched with the Vite dev server and driven through WebView2 UI Automation. macOS, Android and iOS were not run in this remediation. Android/iOS are explicitly not integrated rather than silently mocked. Mid-stream device-disconnect resilience is not claimed.

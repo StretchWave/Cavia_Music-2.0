@@ -308,11 +308,17 @@ export function SettingsView({
                     ? 'SMTC ACTIVE'
                     : health?.smtc_status === 'error'
                       ? `SMTC ERROR: ${health.smtc_error || 'Runtime fault'}`
-                      : health?.smtc_status === 'unsupported'
-                        ? 'SMTC UNSUPPORTED'
-                        : health?.system_media_controls
-                          ? 'SMTC ACTIVE'
-                          : 'SMTC UNAVAILABLE'} · No mock audio
+                      : health?.smtc_status === 'unavailable'
+                        ? health?.smtc_error
+                          ? `SMTC UNAVAILABLE: ${health.smtc_error}`
+                          : 'SMTC UNAVAILABLE (No active window handle)'
+                        : health?.smtc_status === 'unsupported'
+                          ? health?.smtc_error
+                            ? `SMTC UNSUPPORTED: ${health.smtc_error}`
+                            : 'SMTC UNSUPPORTED'
+                          : health?.system_media_controls
+                            ? 'SMTC ACTIVE'
+                            : 'SMTC UNAVAILABLE'} · No mock audio
                 </span>
               </div>
             </div>
@@ -330,6 +336,48 @@ export function SettingsView({
                 <Badge variant="neutral" size="sm">
                   STANDBY
                 </Badge>
+              </div>
+            </div>
+
+            <div className="settings-card">
+              <div className="card-head">
+                <Database size={18} className="card-icon" />
+                <div>
+                  <h3>State Persistence Engine</h3>
+                  <p>Dedicated background thread writing playback session to SQLite</p>
+                </div>
+              </div>
+              <div className="setting-status-line">
+                <Badge
+                  variant={
+                    health?.persistence_status === 'healthy'
+                      ? 'ready'
+                      : health?.persistence_status === 'write_failed' ||
+                        health?.persistence_status === 'worker_unavailable'
+                        ? 'vermilion'
+                        : 'warn'
+                  }
+                  size="md"
+                >
+                  {health?.persistence_status === 'healthy'
+                    ? 'PERSISTENCE READY'
+                    : health?.persistence_status === 'write_pending'
+                      ? 'SAVING PLAYBACK STATE'
+                      : health?.persistence_status === 'write_failed'
+                        ? 'SAVE FAILED'
+                        : health?.persistence_status === 'worker_unavailable'
+                          ? 'PERSISTENCE UNAVAILABLE'
+                          : health?.persistence_status === 'shutting_down'
+                            ? 'SAVING BEFORE EXIT'
+                            : 'PERSISTENCE READY'}
+                </Badge>
+                <span className="text-muted-xs">
+                  {health?.persistence_error
+                    ? `Error: ${health.persistence_error}`
+                    : health?.persistence_status === 'write_pending'
+                      ? 'Debouncing state flush to disk'
+                      : 'Non-blocking WAL mode writes'}
+                </span>
               </div>
             </div>
           </div>
