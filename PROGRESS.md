@@ -562,3 +562,42 @@ All five deficiencies identified in the final audit were corrected and verified 
 - **19 Node.js contract tests passed (including 9 new playlist management tests in `test/playlist_management.test.mjs`)**
 - **`cargo fmt --check` and `cargo check --all-targets` passed cleanly**
 - **`npm run build` and `cargo build --bin cavia-music` passed cleanly**
+
+---
+
+## 8. Milestone 4.2 Implementation: Local Library Search
+
+### Core Capabilities & Architecture (`services::search`, `commands::library`, `0003_library_search_fts5.sql`)
+- **SQLite FTS5 Trigram Full-Text Search:**
+  - Forward-only migration `0003_library_search_fts5.sql` establishes `tracks_fts` and `playlists_fts` virtual tables with `tokenize = 'trigram'`.
+  - Automatic synchronization via `AFTER INSERT`, `AFTER UPDATE`, and `AFTER DELETE` triggers on `tracks` and `playlists`.
+  - Case-insensitive substring matching across `title`, `artist`, `album`, `album_artist`, `genre`, and playlist `name`/`description`.
+- **Short-Query Fallback Mechanism:**
+  - Queries with $\ge 3$ characters execute against the FTS5 trigram index with sanitized input and quote escaping.
+  - Queries with $1$ or $2$ characters bypass FTS5 (since trigrams require 3 characters to form tokens) and execute high-performance parameterized `LIKE '%query%'` queries, ensuring zero missing results for short abbreviations or characters.
+- **Four Supported Search Categories:**
+  - **Tracks:** returns ranked active tracks with liked status and embedded artwork URI.
+  - **Albums:** deduplicated and grouped by album and artist with track count and artwork.
+  - **Artists:** deduplicated and grouped by artist with album and track counts.
+  - **Playlists:** searches active, non-deleted playlists matching name or description with current track counts.
+  - Category filtering parameter allows querying all categories simultaneously or restricting results to a single target category.
+- **Tauri Command Handler:**
+  - Exposed `search_library(query: String, category: Option<String>, limit: Option<usize>) -> Result<SearchResultsDTO, String>`.
+
+### Frontend User Interface & Search Experience
+- **Reactive Search View (`src/features/search/SearchView.tsx`, `SearchInput.tsx`):**
+  - **Debounced Input:** 250ms debounce prevents unnecessary IPC round-trips while typing.
+  - **Category Pills:** Filter tabs (`All`, `Tracks`, `Albums`, `Artists`, `Playlists`) with match count badges.
+  - **Stale Response Rejection:** Async sequence tracking discards responses from superseded queries, preventing out-of-order race conditions.
+  - **Recent Searches History:** Preserves up to 8 recent queries in local view state with case-insensitive deduplication and individual removal / clear all actions.
+  - **Playback Integration:** Direct track playback from search results and "Add to Queue" actions.
+  - **Archival Calligraphy & Design System:** Retains the obsidian / aged ivory / restrained vermilion identity with Japanese archival watermark `尋` (Discovery).
+
+### Verification Results
+- **103 Rust unit tests passed (including 11 dedicated search tests in `services::search::tests`), 0 failed, 5 ignored for physical output device**
+- **1 Rust integration smoke test passed**
+- **29 Node.js contract tests passed (including 6 search contract tests in `test/library_search.test.mjs`)**
+- **Windows desktop runtime binary verified running (`cavia-music.exe`)**
+- **Database integrity verified; test records cleanly removed**
+- **Mobile runtime remains unverified (deferred to physical hardware verification)**
+- **`cargo fmt --check`, `cargo check --all-targets`, `npm run build`, and `git diff --check` passed cleanly**

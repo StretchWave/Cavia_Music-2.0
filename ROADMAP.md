@@ -42,7 +42,7 @@
 - [ ] Mid-stream audio-device disconnect detection and automatic recovery (manual retry exists; currently unsupported).
 
 ## Milestone 4 — Product features
-- [ ] Search orchestration and provider adapters
+- [x] Search orchestration and provider adapters (Milestone 4.2: local search implementation completed with SQLite FTS5 trigram indexing and 1-2 char short-query fallback; 4 supported categories [Tracks, Albums, Artists, Playlists]; 103 Rust + 29 Node.js contract tests passed; Windows runtime verified; mobile runtime remains unverified; external provider adapters deferred to M4.3)
 - [x] Playlist management and liked tracks (Milestone 4.1: complete local playlist management, transactional addition with duplicate support, collision-proof compaction removal, accessible reordering, metadata editing, and instant count synchronization)
 - [ ] LRCLIB lyrics and synced scrolling
 - [ ] Artwork cache and audio cache where permitted
