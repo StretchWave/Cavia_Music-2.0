@@ -40,6 +40,20 @@ pub struct Artist {
     pub name: String,
     pub track_count: i64,
     pub album_count: i64,
+    #[serde(default)]
+    pub artwork_uri: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResultsDTO {
+    pub tracks: Vec<Track>,
+    pub albums: Vec<Album>,
+    pub artists: Vec<Artist>,
+    pub playlists: Vec<Playlist>,
+    pub query: String,
+    pub category: String,
+    pub total_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

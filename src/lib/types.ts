@@ -55,6 +55,19 @@ export interface Artist {
   name: string;
   trackCount: number;
   albumCount: number;
+  artworkUri?: string;
+}
+
+export type SearchCategory = 'all' | 'tracks' | 'albums' | 'artists' | 'playlists';
+
+export interface SearchResultsDTO {
+  tracks: Track[];
+  albums: Album[];
+  artists: Artist[];
+  playlists: Playlist[];
+  query: string;
+  category: SearchCategory;
+  totalCount: number;
 }
 
 export interface PlaybackState {

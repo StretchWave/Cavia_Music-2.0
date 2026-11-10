@@ -1446,6 +1446,68 @@ h1, h2, h3, h4, h5, h6 {
   max-width: 480px;
 }
 
+/* Search Results Layout */
+.search-results-container {
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+  margin-top: 8px;
+}
+
+.search-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.search-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.search-section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+}
+
+.search-see-all-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--accent-vermilion);
+  transition: opacity var(--transition-fast);
+}
+
+.search-see-all-btn:hover {
+  opacity: 0.8;
+  text-decoration: underline;
+}
+
+.search-loading-state {
+  padding: 60px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  color: var(--text-dim);
+}
+
+.search-loading-spinner {
+  color: var(--accent-vermilion);
+  animation: spin 1s linear infinite;
+}
+
 /* ==========================================================================
    Settings & Provider Management
    ========================================================================== */

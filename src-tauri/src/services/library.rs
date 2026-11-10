@@ -105,7 +105,8 @@ pub async fn get_artists(pool: &SqlitePool) -> Result<Vec<Artist>, String> {
         SELECT
             COALESCE(NULLIF(artist, ''), 'Unknown Artist') AS name,
             COUNT(*) AS track_count,
-            COUNT(DISTINCT NULLIF(album, '')) AS album_count
+            COUNT(DISTINCT NULLIF(album, '')) AS album_count,
+            MAX(artwork_uri) AS artwork_uri
         FROM tracks
         WHERE is_deleted = 0
         GROUP BY name
@@ -126,6 +127,7 @@ pub async fn get_artists(pool: &SqlitePool) -> Result<Vec<Artist>, String> {
                 name,
                 track_count: row.get("track_count"),
                 album_count: row.get("album_count"),
+                artwork_uri: row.get("artwork_uri"),
             }
         })
         .collect();

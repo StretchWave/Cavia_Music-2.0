@@ -1002,7 +1002,22 @@ export function App() {
             />
           )}
 
-          {page === 'search' && <SearchView />}
+          {page === 'search' && (
+            <SearchView
+              isBackendReady={isBackendReady}
+              onPlayTrack={handlePlayTrack}
+              onPlayTracks={handlePlayPlaylistTracks}
+              onToggleLike={handleToggleLike}
+              onAddToPlaylist={handleOpenAddToPlaylist}
+              onAddAlbumToPlaylist={handleOpenAddAlbumToPlaylist}
+              onPlaylistUpdated={refreshLibrary}
+              onDeletePlaylist={handleDeletePlaylist}
+              allTracks={tracks}
+              likedTrackIds={new Set(likedTracks.map((t) => t.id))}
+              currentTrackId={playback.currentTrack?.id}
+              isPlaying={playback.status === 'playing'}
+            />
+          )}
 
           {page === 'settings' && (
             <SettingsView

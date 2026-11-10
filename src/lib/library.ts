@@ -1,6 +1,6 @@
 import { invoke, isTauri, convertFileSrc } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import type { Album, Artist, Playlist, Track } from './types';
+import type { Album, Artist, Playlist, SearchCategory, SearchResultsDTO, Track } from './types';
 
 export interface ScanProgressEvent {
   phase: 'discovering' | 'scanning' | 'completed' | 'cancelled' | 'error';
@@ -106,6 +106,24 @@ export async function updatePlaylist(
   description: string
 ): Promise<Playlist> {
   return invoke<Playlist>('update_playlist', { playlistId, name, description });
+}
+
+export async function searchLibrary(
+  query: string,
+  category: SearchCategory = 'all'
+): Promise<SearchResultsDTO> {
+  if (!isNativeApp()) {
+    return {
+      tracks: [],
+      albums: [],
+      artists: [],
+      playlists: [],
+      query,
+      category,
+      totalCount: 0,
+    };
+  }
+  return invoke<SearchResultsDTO>('search_library', { query, category });
 }
 
 export function formatArtworkUri(uri?: string): string | undefined {

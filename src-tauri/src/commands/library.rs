@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, State};
 
-use crate::domain::{Album, Artist, Playlist, ScanResult, Track};
+use crate::domain::{Album, Artist, Playlist, ScanResult, SearchResultsDTO, Track};
 use crate::services::library as lib_service;
 use crate::services::scanner;
+use crate::services::search as search_service;
 use crate::state::AppState;
 
 #[derive(Debug, Default, Serialize)]
@@ -152,4 +153,13 @@ pub async fn scan_music_directory(
 pub fn cancel_scan(state: State<'_, AppState>) -> Result<(), String> {
     state.scan_cancelled.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn search_library(
+    state: State<'_, AppState>,
+    query: String,
+    category: String,
+) -> Result<SearchResultsDTO, String> {
+    search_service::search_library(&state.database, &query, &category).await
 }

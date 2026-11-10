@@ -107,6 +107,7 @@ pub fn run() {
             commands::library::remove_track_from_playlist,
             commands::library::reorder_playlist_tracks,
             commands::library::update_playlist,
+            commands::library::search_library,
             commands::library::scan_music_directory,
             commands::library::cancel_scan,
             commands::playback::get_playback_state,

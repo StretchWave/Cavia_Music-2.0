@@ -1,5 +1,5 @@
 import { forwardRef, type InputHTMLAttributes } from 'react';
-import { Search, X } from 'lucide-react';
+import { Loader2, Search, X } from 'lucide-react';
 
 interface SearchInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'onChange'> {
   value: string;
@@ -8,6 +8,7 @@ interface SearchInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, '
   shortcut?: string;
   placeholder?: string;
   className?: string;
+  isLoading?: boolean;
 }
 
 export const SearchInput = forwardRef<HTMLInputElement, SearchInputProps>(function SearchInput(
@@ -19,13 +20,18 @@ export const SearchInput = forwardRef<HTMLInputElement, SearchInputProps>(functi
     placeholder = 'Search tracks, albums, artists...',
     className = '',
     disabled,
+    isLoading = false,
     ...props
   },
   ref
 ) {
   return (
     <div className={`cavia-search-input-wrap ${disabled ? 'disabled' : ''} ${className}`}>
-      <Search size={18} className="search-icon" aria-hidden="true" />
+      {isLoading ? (
+        <Loader2 size={18} className="search-icon search-spinner animate-spin" aria-hidden="true" />
+      ) : (
+        <Search size={18} className="search-icon" aria-hidden="true" />
+      )}
       <input
         ref={ref}
         type="search"

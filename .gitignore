@@ -4,7 +4,13 @@ dist/
 .env
 .env.*
 !.env.example
-src-tauri/target/
+target/
+**/target/
 src-tauri/gen/
+**/gen/
+* copy/
+* - Copy/
+* (copy)*/
+*.bak
 .DS_Store
 *.log
