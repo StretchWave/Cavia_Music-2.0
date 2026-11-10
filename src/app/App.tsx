@@ -52,6 +52,8 @@ import {
   removeFromQueueByIndex,
   reorderQueue,
   retryAudioDevice,
+  retryShutdown,
+  forceExit,
   seek,
   setPlaybackSpeed,
   setQueue,
@@ -63,6 +65,7 @@ import {
 import type { Album, Artist, Page, PlaybackState, Playlist, Track } from '../lib/types';
 import { IconButton } from '../components/IconButton';
 import { Button } from '../components/Button';
+import { Modal } from '../components/Modal';
 import { LibraryView } from '../features/library/LibraryView';
 import { TracksView } from '../features/library/TracksView';
 import { PlaylistsView } from '../features/library/PlaylistsView';
@@ -131,6 +134,8 @@ export function App() {
   const [isExpandedPlayerOpen, setIsExpandedPlayerOpen] = useState(urlParams.get('expanded') === 'true');
   const [isQueueOpen, setIsQueueOpen] = useState(urlParams.get('queue') === 'true');
   const [isLyricsOpen, setIsLyricsOpen] = useState(urlParams.get('lyrics') === 'true');
+  const [shutdownError, setShutdownError] = useState<string | null>(null);
+  const [isRetryingShutdown, setIsRetryingShutdown] = useState(false);
 
   // Appearance preferences
   const [density, setDensity] = useState<'standard' | 'compact'>('standard');
@@ -289,11 +294,39 @@ export function App() {
       unlistenPos = fn;
     });
 
+    let unlistenShutdown: (() => void) | undefined;
+    listen<{ error: string }>('app:shutdown-error', (event) => {
+      setShutdownError(event.payload.error);
+    }).then((fn) => {
+      unlistenShutdown = fn;
+    });
+
     return () => {
       if (unlistenState) unlistenState();
       if (unlistenPos) unlistenPos();
+      if (unlistenShutdown) unlistenShutdown();
     };
   }, []);
+
+  const handleRetryShutdown = async () => {
+    try {
+      setIsRetryingShutdown(true);
+      await retryShutdown();
+      setShutdownError(null);
+    } catch (err) {
+      setShutdownError(String(err));
+    } finally {
+      setIsRetryingShutdown(false);
+    }
+  };
+
+  const handleForceExit = async () => {
+    try {
+      await forceExit();
+    } catch (err) {
+      console.error('Failed to force exit:', err);
+    }
+  };
 
   const handleImportFolder = async () => {
     try {
@@ -1035,6 +1068,49 @@ export function App() {
           );
         })}
       </nav>
+
+      {shutdownError && (
+        <Modal
+          isOpen={true}
+          onClose={() => setShutdownError(null)}
+          title="Shutdown Persistence Alert"
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <p style={{ color: 'var(--cavia-ivory-dim)', fontSize: '14px', lineHeight: '1.5' }}>
+              Cavia encountered an error flushing your playback state to disk before exiting:
+            </p>
+            <div
+              style={{
+                padding: '12px',
+                borderRadius: '6px',
+                backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                border: '1px solid rgba(239, 68, 68, 0.25)',
+                color: '#ef4444',
+                fontSize: '13px',
+                fontFamily: 'monospace',
+                wordBreak: 'break-all',
+              }}
+            >
+              {shutdownError}
+            </div>
+            <p style={{ color: 'var(--cavia-ivory-muted)', fontSize: '12px' }}>
+              You may retry persistence now to preserve your session, or force exit immediately.
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '8px' }}>
+              <Button variant="vermilion-subtle" onClick={handleForceExit}>
+                Force Exit
+              </Button>
+              <Button
+                variant="primary"
+                onClick={handleRetryShutdown}
+                disabled={isRetryingShutdown}
+              >
+                {isRetryingShutdown ? 'Retrying...' : 'Retry Shutdown'}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

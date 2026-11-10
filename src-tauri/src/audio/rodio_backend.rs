@@ -85,17 +85,27 @@ impl AudioBackend for RodioBackend {
     }
 
     fn load(&mut self, file_path: &str, start_ms: u64) -> Result<(), PlaybackError> {
+        let is_active_session =
+            self.status == PlaybackStatus::Playing || self.status == PlaybackStatus::Paused;
         let path = Path::new(file_path);
         if !path.exists() {
-            self.status = PlaybackStatus::Error;
+            if !is_active_session {
+                self.status = PlaybackStatus::Error;
+            }
             return Err(PlaybackError::FileNotFound(file_path.to_string()));
         }
 
         let file = File::open(path).map_err(|e| {
+            if !is_active_session {
+                self.status = PlaybackStatus::Error;
+            }
             PlaybackError::DecoderError(format!("Could not open file for playback: {e}"))
         })?;
 
         let decoder = Decoder::try_from(file).map_err(|e| {
+            if !is_active_session {
+                self.status = PlaybackStatus::Error;
+            }
             PlaybackError::DecoderError(format!("Could not decode audio stream: {e:?}"))
         })?;
 
@@ -103,19 +113,18 @@ impl AudioBackend for RodioBackend {
             .total_duration()
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        self.current_duration_ms = total_dur;
 
         self.ensure_player_ready()?;
         let sink = self.sink.as_ref().unwrap();
 
-        // Connect a fresh player to the mixer to immediately purge previous track
+        // Connect candidate player to the mixer
         let player = Player::connect_new(&sink.mixer());
         player.set_volume(self.volume);
         player.set_speed(self.speed);
         player.append(decoder);
 
-        if start_ms > 0 {
-            let clamped_start = if total_dur > 0 {
+        let clamped_start = if start_ms > 0 {
+            let clamped = if total_dur > 0 {
                 start_ms.min(total_dur)
             } else {
                 start_ms
@@ -125,25 +134,32 @@ impl AudioBackend for RodioBackend {
             } else {
                 1.0
             };
-            let seek_duration =
-                Duration::from_secs_f64((clamped_start as f64 / 1000.0) / speed_factor);
+            let seek_duration = Duration::from_secs_f64((clamped as f64 / 1000.0) / speed_factor);
             if let Err(e) = player.try_seek(seek_duration) {
                 eprintln!("[RodioBackend] Initial seek to {start_ms}ms returned: {e:?}");
                 player.stop();
-                self.status = PlaybackStatus::Error;
+                if !is_active_session {
+                    self.status = PlaybackStatus::Error;
+                }
                 return Err(PlaybackError::SeekError(format!(
                     "Initial seek failed: {e:?}"
                 )));
             }
-            self.seek_offset_ms = clamped_start;
+            clamped
         } else {
-            self.seek_offset_ms = 0;
+            0
+        };
+
+        // Candidate successfully prepared: atomically stop previous player and switch
+        if let Some(old_player) = self.player.take() {
+            old_player.stop();
         }
 
         player.play();
-
         self.player = Some(player);
         self.current_path = Some(path.to_path_buf());
+        self.current_duration_ms = total_dur;
+        self.seek_offset_ms = clamped_start;
         self.status = PlaybackStatus::Playing;
         Ok(())
     }

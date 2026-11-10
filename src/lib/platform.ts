@@ -7,6 +7,8 @@ export type PlatformHealth = {
   backend_name?: string;
   active_migration?: string;
   system_media_controls: boolean;
+  smtc_status?: string;
+  smtc_error?: string | null;
   platform: string;
 };
 

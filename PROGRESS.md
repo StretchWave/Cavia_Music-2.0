@@ -409,7 +409,49 @@ This section documents the final correctness remediation addressing all blockers
 ### G. Physical Hardware Test Annotations & Verification Suite (Priority 2)
 - All physical audio hardware tests explicitly annotated with `#[ignore = "requires a physical audio output device"]` and explicit `assert!(backend.is_device_ready())`.
 - Test suite summary:
-  - **43 unit tests passed, 0 failed, 5 ignored (physical audio device required)**
+  - **72 unit tests passed, 0 failed, 5 ignored (physical audio device required)**
   - **1 integration smoke test passed**
   - **`npm run build` passing cleanly**
   - **`cargo fmt --check` and `cargo check --all-targets` passing cleanly**
+
+---
+
+## 11. Milestone 3 Final Remediation: Test-First, Sequential Verification
+
+This remediation completed all remaining items identified in the DeepSeek audit via strict test-first verification gates:
+
+### Issue 1: Persistence Failure Retention and Flush Acknowledgements (Priority 0)
+- **Problem:** When an asynchronous state persistence write failed in the background worker, the failure was silently forgotten if no flush/shutdown message was immediately present. Subsequent flushes would acknowledge `Ok(())` despite state never being written to SQLite.
+- **Resolution:**
+  - Implemented `run_persistence_worker` with persistent `pending_payload` and `last_error` tracking.
+  - Introduced `PersistenceHealthStatus` (`healthy`, `write_pending`, `write_failed`, `worker_unavailable`, `shutting_down`) and shared `PersistenceHealthInfo`.
+  - State write errors retain the unpersisted payload and failure error; subsequent newer states replace older pending payloads without discarding durability requirements.
+  - `Flush` and `Shutdown` messages retry pending payloads and truthfully return the database error if retries fail.
+  - Shutdown errors do not terminate the worker prematurely, preserving retry ability.
+  - Verified via tests: `test_persistence_test_a_successful_state_write` through `test_persistence_test_g_worker_unavailable_reported`.
+
+### Issue 2: Application Shutdown Error Propagation and Controlled Exit (Priority 0)
+- **Problem:** Application exit in Tauri 2 silently exited even when persistence writes failed; shutdown concurrency races allowed commands to slip behind shutdown messages; failed shutdowns irreversibly stopped the audio actor.
+- **Resolution:**
+  - In `lib.rs`, `handle_exit_request` intercepts `RunEvent::ExitRequested`. On shutdown error, it calls `api.prevent_exit()`, logs to stderr, resets the shutdown flag, and emits `app:shutdown-error` to the webview.
+  - Registered `retry_shutdown` and `force_exit` Tauri commands.
+  - Introduced atomic `command_gate: Arc<std::sync::RwLock<()>>` preventing commands from being submitted after a shutdown transition begins.
+  - Implemented `ShutdownProgress` state machine with `tokio::sync::Notify` allowing concurrent callers to wait on the in-flight shutdown and retry if it fails.
+  - Verified via tests: `test_shutdown_test_a_normal_shutdown_persists_state_and_terminates_workers` through `test_shutdown_test_h_application_exit_decision`.
+
+### Issue 3: SMTC Runtime Error Propagation and Health Reporting (Priority 1)
+- **Problem:** SMTC initialization and runtime errors were discarded with `let _ =`, causing the app to claim `system_media_controls: true` even when metadata or playback synchronization failed.
+- **Resolution:**
+  - Defined `SmtcStatus` (`ready`, `initializing`, `unavailable`, `unsupported`, `error`) and `MediaControlsHost` trait for testable media-control boundaries.
+  - Wrapped `souvlaki::MediaControls` in `SouvlakiMediaControlsHost` on Windows; provided `MockMediaControlsHost` for deterministic testing.
+  - Added `record_smtc_failure` and `record_smtc_success` in `PlaybackCore`. SMTC failures record error status and set `system_media_controls: false` without affecting audio playback or marking audio device health as broken.
+  - Exposed `smtc_status` and `smtc_error` on `PlaybackSnapshot` and `AppHealth`.
+  - Verified via tests: `test_smtc_test_a_successful_initialization` through `test_smtc_test_g_audio_independence`.
+
+### Issue 4: Transactional Track and Queue Replacement (Priority 1)
+- **Problem:** `set_queue` and `play_track` called `backend.stop()` before attempting candidate loading. If candidate loading failed after validation (e.g. decoder load error or seek failure), the user's active playback session was prematurely destroyed.
+- **Resolution:**
+  - Refactored `set_queue` and `play_track` to load candidate audio without stopping active playback.
+  - Updated `RodioBackend::load` to prepare candidate players and initial seek offsets before stopping the previous player, and only swap active players once preparation is 100% complete.
+  - If candidate loading fails, the previous active session remains `Playing` with its queue selection, position, and persistence completely intact.
+  - Verified via tests: `test_queue_test_a_missing_candidate` through `test_queue_test_h_play_track_failure_preserves_session`.

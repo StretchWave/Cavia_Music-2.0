@@ -159,3 +159,20 @@ pub async fn clear_queue(state: State<'_, AppState>) -> Result<(), String> {
 pub async fn retry_audio_device(state: State<'_, AppState>) -> Result<(), String> {
     state.playback.retry_device().await
 }
+
+#[tauri::command]
+pub async fn retry_shutdown(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.playback.shutdown().await?;
+    app.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn force_exit(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let _ = state.playback.shutdown().await;
+    app.exit(0);
+    Ok(())
+}

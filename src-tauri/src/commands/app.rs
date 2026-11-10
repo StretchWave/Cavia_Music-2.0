@@ -13,6 +13,8 @@ pub struct AppHealth {
     pub active_migration: String,
     pub platform: &'static str,
     pub system_media_controls: bool,
+    pub smtc_status: String,
+    pub smtc_error: Option<String>,
 }
 
 #[tauri::command]
@@ -25,7 +27,10 @@ pub async fn app_health(state: State<'_, AppState>) -> Result<AppHealth, String>
     let database_connected = row.try_get::<i64, _>("ok").unwrap_or_default() == 1;
     let audio_backend = state.playback.backend_health_status();
     let backend_name = state.playback.backend_name();
-    let system_media_controls = state.playback.snapshot().system_media_controls;
+    let snapshot = state.playback.snapshot();
+    let system_media_controls = snapshot.system_media_controls;
+    let smtc_status = snapshot.smtc_status;
+    let smtc_error = snapshot.smtc_error;
 
     let migration_row = sqlx::query(
         "SELECT version, description FROM _sqlx_migrations ORDER BY version DESC LIMIT 1",
@@ -52,5 +57,7 @@ pub async fn app_health(state: State<'_, AppState>) -> Result<AppHealth, String>
         active_migration,
         platform: std::env::consts::OS,
         system_media_controls,
+        smtc_status,
+        smtc_error,
     })
 }

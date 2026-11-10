@@ -304,7 +304,15 @@ export function SettingsView({
                               : 'STANDBY'}
                 </Badge>
                 <span className="text-muted-xs">
-                  {health?.system_media_controls ? 'SMTC ACTIVE' : 'SMTC UNAVAILABLE'} · No mock audio
+                  {health?.smtc_status === 'ready'
+                    ? 'SMTC ACTIVE'
+                    : health?.smtc_status === 'error'
+                      ? `SMTC ERROR: ${health.smtc_error || 'Runtime fault'}`
+                      : health?.smtc_status === 'unsupported'
+                        ? 'SMTC UNSUPPORTED'
+                        : health?.system_media_controls
+                          ? 'SMTC ACTIVE'
+                          : 'SMTC UNAVAILABLE'} · No mock audio
                 </span>
               </div>
             </div>

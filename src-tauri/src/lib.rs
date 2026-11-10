@@ -9,11 +9,29 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use state::AppState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs, io};
-use tauri::{Manager, RunEvent};
+use tauri::{Emitter, Manager, RunEvent};
 
 /// Guards against re-running shutdown when `ExitRequested` is emitted more
 /// than once (for example while the explicit `exit(0)` is unwinding).
 static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExitDecision {
+    ExitSuccess,
+    BlockExitAndReport(String),
+}
+
+pub async fn handle_exit_request(playback: &PlaybackService, force_exit: bool) -> ExitDecision {
+    if force_exit {
+        let _ = playback.shutdown().await;
+        return ExitDecision::ExitSuccess;
+    }
+
+    match playback.shutdown().await {
+        Ok(()) => ExitDecision::ExitSuccess,
+        Err(err) => ExitDecision::BlockExitAndReport(err),
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -108,6 +126,8 @@ pub fn run() {
             commands::playback::reorder_queue,
             commands::playback::clear_queue,
             commands::playback::retry_audio_device,
+            commands::playback::retry_shutdown,
+            commands::playback::force_exit,
         ])
         .build(tauri::generate_context!())
         .expect("Cavia Music failed to build");
@@ -121,8 +141,21 @@ pub fn run() {
             api.prevent_exit();
 
             let state = app_handle.state::<AppState>();
-            let _ = tauri::async_runtime::block_on(state.playback.shutdown());
-            app_handle.exit(0);
+            let decision =
+                tauri::async_runtime::block_on(handle_exit_request(&state.playback, false));
+            match decision {
+                ExitDecision::ExitSuccess => {
+                    app_handle.exit(0);
+                }
+                ExitDecision::BlockExitAndReport(err) => {
+                    SHUTDOWN_STARTED.store(false, Ordering::SeqCst);
+                    eprintln!("[Cavia Exit] Graceful shutdown failed: {err}");
+                    let _ = app_handle.emit(
+                        "app:shutdown-error",
+                        format!("Failed to save playback state: {err}"),
+                    );
+                }
+            }
         }
     });
 }

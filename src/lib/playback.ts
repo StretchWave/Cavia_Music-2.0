@@ -19,6 +19,8 @@ export interface BackendPlaybackSnapshot {
   deviceReady?: boolean;
   backendHealth?: string;
   systemMediaControls?: boolean;
+  smtcStatus?: 'ready' | 'initializing' | 'unavailable' | 'unsupported' | 'error' | string;
+  smtcError?: string | null;
 }
 
 export interface PositionUpdatePayload {
@@ -147,4 +149,14 @@ export async function listenPlaybackPosition(
   return listen<PositionUpdatePayload>('playback:position', (event) => {
     callback(event.payload);
   });
+}
+
+export async function retryShutdown(): Promise<void> {
+  if (!isNativeApp()) return;
+  return invoke('retry_shutdown');
+}
+
+export async function forceExit(): Promise<void> {
+  if (!isNativeApp()) return;
+  return invoke('force_exit');
 }
