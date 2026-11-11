@@ -34,14 +34,40 @@ pub async fn handle_exit_request(playback: &PlaybackService, force_exit: bool) -
     }
 }
 
+/// Resolves the application data directory.
+///
+/// In debug/test builds (`cfg(debug_assertions)`), developers and test runners may set
+/// `CAVIA_APP_DATA_DIR` to redirect database and cache directories into isolated temporary paths.
+/// In production/release builds, `CAVIA_APP_DATA_DIR` is strictly ignored to prevent unauthorized
+/// directory redirection; the platform-resolved application data directory is always used.
+pub fn resolve_app_data_dir_internal(
+    platform_dir: PathBuf,
+    env_override: Option<&str>,
+    is_debug: bool,
+) -> PathBuf {
+    if is_debug {
+        if let Some(val) = env_override {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed);
+            }
+        }
+    }
+    platform_dir
+}
+
+pub fn resolve_app_data_dir(platform_dir: PathBuf) -> PathBuf {
+    let env_val = std::env::var("CAVIA_APP_DATA_DIR").ok();
+    resolve_app_data_dir_internal(platform_dir, env_val.as_deref(), cfg!(debug_assertions))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let app_data_dir = std::env::var("CAVIA_APP_DATA_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| app.path().app_data_dir().unwrap_or_default());
+            let platform_dir = app.path().app_data_dir().unwrap_or_default();
+            let app_data_dir = resolve_app_data_dir(platform_dir);
             fs::create_dir_all(&app_data_dir)?;
             let database_path = app_data_dir.join("cavia-library.sqlite3");
             let artworks_dir = app_data_dir.join("artworks");
@@ -207,5 +233,40 @@ mod tests {
             parsed.error,
             "Failed to save playback state: database disk image is malformed (code 11)"
         );
+    }
+
+    #[test]
+    fn test_resolve_app_data_dir_debug_honors_override() {
+        let platform_dir = std::path::PathBuf::from(r"C:\DefaultAppData");
+        let override_dir = r"C:\IsolatedTestDir";
+        let resolved = crate::resolve_app_data_dir_internal(
+            platform_dir.clone(),
+            Some(override_dir),
+            true, // is_debug = true
+        );
+        assert_eq!(resolved, std::path::PathBuf::from(override_dir));
+    }
+
+    #[test]
+    fn test_resolve_app_data_dir_release_ignores_override() {
+        let platform_dir = std::path::PathBuf::from(r"C:\DefaultAppData");
+        let override_dir = r"C:\IsolatedTestDir";
+        let resolved = crate::resolve_app_data_dir_internal(
+            platform_dir.clone(),
+            Some(override_dir),
+            false, // is_debug = false (simulates release build)
+        );
+        assert_eq!(resolved, platform_dir);
+    }
+
+    #[test]
+    fn test_resolve_app_data_dir_empty_override_ignored() {
+        let platform_dir = std::path::PathBuf::from(r"C:\DefaultAppData");
+        let resolved = crate::resolve_app_data_dir_internal(
+            platform_dir.clone(),
+            Some("   "),
+            true, // is_debug = true
+        );
+        assert_eq!(resolved, platform_dir);
     }
 }

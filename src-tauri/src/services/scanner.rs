@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -48,19 +49,96 @@ pub async fn scan_directory(
     folder_path: PathBuf,
     artworks_dir: PathBuf,
     cancel_flag: Arc<AtomicBool>,
+    op_lock: Arc<Mutex<()>>,
 ) -> Result<ScanResult, String> {
-    scan_directory_with_progress(pool, folder_path, artworks_dir, cancel_flag, move |p| {
-        let _ = app.emit("library:scan-progress", &p);
-    })
+    scan_directory_with_progress(
+        pool,
+        folder_path,
+        artworks_dir,
+        cancel_flag,
+        op_lock,
+        move |p| {
+            let _ = app.emit("library:scan-progress", &p);
+        },
+    )
     .await
 }
+
+#[cfg(test)]
+pub(crate) type ScanPauseHook =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
 pub async fn scan_directory_with_progress<F>(
     pool: SqlitePool,
     folder_path: PathBuf,
     artworks_dir: PathBuf,
     cancel_flag: Arc<AtomicBool>,
+    op_lock: Arc<Mutex<()>>,
     on_progress: F,
+) -> Result<ScanResult, String>
+where
+    F: Fn(ScanProgress) + Send + Sync,
+{
+    #[cfg(test)]
+    {
+        scan_directory_with_progress_internal(
+            pool,
+            folder_path,
+            artworks_dir,
+            cancel_flag,
+            op_lock,
+            on_progress,
+            None,
+        )
+        .await
+    }
+    #[cfg(not(test))]
+    {
+        scan_directory_with_progress_internal(
+            pool,
+            folder_path,
+            artworks_dir,
+            cancel_flag,
+            op_lock,
+            on_progress,
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn scan_directory_with_progress_and_pause<F>(
+    pool: SqlitePool,
+    folder_path: PathBuf,
+    artworks_dir: PathBuf,
+    cancel_flag: Arc<AtomicBool>,
+    op_lock: Arc<Mutex<()>>,
+    pause_hook: ScanPauseHook,
+    on_progress: F,
+) -> Result<ScanResult, String>
+where
+    F: Fn(ScanProgress) + Send + Sync,
+{
+    scan_directory_with_progress_internal(
+        pool,
+        folder_path,
+        artworks_dir,
+        cancel_flag,
+        op_lock,
+        on_progress,
+        Some(pause_hook),
+    )
+    .await
+}
+
+async fn scan_directory_with_progress_internal<F>(
+    pool: SqlitePool,
+    folder_path: PathBuf,
+    artworks_dir: PathBuf,
+    cancel_flag: Arc<AtomicBool>,
+    op_lock: Arc<Mutex<()>>,
+    on_progress: F,
+    #[cfg(test)] pause_after_artwork_write: Option<ScanPauseHook>,
 ) -> Result<ScanResult, String>
 where
     F: Fn(ScanProgress) + Send + Sync,
@@ -270,64 +348,80 @@ where
             }
         };
 
-        // Cache embedded artwork atomically if present
-        let mut artwork_uri: Option<String> = None;
-        if let Some((pic_bytes, ext)) = metadata.picture_data {
-            if let Ok((_art_hash, art_path, _was_written)) =
-                crate::services::artwork::write_artwork_atomic(&artworks_dir, &pic_bytes, &ext)
-            {
-                artwork_uri = Some(art_path.to_string_lossy().to_string());
+        // The critical section covers atomic artwork caching AND track insertion in SQLite,
+        // synchronizing through the exact same op_lock that ArtworkService::clean_orphans uses.
+        let (_artwork_uri, insert_res) = {
+            let _artwork_guard = if metadata.picture_data.is_some() {
+                Some(op_lock.lock().await)
+            } else {
+                None
+            };
+
+            let mut artwork_uri: Option<String> = None;
+            if let Some((pic_bytes, ext)) = &metadata.picture_data {
+                if let Ok((_art_hash, art_path, _was_written)) =
+                    crate::services::artwork::write_artwork_atomic(&artworks_dir, pic_bytes, ext)
+                {
+                    artwork_uri = Some(art_path.to_string_lossy().to_string());
+                }
             }
-        }
 
-        let ext = path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let mime_type = determine_mime_type(&ext);
-        let track_id = format!("track-{}", Uuid::new_v4());
+            #[cfg(test)]
+            if let Some(ref hook) = pause_after_artwork_write {
+                hook().await;
+            }
 
-        let insert_res = sqlx::query(
-            r#"
-            INSERT INTO tracks (
-                id,
-                source_kind,
-                title,
-                artist,
-                album,
-                album_artist,
-                duration_ms,
-                file_uri,
-                artwork_uri,
-                mime_type,
-                file_size_bytes,
-                content_hash,
-                release_year,
-                track_number,
-                disc_number,
-                genre,
-                is_deleted
-            ) VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-            "#,
-        )
-        .bind(&track_id)
-        .bind(&metadata.title)
-        .bind(&metadata.artist)
-        .bind(&metadata.album)
-        .bind(&metadata.album_artist)
-        .bind(metadata.duration_ms)
-        .bind(&file_path_str)
-        .bind(&artwork_uri)
-        .bind(mime_type)
-        .bind(file_size_bytes)
-        .bind(&content_hash)
-        .bind(metadata.release_year)
-        .bind(metadata.track_number)
-        .bind(metadata.disc_number)
-        .bind(&metadata.genre)
-        .execute(&pool)
-        .await;
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let mime_type = determine_mime_type(&ext);
+            let track_id = format!("track-{}", Uuid::new_v4());
+
+            let insert_res = sqlx::query(
+                r#"
+                INSERT INTO tracks (
+                    id,
+                    source_kind,
+                    title,
+                    artist,
+                    album,
+                    album_artist,
+                    duration_ms,
+                    file_uri,
+                    artwork_uri,
+                    mime_type,
+                    file_size_bytes,
+                    content_hash,
+                    release_year,
+                    track_number,
+                    disc_number,
+                    genre,
+                    is_deleted
+                ) VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                "#,
+            )
+            .bind(&track_id)
+            .bind(&metadata.title)
+            .bind(&metadata.artist)
+            .bind(&metadata.album)
+            .bind(&metadata.album_artist)
+            .bind(metadata.duration_ms)
+            .bind(&file_path_str)
+            .bind(&artwork_uri)
+            .bind(mime_type)
+            .bind(file_size_bytes)
+            .bind(&content_hash)
+            .bind(metadata.release_year)
+            .bind(metadata.track_number)
+            .bind(metadata.disc_number)
+            .bind(&metadata.genre)
+            .execute(&pool)
+            .await;
+
+            (artwork_uri, insert_res)
+        };
 
         match insert_res {
             Ok(_) => {
@@ -471,11 +565,13 @@ mod tests {
 
         // First scan
         let cancel_flag = Arc::new(AtomicBool::new(false));
+        let op_lock = Arc::new(Mutex::new(()));
         let res1 = scan_directory_with_progress(
             pool.clone(),
             music_dir.clone(),
             artworks_dir.clone(),
             cancel_flag.clone(),
+            op_lock.clone(),
             |_| {},
         )
         .await
@@ -503,6 +599,7 @@ mod tests {
             music_dir.clone(),
             artworks_dir.clone(),
             cancel_flag.clone(),
+            op_lock.clone(),
             |_| {},
         )
         .await
@@ -537,6 +634,7 @@ mod tests {
             music_dir,
             temp_base.join("artworks"),
             cancel_flag,
+            Arc::new(Mutex::new(())),
             |_| {},
         )
         .await

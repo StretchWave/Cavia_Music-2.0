@@ -145,8 +145,9 @@ pub async fn scan_music_directory(
     let pool = state.database.clone();
     let artworks_dir = state.artworks_dir.clone();
     let cancel_flag = state.scan_cancelled.clone();
+    let op_lock = state.artwork.op_lock();
 
-    scanner::scan_directory(app, pool, path, artworks_dir, cancel_flag).await
+    scanner::scan_directory(app, pool, path, artworks_dir, cancel_flag, op_lock).await
 }
 
 #[tauri::command]

@@ -63,4 +63,3 @@ export function formatBytes(bytes: number): string {
   const val = bytes / Math.pow(k, i);
   return `${val.toFixed(i === 0 ? 0 : 1)} ${sizes[i]}`;
 }
-

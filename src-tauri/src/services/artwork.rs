@@ -193,6 +193,12 @@ impl ArtworkService {
         &self.artworks_dir
     }
 
+    /// Exposes the shared operation lock to coordinate between artwork cleanup,
+    /// recovery, and library scanner imports under a single mutual-exclusion boundary.
+    pub fn op_lock(&self) -> Arc<Mutex<()>> {
+        self.op_lock.clone()
+    }
+
     /// Fetches all referenced artwork filenames and normalized paths from SQLite.
     /// Includes both active and soft-deleted tracks (`is_deleted = 1`), as well
     /// as any playlists with artwork references, ensuring soft-deleted tracks
@@ -484,7 +490,38 @@ impl ArtworkService {
     /// - Returns a comprehensive cleanup summary with exact reclaimed byte count.
     pub async fn clean_orphans(&self) -> Result<ArtworkCleanupResult, String> {
         let _guard = self.op_lock.lock().await;
+        self.clean_orphans_locked(None).await
+    }
 
+    #[cfg(test)]
+    pub(crate) async fn clean_orphans_with_precheck_hook<F, Fut>(
+        &self,
+        hook: F,
+    ) -> Result<ArtworkCleanupResult, String>
+    where
+        F: FnOnce(SqlitePool, String) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let _guard = self.op_lock.lock().await;
+        self.clean_orphans_locked(Some(Box::new(|pool, filename| {
+            Box::pin(hook(pool, filename))
+        })))
+        .await
+    }
+
+    async fn clean_orphans_locked(
+        &self,
+        #[allow(unused_mut, unused_variables)] mut precheck_hook: Option<
+            Box<
+                dyn FnOnce(
+                        SqlitePool,
+                        String,
+                    )
+                        -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                    + Send,
+            >,
+        >,
+    ) -> Result<ArtworkCleanupResult, String> {
         let orphans = self.find_orphaned_artwork().await?;
         if orphans.is_empty() {
             return Ok(ArtworkCleanupResult {
@@ -503,6 +540,11 @@ impl ArtworkService {
         let canonical_dir = self.artworks_dir.canonicalize().ok();
 
         for orphan in orphans {
+            #[cfg(test)]
+            if let Some(hook) = precheck_hook.take() {
+                hook(self.pool.clone(), orphan.filename.clone()).await;
+            }
+
             // Immediate re-check in SQLite to guard against concurrent imports
             let like_pattern = format!("%{}", orphan.filename);
             let track_ref = sqlx::query("SELECT 1 FROM tracks WHERE artwork_uri LIKE ? LIMIT 1")
@@ -516,12 +558,30 @@ impl ArtworkService {
                     .fetch_optional(&self.pool)
                     .await;
 
-            let has_ref = match (track_ref, playlist_ref) {
-                (Ok(Some(_)), _) | (_, Ok(Some(_))) => true,
-                _ => false,
+            // Fail-closed validation: A candidate may ONLY be deleted when BOTH database
+            // checks succeed (Ok) and BOTH confirm no reference exists (None).
+            // Any Err(_) indicates unknown reference status and must fail closed (preserve the file).
+            let (track_has_ref, playlist_has_ref) = match (track_ref, playlist_ref) {
+                (Ok(t), Ok(p)) => (t.is_some(), p.is_some()),
+                (Err(e), _) => {
+                    skipped_files += 1;
+                    failures.push(format!(
+                        "Database error checking track reference for {}: {e}",
+                        orphan.filename
+                    ));
+                    continue;
+                }
+                (_, Err(e)) => {
+                    skipped_files += 1;
+                    failures.push(format!(
+                        "Database error checking playlist reference for {}: {e}",
+                        orphan.filename
+                    ));
+                    continue;
+                }
             };
 
-            if has_ref {
+            if track_has_ref || playlist_has_ref {
                 skipped_files += 1;
                 continue;
             }
@@ -802,6 +862,7 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
 
     struct TempDirGuard {
         path: PathBuf,
@@ -1337,5 +1398,288 @@ mod tests {
         assert_eq!(outcome.status, "recovered");
         // Verify the 0-byte file was replaced with the real bytes
         assert_eq!(fs::read(&target_path).unwrap(), pic_bytes);
+    }
+
+    #[tokio::test]
+    async fn test_track_reference_prevents_deletion() {
+        let pool = create_test_pool().await;
+        let guard = temp_test_dir("track_ref_prevent");
+        let art_path = guard
+            .path
+            .join("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg");
+        fs::write(&art_path, b"TEST_IMAGE_BYTES").unwrap();
+
+        let service = ArtworkService::new(pool.clone(), guard.path.clone());
+
+        // Use precheck hook to dynamically insert a track reference after discovery
+        // but before deletion check
+        let art_path_str = art_path.to_string_lossy().to_string();
+        let res = service
+            .clean_orphans_with_precheck_hook(move |p, _filename| async move {
+                sqlx::query(
+                    "INSERT INTO tracks (id, source_kind, title, file_uri, artwork_uri, is_deleted) VALUES ('t_prevent', 'local', 'Prevent Track', 'file:///test.mp3', ?, 0)",
+                )
+                .bind(&art_path_str)
+                .execute(&p)
+                .await
+                .unwrap();
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(res.deleted_files, 0, "Candidate must not be deleted");
+        assert_eq!(
+            res.skipped_files, 1,
+            "Candidate must be skipped due to track reference"
+        );
+        assert!(art_path.exists(), "Artwork file must remain on disk");
+    }
+
+    #[tokio::test]
+    async fn test_playlist_reference_prevents_deletion() {
+        let pool = create_test_pool().await;
+        let guard = temp_test_dir("playlist_ref_prevent");
+        let art_path = guard
+            .path
+            .join("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789.png");
+        fs::write(&art_path, b"TEST_IMAGE_BYTES").unwrap();
+
+        let service = ArtworkService::new(pool.clone(), guard.path.clone());
+
+        let art_path_str = art_path.to_string_lossy().to_string();
+        let res = service
+            .clean_orphans_with_precheck_hook(move |p, _filename| async move {
+                sqlx::query(
+                    "INSERT INTO playlists (id, name, artwork_uri, is_deleted) VALUES ('p_prevent', 'Prevent Playlist', ?, 0)",
+                )
+                .bind(&art_path_str)
+                .execute(&p)
+                .await
+                .unwrap();
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(res.deleted_files, 0, "Candidate must not be deleted");
+        assert_eq!(
+            res.skipped_files, 1,
+            "Candidate must be skipped due to playlist reference"
+        );
+        assert!(art_path.exists(), "Artwork file must remain on disk");
+    }
+
+    #[tokio::test]
+    async fn test_database_error_in_track_check_prevents_deletion() {
+        let pool = create_test_pool().await;
+        let guard = temp_test_dir("db_err_track");
+        let art_path = guard
+            .path
+            .join("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg");
+        fs::write(&art_path, b"TEST_IMAGE_BYTES").unwrap();
+
+        let service = ArtworkService::new(pool.clone(), guard.path.clone());
+
+        // In precheck hook, simulate a database failure specifically on the tracks table
+        let res = service
+            .clean_orphans_with_precheck_hook(move |p, _filename| async move {
+                sqlx::query("DROP TABLE tracks").execute(&p).await.unwrap();
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            res.deleted_files, 0,
+            "Database error must fail closed and refuse deletion"
+        );
+        assert_eq!(res.skipped_files, 1, "Candidate must be skipped");
+        assert_eq!(res.failures.len(), 1, "Failure diagnostic must be recorded");
+        assert!(
+            res.failures[0].contains("Database error checking track reference"),
+            "Error diagnostic should specify track reference check: {}",
+            res.failures[0]
+        );
+        assert!(
+            art_path.exists(),
+            "Artwork file must remain on disk when database check fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_database_error_in_playlist_check_prevents_deletion() {
+        let pool = create_test_pool().await;
+        let guard = temp_test_dir("db_err_playlist");
+        let art_path = guard
+            .path
+            .join("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg");
+        fs::write(&art_path, b"TEST_IMAGE_BYTES").unwrap();
+
+        let service = ArtworkService::new(pool.clone(), guard.path.clone());
+
+        // In precheck hook, simulate a database failure specifically on the playlists table
+        let res = service
+            .clean_orphans_with_precheck_hook(move |p, _filename| async move {
+                sqlx::query("DROP TABLE playlists")
+                    .execute(&p)
+                    .await
+                    .unwrap();
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            res.deleted_files, 0,
+            "Database error must fail closed and refuse deletion"
+        );
+        assert_eq!(res.skipped_files, 1, "Candidate must be skipped");
+        assert_eq!(res.failures.len(), 1, "Failure diagnostic must be recorded");
+        assert!(
+            res.failures[0].contains("Database error checking playlist reference"),
+            "Error diagnostic should specify playlist reference check: {}",
+            res.failures[0]
+        );
+        assert!(
+            art_path.exists(),
+            "Artwork file must remain on disk when database check fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unreferenced_file_is_deleted_successfully() {
+        let pool = create_test_pool().await;
+        let guard = temp_test_dir("unreferenced_deleted");
+        let art_path = guard
+            .path
+            .join("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg");
+        let img_bytes = b"DEFINITE_ORPHAN_BYTES_12345";
+        fs::write(&art_path, img_bytes).unwrap();
+
+        let service = ArtworkService::new(pool.clone(), guard.path.clone());
+        let res = service.clean_orphans().await.unwrap();
+
+        assert_eq!(res.deleted_files, 1, "Unreferenced file must be deleted");
+        assert_eq!(res.skipped_files, 0);
+        assert_eq!(res.reclaimed_bytes, img_bytes.len() as u64);
+        assert!(!art_path.exists(), "Artwork file must be removed from disk");
+    }
+
+    #[tokio::test]
+    async fn test_scanner_cleanup_concurrency_race_prevented() {
+        let pool = create_test_pool().await;
+        let guard = temp_test_dir("scan_cleanup_concurrency");
+        let audio_dir = guard.path.join("audio");
+        let artworks_dir = guard.path.join("artworks");
+        fs::create_dir_all(&audio_dir).unwrap();
+        fs::create_dir_all(&artworks_dir).unwrap();
+
+        // Create an audio fixture inside audio_dir with embedded front cover picture
+        let base_audio = temp_audio_fixture("mp3");
+        let audio_target = audio_dir.join("track_with_art.mp3");
+        fs::copy(&base_audio.path, &audio_target).unwrap();
+
+        let pic_bytes = b"CONCURRENCY_TEST_EMBEDDED_JPEG_BYTES_777";
+        let mut tag = Id3v2Tag::new();
+        let picture = Picture::unchecked(pic_bytes.to_vec())
+            .pic_type(PictureType::CoverFront)
+            .mime_type(MimeType::Jpeg)
+            .build();
+        tag.insert_picture(picture);
+        tag.save_to_path(&audio_target, WriteOptions::default())
+            .unwrap();
+
+        let artwork_service = ArtworkService::new(pool.clone(), artworks_dir.clone());
+        let op_lock = artwork_service.op_lock();
+
+        // Channels to orchestrate deterministic pause in the scan
+        let (pause_tx, pause_rx) = tokio::sync::oneshot::channel::<()>();
+        let (continue_tx, continue_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let pause_tx_mutex = Arc::new(std::sync::Mutex::new(Some(pause_tx)));
+        let continue_rx_mutex = Arc::new(tokio::sync::Mutex::new(Some(continue_rx)));
+
+        let pause_hook: crate::services::scanner::ScanPauseHook = Arc::new(move || {
+            let p_tx = pause_tx_mutex.clone();
+            let c_rx = continue_rx_mutex.clone();
+            Box::pin(async move {
+                if let Some(tx) = p_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                let mut lock = c_rx.lock().await;
+                if let Some(rx) = lock.take() {
+                    let _ = rx.await;
+                }
+            })
+        });
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let pool_scan = pool.clone();
+        let artworks_dir_clone = artworks_dir.clone();
+        let scan_task = tokio::spawn(async move {
+            crate::services::scanner::scan_directory_with_progress_and_pause(
+                pool_scan,
+                audio_dir,
+                artworks_dir_clone,
+                cancel_flag,
+                op_lock,
+                pause_hook,
+                |_| {},
+            )
+            .await
+        });
+
+        // Await the signal that scanner has written the artwork file to disk
+        pause_rx.await.unwrap();
+
+        // 1. Verify the artwork file now exists on disk
+        let mut hasher = Sha256::new();
+        hasher.update(pic_bytes);
+        let art_hash = hex::encode(hasher.finalize());
+        let expected_art_path = artworks_dir.join(format!("{art_hash}.jpg"));
+        assert!(
+            expected_art_path.exists(),
+            "Artwork file must be written to disk"
+        );
+
+        // 2. Verify that the track is NOT yet committed in SQLite
+        let track_count: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(track_count, 0, "Track must not yet be committed in SQLite");
+
+        // 3. Start cleanup concurrently. Because the scanner holds op_lock, cleanup must wait!
+        let service_clone = artwork_service.clone();
+        let cleanup_task = tokio::spawn(async move { service_clone.clean_orphans().await });
+
+        // Yield execution to allow cleanup_task to attempt to acquire op_lock
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Verify cleanup has NOT deleted the artwork file
+        assert!(
+            expected_art_path.exists(),
+            "Cleanup must not delete artwork while scan holds op_lock"
+        );
+
+        // 4. Resume the scanner to commit the track and release op_lock
+        continue_tx.send(()).unwrap();
+
+        let scan_res = scan_task.await.unwrap().unwrap();
+        assert_eq!(scan_res.new_tracks, 1);
+
+        // Cleanup now unblocks and finishes
+        let cleanup_res = cleanup_task.await.unwrap().unwrap();
+        assert_eq!(
+            cleanup_res.deleted_files, 0,
+            "Cleanup must not delete newly referenced artwork"
+        );
+
+        // The committed track references the existing artwork file
+        let row = sqlx::query("SELECT artwork_uri FROM tracks LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let art_uri: String = row.get("artwork_uri");
+        let final_path = local_path_from_uri(&art_uri);
+        assert!(final_path.exists());
+        assert_eq!(fs::read(&final_path).unwrap(), pic_bytes);
     }
 }

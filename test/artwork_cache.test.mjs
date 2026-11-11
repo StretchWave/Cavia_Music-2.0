@@ -125,4 +125,3 @@ describe('Artwork Cache — DTO Contract Structure', () => {
     assert.ok(Array.isArray(recovery.errors));
   });
 });
-
