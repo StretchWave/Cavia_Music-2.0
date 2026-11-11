@@ -88,11 +88,17 @@ pub fn run() {
                 });
             }
 
-            app.manage(AppState::new(pool, artworks_dir, playback));
+            let lyrics = services::lyrics::LyricsService::new(pool.clone()).map_err(|e| {
+                io::Error::other(format!("Lyrics engine initialization failed: {e}"))
+            })?;
+
+            app.manage(AppState::new(pool, artworks_dir, playback, lyrics));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::app::app_health,
+            commands::lyrics::get_track_lyrics,
+            commands::lyrics::refresh_track_lyrics,
             commands::library::library_summary,
             commands::library::get_tracks,
             commands::library::get_albums,

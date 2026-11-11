@@ -44,7 +44,7 @@
 ## Milestone 4 — Product features
 - [x] Search orchestration and provider adapters (Milestone 4.2: local search implementation completed with SQLite FTS5 trigram indexing and 1-2 char short-query fallback; 4 supported categories [Tracks, Albums, Artists, Playlists]; 103 Rust + 29 Node.js contract tests passed; Windows runtime verified; mobile runtime remains unverified; external provider adapters deferred to M4.3)
 - [x] Playlist management and liked tracks (Milestone 4.1: complete local playlist management, transactional addition with duplicate support, collision-proof compaction removal, accessible reordering, metadata editing, and instant count synchronization)
-- [ ] LRCLIB lyrics and synced scrolling
+- [x] LRCLIB lyrics and synced scrolling (Milestone 4.3: embedded lyrics priority [ID3v2 USLT/SYLT (millisecond format only; MPEG-frame SYLT ignored), Vorbis Comments, MP4], LRCLIB lookup with response identity validation and valid-range duration only, enforced Retry-After cooldowns on a serialized request gate, SQLite lyrics cache with size/mtime-hardened fingerprint and 7-day bounded negative caching, shared embedded-content classification, robust LRC parser, prop-driven synchronized highlighting with manual-scroll follow control and duration-clamped click-to-seek; 166 Rust + 1 smoke + 29 Node.js tests passing; Windows runtime exercised through the live UI; live 429/offline conditions and mobile runtime remain unverified)
 - [ ] Artwork cache and audio cache where permitted
 - [ ] Spotify PKCE playlist metadata import
 - [ ] Optional account/cloud sync

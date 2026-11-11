@@ -1098,6 +1098,9 @@ export function App() {
         isOpen={isLyricsOpen}
         onClose={() => setIsLyricsOpen(false)}
         currentTrack={playback.currentTrack}
+        playbackPositionMs={playback.positionMs}
+        trackDurationMs={playback.durationMs}
+        onSeek={handleSeek}
       />
 
       {/* Add Track to Playlist Modal */}

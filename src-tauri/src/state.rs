@@ -1,3 +1,4 @@
+use crate::services::lyrics::LyricsService;
 use crate::services::playback::PlaybackService;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
@@ -11,15 +12,22 @@ pub struct AppState {
     pub artworks_dir: PathBuf,
     pub scan_cancelled: Arc<AtomicBool>,
     pub playback: PlaybackService,
+    pub lyrics: LyricsService,
 }
 
 impl AppState {
-    pub fn new(database: SqlitePool, artworks_dir: PathBuf, playback: PlaybackService) -> Self {
+    pub fn new(
+        database: SqlitePool,
+        artworks_dir: PathBuf,
+        playback: PlaybackService,
+        lyrics: LyricsService,
+    ) -> Self {
         Self {
             database,
             artworks_dir,
             scan_cancelled: Arc::new(AtomicBool::new(false)),
             playback,
+            lyrics,
         }
     }
 }

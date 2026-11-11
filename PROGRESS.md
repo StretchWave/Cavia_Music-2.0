@@ -601,3 +601,108 @@ All five deficiencies identified in the final audit were corrected and verified 
 - **Database integrity verified; test records cleanly removed**
 - **Mobile runtime remains unverified (deferred to physical hardware verification)**
 - **`cargo fmt --check`, `cargo check --all-targets`, `npm run build`, and `git diff --check` passed cleanly**
+
+---
+
+---
+
+## 9. Milestone 4.3 Implementation: Lyrics & Synchronized Scrolling
+
+> Status: Complete. Implementation, remediation audit, and independent final review are complete. Verified across Windows desktop runtime, unit/integration suites, and embedded audio fixtures. Mobile runtime deferred to physical hardware verification.
+
+### Core Capabilities & Architecture (`services::lyrics`, `commands::lyrics`, `0004_lyrics_cache.sql`)
+- **Strict Retrieval Priority:**
+  1. **SQLite Durable Cache:** instant retrieval when the fingerprint matches and any negative entry is still within its TTL.
+  2. **Local Embedded Tags:** highest priority for fresh lookups; offline-first, zero network footprint.
+  3. **LRCLIB Community API:** exact-lookup fallback when embedded lyrics are absent.
+- **D1 — Response identity validation (`lrclib.rs`).** An LRCLIB 200 response is only accepted when its metadata describes the requested recording. Documented policy and tolerances:
+  - **Title:** normalized equality (lowercased, trimmed, whitespace-collapsed, punctuation and typographic quote/dash variants folded). Version qualifiers are significant, so `Midnight (Live)` is **not** accepted for a studio `Midnight`.
+  - **Artist:** normalized equality, or equal primary artist before a `feat`/`ft`/`featuring`/`with`/`vs` segment. A materially different artist is always rejected, including a cover by another performer.
+  - **Album:** skipped when either side is absent. When both are present they must match exactly or one must be the other plus an *edition* qualifier (`deluxe`, `remastered`, `expanded`, `anniversary`, `special`, `bonus`, `edition`, `version`, `explicit`, `collector`, `reissue`). Deliberately **not** a substring test: `Obsidian` vs `Obsidianic` and `Obsidian` vs `Obsidian, Vol. 2` are rejected.
+  - **Duration:** skipped when either side is absent; when both are present a difference greater than 3 s is rejected.
+  - **Missing optional metadata is distinguished from contradictory metadata:** a missing returned album or duration does not by itself reject an otherwise strong match, while a returned artist/album/duration that contradicts the request does.
+  - **Failure handling:** a rejected response returns a typed `LrclibResult::Mismatch { reason }`, is never written to the positive cache, is not converted into a negative cache entry either (metadata may be corrected locally), and is never rendered as belonging to the requested track.
+- **D2 — Duration parameter validity (`lrclib.rs`).** LRCLIB accepts `duration` only in `1..=3600` seconds. `duration` is now included only inside that range: tracks longer than 3600 s omit it instead of provoking HTTP 400 on every lookup, zero/negative durations are omitted, and title/artist (plus album when available) are always sent. Long tracks are not rejected merely because duration cannot be supplied.
+- **Embedded Tag Extraction (`services::lyrics::embedded`):**
+  - **ID3v2:** binary `SYLT` frames are parsed with `SynchronizedTextFrame::parse` and converted to LRC only when `TimestampFormat::MS`. **MPEG-frame SYLT timestamps are not converted** (the MPEG frame duration is not available at this layer, so any mapping would be a guess); such frames are ignored.
+  - **D4 — shared classification:** a single `classify_lyrics_content` function classifies *every* source (ID3v2 `USLT`, generic `ItemKey::Lyrics`, `ItemKey::UnsyncLyrics`) into empty / plain / LRC. Previously only generic lyrics keys were classified, so a `USLT` frame holding valid LRC was surfaced as plain text. Original content and timestamps are preserved and no audio metadata is modified.
+  - **Vorbis Comments & FLAC:** `LYRICS` / `UNSYNCEDLYRICS` via `ItemKey::Lyrics` and `ItemKey::UnsyncLyrics`.
+  - **MP4 / ALAC / AAC (`.m4a`):** `©lyr` via `ItemKey::Lyrics`.
+  - **SYLT precision:** `SYLT` stores milliseconds while LRC here uses hundredths, so sub-10 ms precision is intentionally truncated when converting.
+- **LRCLIB Dedicated Client (`services::lyrics::lrclib`):**
+  - **Endpoint:** `GET https://lrclib.net/api/get` with `track_name`, `artist_name`, `album_name`, and integer-seconds `duration` (when valid).
+  - **User-Agent:** honest application identifier `Cavia Music/2.0 (https://github.com/StretchWave/Cavia_Music-2.0)`.
+  - **Request gate:** a shared `tokio::sync::Mutex` is held from before the request is sent until its response has been consumed, so outbound requests are fully **serialized** (not merely rate-spaced), with a 250 ms minimum spacing floor.
+  - **Retry-After is enforced, not just parsed:** a `Retry-After` on HTTP 429 or 503 stores a cooldown in the gate, and later callers inside that window wait for it rather than issuing a request. Both representations are supported (delay-seconds and HTTP-date via `httpdate`).
+  - **Bounded waiting:** a caller waits at most 5 s for a cooldown; a longer server cooldown returns a typed `LrclibError::RateLimited`/`ServiceUnavailable` carrying the remaining `retry_after_s` so the UI does not spin indefinitely. There is no automatic retry loop.
+  - **Cancellation safety:** dropping a waiting future releases the tokio mutex, so cancellation cannot leave the gate permanently locked (covered by a test that aborts a waiter and then completes a request).
+  - **Error isolation:** transient failures (5xx, timeouts, offline) return explicit errors and are never cached as negative results.
+- **Durable SQLite Cache (`0004_lyrics_cache.sql`, `services::lyrics::cache`):**
+  - Forward-only migration creating `lyrics_cache` with `ON DELETE CASCADE` from `tracks`.
+  - **D3 — bounded negative caching:** `fetched_at`/`updated_at` were written but never consulted, so `not_found` and `instrumental` results could persist indefinitely. Negative entries now expire after **7 days** (`NEGATIVE_CACHE_TTL_SECS`), chosen as a bounded compromise: LRCLIB states missing tracks may appear later and instrumental classifications can be corrected upstream, while the TTL avoids a network lookup on every drawer open. **Positive (`found`) results do not expire** — they are real lyrics for this recording and are only invalidated by the fingerprint or an explicit refresh.
+  - **Expiry behaviour:** an expired negative entry is treated as a cache miss; the service then attempts embedded extraction and, when appropriate, an LRCLIB lookup, and replaces the cached outcome only when a legitimate new result is obtained. A transient error leaves the existing cached row untouched.
+  - **Fingerprint hardening:** `sha256(normalized title|artist|album|duration_ms|normalized path|file size|file mtime)`.
+    - **Detects:** metadata edits, a different file replacing the original at the same path when size or mtime changes (including re-tagging embedded lyrics, which updates mtime).
+    - **Does not detect:** a replacement that preserves both size and mtime, or in-place byte edits that keep size and reset mtime; when mtime is unavailable it falls back to size only.
+    - It never reads or hashes the audio payload, so lookups stay cheap, and `delete_cached_lyrics` / the refresh command remain the explicit escape hatch (force refresh is still available).
+- **Robust LRC Parser (`services::lyrics::parser`):** 1/2/3 decimal digits and bare `[mm:ss]`, multiple timestamps per line, `[offset:±N]` with negative clamping, ID tags ignored, stable deterministic ordering, full Unicode, tolerant of malformed input.
+
+### Frontend User Interface & Synchronized Experience (`LyricsDrawer.tsx`, `lyrics.ts`)
+- **Presentation:** obsidian foundation, aged ivory typography, restrained vermilion accent on the active line; source pill (`EMBEDDED` / `LRCLIB`); Synced/Plain tabs; plain editorial typography; instrumental card; not-found state with refresh.
+- **D5 — single authoritative position:** the drawer's own `listenPlaybackPosition` subscription was removed. `playbackPositionMs`/`trackDurationMs` come from `App.tsx`, which owns the only position subscription, eliminating a redundant 250 ms state update per tick.
+- **Track-transition scroll reset:** `prevActiveIndexRef` is reset to `-1` when the drawer opens or the track changes, so a new track's first active line always receives the initial scroll treatment even when its index equals the previous track's last active index.
+- **Manual scroll behaviour:** scrolling the active line out of view pauses automatic following; it resumes when the reader scrolls back near the active line or presses the follow control. Automatic following never yanks the reader back while they are reading elsewhere. Reduced-motion is respected (`auto` vs `smooth`).
+- **Seek clamping:** lyric seek timestamps are clamped to `[0, trackDurationMs]` using the authoritative playback duration before the existing `seek` command is invoked. No second seek implementation was added.
+- **Stale-response protection:** subscription tracking prevents out-of-order responses from overwriting a newer track during rapid skipping.
+
+### Embedded lyrics fixture coverage (Phase 5)
+Generated tagged containers driven through the production `extract_embedded_lyrics` path (real `Probe::open().read()` tag reading), using temporary copies that are deleted on drop. Construction is documented in `src-tauri/tests/fixtures/audio/README.md`.
+
+| Format | Field/frame | Fixture mechanism | Verified |
+| --- | --- | --- | --- |
+| MP3 | ID3v2 `USLT` plain | Lofty `UnsynchronizedTextFrame` writer | yes |
+| MP3 | ID3v2 `USLT` with LRC | same writer, timestamped text | yes |
+| MP3 | ID3v2 `SYLT` (ms) | `SynchronizedTextFrame::as_bytes()` in a `BinaryFrame` | yes — read path yields `Frame::Binary` and is parsed to the expected variant |
+| MP3 | ID3v2 `SYLT` (MPEG) | same, `TimestampFormat::MPEG` | yes — asserted **ignored** (documented unsupported) |
+| FLAC | Vorbis `LYRICS` | `Tag::insert_text(ItemKey::Lyrics, …)` | yes |
+| M4A | MP4 `©lyr` | `Tag::insert_text(ItemKey::Lyrics, …)` | yes |
+| MP3 | empty `USLT`, malformed timestamps | Lofty writer | yes |
+
+### Test inventory (production code)
+- **Rust:** 166 passed, 0 failed, 5 ignored (physical audio output device only); plus 1 integration smoke test. 63 of these are lyrics tests: `lrclib` 23, `embedded` 12, `service` 13, `parser` 10, `cache` 5.
+- **Node:** 29 contract tests passed, 0 failed.
+- **Removed misleading Node tests:** `test/lyrics_experience.test.mjs` (18 tests) was deleted. It re-implemented production algorithms in JavaScript instead of testing application code, and contained a fabricated `getSafeSeekPosition` test asserting a production duration clamp that did not exist. The clamp now exists in production and is verified at runtime.
+- **UI component tests:** no DOM test infrastructure exists in this project (no vitest/jsdom/React Testing Library, and the Tauri IPC layer would need mocking). Rather than add a large framework for cosmetic coverage, the drawer was verified through actual Windows runtime tests (below). This is a stated limitation, not a claim of DOM coverage.
+
+### Windows runtime verification (actual application, not a process launch)
+Run against the real `cavia-music.exe` with an isolated app-data directory and isolated synthetic fixtures outside the user's library; the UI was driven through the live WebView2 page over the DevTools protocol. Verified:
+
+| # | Check | Result |
+| --- | --- | --- |
+| 1–2 | Embedded synchronized fixture renders | 10 lines, `EMBEDDED` badge |
+| 3 | Active-line highlighting advances during playback | index 1 → 2 while playing |
+| 4 | Seek backward / forward by clicking lines | click line 8 → position 0:22; click line 2 → 0:04 |
+| 5 | Click future lyric line moves transport | verified (position follows the clicked timestamp) |
+| 6 | Pause stops highlight advancement | index stable across 3 s paused |
+| 7–8 | Embedded plain lyrics render | plain text block, `EMBEDDED` badge |
+| — | `SYLT` fixture (millisecond) renders synced | 10 lines, `EMBEDDED` badge |
+| 9–10 | Live LRCLIB retrieval and rendering | genuine response, 82 synced lines, `LRCLIB` badge |
+| 11–12 | No-match and instrumental states | "No lyrics found"; `YYZ`/Rush returned `instrumental` and rendered the instrumental card |
+| 13–14 | Track change during in-flight lookup | no stale lyrics for the new track |
+| 15 | Close/reopen reuses cache | cache rows for embedded/lrclib/not_found confirmed in SQLite; reopen renders immediately |
+| 17 | Seek clamp beyond file end | line at 45 s in a 30 s file clamped to 0:30 |
+| — | Manual scroll / follow control | follow pauses when scrolled away, no forced recentre for 3 s, follow control re-centres the active line |
+| — | Transport stability | play/pause control responsive, no error line, clean log |
+
+**NOT TESTABLE at runtime (reported, not fabricated):** live HTTP 429/503 `Retry-After` behaviour and offline lookup failure/recovery could not be induced in the runtime environment without disrupting the machine's network; both are covered by deterministic mock-HTTP tests instead. Mobile (Android/iOS) runtime remains unverified. Native-window screenshots were captured from the live WebView via CDP; mobile screenshots are unavailable.
+
+### Verification commands
+`cargo fmt --check`, `cargo check --all-targets`, `cargo test`, `cargo test --test smoke`, `node --test test/*.test.mjs`, `npm run build`, `cargo build --bin cavia-music`, `git diff --check` — all passed.
+
+### Known limitations
+- MPEG-frame `SYLT` timestamps are not converted (documented above).
+- `SYLT` sub-10 ms precision is truncated to LRC hundredths.
+- Fingerprint cannot detect a same-path replacement that preserves both size and mtime.
+- Negative-cache TTL is time-based only; there is no background revalidation.
+- No DOM-level UI test infrastructure; drawer behaviour is covered by runtime verification only.
+- Mobile runtime verification outstanding.
