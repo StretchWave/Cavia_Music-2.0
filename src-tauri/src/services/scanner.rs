@@ -270,19 +270,14 @@ where
             }
         };
 
-        // Cache embedded artwork if present
+        // Cache embedded artwork atomically if present
         let mut artwork_uri: Option<String> = None;
         if let Some((pic_bytes, ext)) = metadata.picture_data {
-            let mut hasher = Sha256::new();
-            hasher.update(&pic_bytes);
-            let art_hash = hex::encode(hasher.finalize());
-            let art_filename = format!("{art_hash}.{ext}");
-            let art_path = artworks_dir.join(&art_filename);
-
-            if !art_path.exists() {
-                let _ = fs::write(&art_path, &pic_bytes);
+            if let Ok((_art_hash, art_path, _was_written)) =
+                crate::services::artwork::write_artwork_atomic(&artworks_dir, &pic_bytes, &ext)
+            {
+                artwork_uri = Some(art_path.to_string_lossy().to_string());
             }
-            artwork_uri = Some(art_path.to_string_lossy().to_string());
         }
 
         let ext = path

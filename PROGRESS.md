@@ -706,3 +706,93 @@ Run against the real `cavia-music.exe` with an isolated app-data directory and i
 - Negative-cache TTL is time-based only; there is no background revalidation.
 - No DOM-level UI test infrastructure; drawer behaviour is covered by runtime verification only.
 - Mobile runtime verification outstanding.
+
+---
+
+## 10. Milestone 4.4 Implementation: Artwork Cache Management & Integrity
+
+> Status: Complete. Implementation, unit test suite, contract tests, and Windows desktop runtime verification are complete. Ready for review.
+
+### Core Capabilities & Architecture (`services::artwork`, `commands::artwork`, `lib/artwork.ts`, `SettingsView.tsx`)
+
+- **Dedicated Artwork Service (`services::artwork::ArtworkService`):**
+  - Operates on `<app_data_dir>/artworks` (`CAVIA_APP_DATA_DIR` environment override supported for isolated testing).
+  - Manages cache inspection, orphan detection, atomic writes, safe orphan cleanup, and embedded tag recovery.
+  - Employs an internal asynchronous operation lock (`Arc<Mutex<()>>`) to serialize maintenance and recovery operations against imports.
+
+- **Real Filesystem & Database Cache Inspection (`get_summary`):**
+  - Computes exact file sizes from filesystem metadata (`fs::metadata`), ignoring directories, subfolders, hidden files, and temporary files.
+  - DTO: `ArtworkCacheSummary` (`totalBytes`, `totalFiles`, `referencedFiles`, `orphanedFiles`, `reclaimableBytes`, `missingReferencedFiles`, `cacheDirExists`, `cacheDirPath`, `inspectionErrors`, `formatCounts`).
+  - Supported formats: JPEG (`jpg`, `jpeg`), PNG (`png`), WebP (`webp`), GIF (`gif`).
+  - Filename validation enforces the SHA-256 naming contract (`<64-hex>.<ext>`).
+
+- **Reference-Aware Orphan Detection (`find_orphaned_artwork`):**
+  - Queries active and soft-deleted tracks (`SELECT artwork_uri FROM tracks WHERE artwork_uri IS NOT NULL`) as well as playlists (`SELECT artwork_uri FROM playlists WHERE artwork_uri IS NOT NULL`).
+  - Multi-track artwork deduplication is strictly respected: shared files are never detected as orphans as long as at least one track references them.
+  - Soft-deleted tracks (`is_deleted = 1`) preserve their cached artwork.
+  - Normalizes slashes and case for cross-platform robustness.
+  - Fail-closed filesystem traversal: symlinks and reparse points pointing outside the cache are rejected.
+
+- **Safe Orphan Cleanup (`clean_orphans`):**
+  - TOCTOU-safe: re-checks SQLite references immediately before each file is deleted.
+  - Re-verifies canonical path containment inside `artworks_dir`.
+  - Never deletes referenced images, directories, or unrecognized files.
+  - DTO: `ArtworkCleanupResult` (`deletedFiles`, `reclaimedBytes`, `skippedFiles`, `failures`).
+  - Fully idempotent: subsequent cleanup calls report 0 deletions.
+
+- **Lossless Embedded Artwork Recovery (`recover_missing`, `recover_track`):**
+  - Detects tracks where `artwork_uri` points to a missing or 0-byte corrupt file on disk.
+  - Probes the source audio file via `lofty` in `spawn_blocking`.
+  - Reuses existing valid cache files if the hash already exists on disk.
+  - Writes recovered images atomically via `write_artwork_atomic`:
+    - Writes to a temporary file (`.tmp_<hash>_<uuid>`) in the same directory.
+    - Flushes and calls `sync_all` on the file descriptor before closing.
+    - Renames atomically into `<hash>.<ext>`.
+  - If the audio file has no embedded artwork tags, honestly clears the broken reference (`UPDATE tracks SET artwork_uri = NULL WHERE id = ?`) so it does not permanently point to a missing file.
+
+- **Scanner Integration:**
+  - Updated `services::scanner::scan_directory_with_progress` to write artwork through `write_artwork_atomic`.
+
+- **Settings UI (`SettingsView.tsx`):**
+  - Replaced the disabled placeholder with the full "Artwork Cache & Storage Management" card.
+  - Displays real cache metrics: Cache Usage, Total Files, Active References, Orphan Count & Reclaimable Space, and Missing Tracks.
+  - Actions: "Refresh Cache Stats", "Clean Orphaned Artwork" (opens confirmation modal), "Repair Missing Artwork".
+  - Clean Orphaned Artwork confirmation modal displays exact file count and reclaimable space with clear safety guarantees.
+  - Full Cavia visual identity: obsidian surfaces, aged ivory typography, restrained vermilion accents.
+
+### Test Inventory
+
+- **Rust Suite:** 181 passed; 0 failed; 5 ignored (physical audio device only); 1 smoke test passed.
+  - 15 dedicated artwork tests in `services::artwork::tests`:
+    - `test_valid_artwork_filename_rules`
+    - `test_atomic_write_creates_file_and_reuses_identical`
+    - `test_cache_summary_empty_cache`
+    - `test_cache_summary_missing_directory_returns_error_safely`
+    - `test_cache_summary_with_referenced_and_orphan`
+    - `test_shared_artwork_deduplication_not_orphaned`
+    - `test_soft_deleted_track_preserves_artwork`
+    - `test_missing_artwork_detection`
+    - `test_clean_orphans_exact_deletion_and_preservation`
+    - `test_recovery_from_embedded_mp3_artwork`
+    - `test_recovery_from_embedded_flac_artwork`
+    - `test_batch_recovery_multiple_tracks_sharing_artwork`
+    - `test_recovery_replaces_corrupt_zero_byte_cache_file`
+    - `test_recovery_handles_missing_audio_honestly`
+    - `test_recovery_handles_audio_with_no_embedded_artwork`
+- **Node Contract Suite (`test/artwork_cache.test.mjs`):** 35 passed; 0 failed.
+  - Covers `formatBytes` bounds, filename validation, DTO camelCase structure, and mathematical invariants.
+
+### Windows Runtime Verification (Actual Application)
+
+Run against `cavia-music.exe` using WebView2 remote debugging protocol (`--remote-debugging-port`) in an isolated AppData directory:
+1. **Initial Stats Rendering:** Rendered Artwork Cache card with 0 B usage, 0 active references, 0 orphans, 0 missing.
+2. **Orphan Detection:** Injected synthetic 43 B orphan JPEG; clicking "Refresh Cache Stats" dynamically detected and updated card to "1 ORPHANS (43 B reclaimable)".
+3. **Modal Confirmation:** Clicking "Clean Orphaned Artwork" opened the modal displaying the file count and space to reclaim.
+4. **Orphan Cleanup:** Confirmed deletion in modal; verified orphan file was permanently deleted from disk and completion banner reported exact reclaimed bytes.
+5. **Missing Artwork Detection:** Inserted track pointing to a missing artwork file; clicking "Refresh Cache Stats" reported "1 TRACKS (Repairable from audio)".
+6. **Recovery & Reference Healing:** Clicking "Repair Missing Artwork" executed recovery, reported completion banner, and cleanly cleared the dangling reference to NULL in SQLite.
+
+### Known Limitations
+
+- Covers local audio file embedded artwork only (FLAC, MP3, M4A, etc.). External / remote artwork providers (Spotify PKCE, etc.) deferred to subsequent milestones.
+- Mobile runtime verification (Android/iOS) deferred to physical device testing.

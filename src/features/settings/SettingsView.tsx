@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
+  AlertTriangle,
   AudioWaveform,
   CheckCircle2,
   Database,
@@ -15,7 +16,9 @@ import {
   ShieldCheck,
   Sliders,
   Sparkles,
+  Trash2,
   Volume2,
+  Wrench,
 } from 'lucide-react';
 import { Tabs } from '../../components/Tabs';
 import { Badge } from '../../components/Badge';
@@ -23,6 +26,15 @@ import { Button } from '../../components/Button';
 import { Modal } from '../../components/Modal';
 import type { PlatformHealth } from '../../lib/platform';
 import type { ProviderInfo } from '../../lib/types';
+import {
+  getArtworkCacheSummary,
+  cleanOrphanedArtwork,
+  recoverMissingArtwork,
+  formatBytes,
+  type ArtworkCacheSummary,
+  type ArtworkCleanupResult,
+  type ArtworkRecoveryResult,
+} from '../../lib/artwork';
 
 interface SettingsViewProps {
   health: PlatformHealth | null;
@@ -39,6 +51,64 @@ export function SettingsView({
 }: SettingsViewProps) {
   const [activeTab, setActiveTab] = useState<SettingsSection>('appearance');
   const [selectedProvider, setSelectedProvider] = useState<ProviderInfo | null>(null);
+
+  // Artwork Cache Management state
+  const [artworkSummary, setArtworkSummary] = useState<ArtworkCacheSummary | null>(null);
+  const [artworkLoading, setArtworkLoading] = useState(false);
+  const [artworkError, setArtworkError] = useState<string | null>(null);
+  const [isCleaning, setIsCleaning] = useState(false);
+  const [isRepairing, setIsRepairing] = useState(false);
+  const [showCleanupModal, setShowCleanupModal] = useState(false);
+  const [cleanupResult, setCleanupResult] = useState<ArtworkCleanupResult | null>(null);
+  const [recoveryResult, setRecoveryResult] = useState<ArtworkRecoveryResult | null>(null);
+
+  const fetchArtworkSummary = async () => {
+    setArtworkLoading(true);
+    setArtworkError(null);
+    try {
+      const summary = await getArtworkCacheSummary();
+      setArtworkSummary(summary);
+    } catch (err) {
+      setArtworkError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setArtworkLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'library') {
+      fetchArtworkSummary();
+    }
+  }, [activeTab]);
+
+  const handleConfirmClean = async () => {
+    setIsCleaning(true);
+    setArtworkError(null);
+    try {
+      const result = await cleanOrphanedArtwork();
+      setCleanupResult(result);
+      setShowCleanupModal(false);
+      await fetchArtworkSummary();
+    } catch (err) {
+      setArtworkError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
+  const handleRepairMissing = async () => {
+    setIsRepairing(true);
+    setArtworkError(null);
+    try {
+      const result = await recoverMissingArtwork();
+      setRecoveryResult(result);
+      await fetchArtworkSummary();
+    } catch (err) {
+      setArtworkError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsRepairing(false);
+    }
+  };
 
   const providers: ProviderInfo[] = [
     {
@@ -417,20 +487,121 @@ export function SettingsView({
             <div className="card-head">
               <HardDrive size={18} className="card-icon" />
               <div>
-                <h3>Local Storage & Cache Policy</h3>
-                <p>Artwork thumbnails and audio caching rules.</p>
+                <h3>Artwork Cache & Storage Management</h3>
+                <p>Managed local artwork cache, SHA-256 deduplication, and file recovery.</p>
               </div>
             </div>
-            <div className="setting-control-row">
-              <span className="text-dim-sm">No cached remote audio. Artwork cached in app sandbox.</span>
+
+            {artworkSummary && !artworkSummary.cacheDirExists && (
+              <div className="cavia-banner banner-warn" style={{ marginTop: '12px' }}>
+                <AlertTriangle size={16} className="text-warn" />
+                <div className="banner-content">
+                  <strong>Cache Directory Inaccessible</strong>
+                  <p>The artwork cache folder at <code>{artworkSummary.cacheDirPath}</code> could not be reached.</p>
+                </div>
+              </div>
+            )}
+
+            {artworkError && (
+              <div className="cavia-banner banner-error" style={{ marginTop: '12px' }}>
+                <AlertTriangle size={16} className="text-error" />
+                <div className="banner-content">
+                  <strong>Operation Error</strong>
+                  <p>{artworkError}</p>
+                </div>
+              </div>
+            )}
+
+            {cleanupResult && (
+              <div className="cavia-banner banner-info" style={{ marginTop: '12px' }}>
+                <CheckCircle2 size={16} className="text-ready" />
+                <div className="banner-content">
+                  <strong>Orphan Cleanup Completed</strong>
+                  <p>
+                    Reclaimed {formatBytes(cleanupResult.reclaimedBytes)} by safely removing {cleanupResult.deletedFiles} orphaned files.
+                    {cleanupResult.skippedFiles > 0 ? ` ${cleanupResult.skippedFiles} files skipped due to active references.` : ''}
+                    {cleanupResult.failures.length > 0 ? ` ${cleanupResult.failures.length} deletion errors encountered.` : ''}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {recoveryResult && (
+              <div className="cavia-banner banner-info" style={{ marginTop: '12px' }}>
+                <CheckCircle2 size={16} className="text-ready" />
+                <div className="banner-content">
+                  <strong>Artwork Recovery Completed</strong>
+                  <p>
+                    Checked {recoveryResult.totalChecked} tracks: {recoveryResult.recoveredTracks} restored ({formatBytes(recoveryResult.reclaimedOrWrittenBytes)}), {recoveryResult.alreadyValidTracks} already valid, {recoveryResult.noEmbeddedArtwork} with no embedded tags, {recoveryResult.missingAudioFiles} audio files missing.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            <div className="sqlite-stats-grid" style={{ marginTop: '14px' }}>
+              <div className="sqlite-stat-box">
+                <span className="box-label">CACHE USAGE</span>
+                <strong className="box-val">
+                  {artworkLoading ? 'Scanning...' : formatBytes(artworkSummary?.totalBytes ?? 0)}
+                </strong>
+                <span className="box-subval text-dim-xs">
+                  {artworkSummary?.totalFiles ?? 0} total artwork files
+                </span>
+              </div>
+              <div className="sqlite-stat-box">
+                <span className="box-label">LIBRARY REFERENCES</span>
+                <strong className="box-val text-ready">
+                  {artworkLoading ? '...' : `${artworkSummary?.referencedFiles ?? 0} ACTIVE`}
+                </strong>
+                <span className="box-subval text-dim-xs">Referenced in database</span>
+              </div>
+              <div className="sqlite-stat-box">
+                <span className="box-label">ORPHANED ARTWORK</span>
+                <strong className={`box-val ${(artworkSummary?.orphanedFiles ?? 0) > 0 ? 'text-warn' : 'text-ready'}`}>
+                  {artworkLoading ? '...' : `${artworkSummary?.orphanedFiles ?? 0} ORPHANS`}
+                </strong>
+                <span className="box-subval text-dim-xs">
+                  {formatBytes(artworkSummary?.reclaimableBytes ?? 0)} reclaimable
+                </span>
+              </div>
+              <div className="sqlite-stat-box">
+                <span className="box-label">MISSING ON DISK</span>
+                <strong className={`box-val ${(artworkSummary?.missingReferencedFiles ?? 0) > 0 ? 'text-error' : 'text-ready'}`}>
+                  {artworkLoading ? '...' : `${artworkSummary?.missingReferencedFiles ?? 0} TRACKS`}
+                </strong>
+                <span className="box-subval text-dim-xs">
+                  {(artworkSummary?.missingReferencedFiles ?? 0) > 0 ? 'Repairable from audio' : 'All artwork verified'}
+                </span>
+              </div>
+            </div>
+
+            <div className="setting-control-row" style={{ marginTop: '16px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
               <Button
                 variant="outline"
                 size="sm"
-                icon={<RefreshCw size={13} />}
-                disabled
-                title="Cache cleanup planned for Milestone 4"
+                icon={<RefreshCw size={13} className={artworkLoading ? 'cavia-spin' : undefined} />}
+                onClick={fetchArtworkSummary}
+                disabled={artworkLoading || isCleaning || isRepairing}
               >
-                Clear Artwork Cache
+                {artworkLoading ? 'Inspecting...' : 'Refresh Cache Stats'}
+              </Button>
+              <Button
+                variant={(artworkSummary?.orphanedFiles ?? 0) > 0 ? 'primary' : 'outline'}
+                size="sm"
+                icon={<Trash2 size={13} />}
+                onClick={() => setShowCleanupModal(true)}
+                disabled={artworkLoading || isCleaning || isRepairing || (artworkSummary?.orphanedFiles ?? 0) === 0}
+              >
+                Clean Orphaned Artwork
+              </Button>
+              <Button
+                variant={(artworkSummary?.missingReferencedFiles ?? 0) > 0 ? 'primary' : 'outline'}
+                size="sm"
+                icon={<Wrench size={13} />}
+                onClick={handleRepairMissing}
+                disabled={artworkLoading || isCleaning || isRepairing || (artworkSummary?.missingReferencedFiles ?? 0) === 0}
+              >
+                {isRepairing ? 'Repairing...' : 'Repair Missing Artwork'}
               </Button>
             </div>
           </div>
@@ -616,6 +787,67 @@ export function SettingsView({
           </div>
         </Modal>
       )}
+
+      {/* Clean Orphaned Artwork Confirmation Modal */}
+      <Modal
+        isOpen={showCleanupModal}
+        onClose={() => setShowCleanupModal(false)}
+        title="Clean Orphaned Artwork"
+        eyebrow="CACHE INTEGRITY"
+        size="md"
+        footer={
+          <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', width: '100%' }}>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowCleanupModal(false)}
+              disabled={isCleaning}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<Trash2 size={14} />}
+              onClick={handleConfirmClean}
+              disabled={isCleaning}
+            >
+              {isCleaning ? 'Cleaning...' : 'Delete Orphaned Files'}
+            </Button>
+          </div>
+        }
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+          <p className="text-dim-sm" style={{ lineHeight: '1.5' }}>
+            This will permanently remove cached artwork files that are no longer referenced by any track or playlist in your library.
+          </p>
+
+          <div
+            style={{
+              padding: '12px 14px',
+              borderRadius: 'var(--radius-md)',
+              background: 'var(--bg-surface-elevated)',
+              border: '1px solid var(--border-subtle)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '6px',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span className="text-dim-xs">FILES TO REMOVE</span>
+              <strong className="text-warn">{artworkSummary?.orphanedFiles ?? 0} files</strong>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span className="text-dim-xs">RECLAIMABLE SPACE</span>
+              <strong className="text-ready">{formatBytes(artworkSummary?.reclaimableBytes ?? 0)}</strong>
+            </div>
+          </div>
+
+          <p className="text-dim-xs" style={{ color: 'var(--text-muted)' }}>
+            Referenced album and track artwork will remain completely intact.
+          </p>
+        </div>
+      </Modal>
     </section>
   );
 }

@@ -1,3 +1,4 @@
+pub mod artwork;
 pub mod library;
 pub mod lyrics;
 pub mod metadata;

@@ -7,6 +7,7 @@ mod state;
 use services::playback::PlaybackService;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use state::AppState;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs, io};
 use tauri::{Emitter, Manager, RunEvent};
@@ -38,7 +39,9 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let app_data_dir = app.path().app_data_dir()?;
+            let app_data_dir = std::env::var("CAVIA_APP_DATA_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| app.path().app_data_dir().unwrap_or_default());
             fs::create_dir_all(&app_data_dir)?;
             let database_path = app_data_dir.join("cavia-library.sqlite3");
             let artworks_dir = app_data_dir.join("artworks");
@@ -92,11 +95,18 @@ pub fn run() {
                 io::Error::other(format!("Lyrics engine initialization failed: {e}"))
             })?;
 
-            app.manage(AppState::new(pool, artworks_dir, playback, lyrics));
+            let artwork =
+                services::artwork::ArtworkService::new(pool.clone(), artworks_dir.clone());
+
+            app.manage(AppState::new(pool, artworks_dir, playback, lyrics, artwork));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::app::app_health,
+            commands::artwork::get_artwork_cache_summary,
+            commands::artwork::clean_orphaned_artwork,
+            commands::artwork::recover_missing_artwork,
+            commands::artwork::recover_track_artwork,
             commands::lyrics::get_track_lyrics,
             commands::lyrics::refresh_track_lyrics,
             commands::library::library_summary,
