@@ -711,14 +711,21 @@ Run against the real `cavia-music.exe` with an isolated app-data directory and i
 
 ## 10. Milestone 4.4 Implementation: Artwork Cache Management & Integrity
 
-> Status: Complete. Implementation, unit test suite, contract tests, and Windows desktop runtime verification are complete. Ready for review.
+> Status: Closed. Final engineering verification, targeted concurrency and fail-closed remediation, compile-time release profile hardening, test suites, and live Windows desktop runtime verification are complete.
 
-### Core Capabilities & Architecture (`services::artwork`, `commands::artwork`, `lib/artwork.ts`, `SettingsView.tsx`)
+### Core Capabilities & Architecture (`services::artwork`, `services::scanner`, `commands::artwork`, `lib/artwork.ts`, `SettingsView.tsx`)
 
 - **Dedicated Artwork Service (`services::artwork::ArtworkService`):**
-  - Operates on `<app_data_dir>/artworks` (`CAVIA_APP_DATA_DIR` environment override supported for isolated testing).
+  - Operates on `<app_data_dir>/artworks`.
+  - App data directory override via `CAVIA_APP_DATA_DIR` is strictly gated to debug assertions (`#[cfg(debug_assertions)]`) for isolated testing and eliminated from release binaries (`#[cfg(not(debug_assertions))]`) at compile time.
   - Manages cache inspection, orphan detection, atomic writes, safe orphan cleanup, and embedded tag recovery.
-  - Employs an internal asynchronous operation lock (`Arc<Mutex<()>>`) to serialize maintenance and recovery operations against imports.
+  - Exposes an owned asynchronous operation lock (`op_lock: Arc<Mutex<()>>`) shared with the library scanner.
+
+- **Scanner & Cleanup Concurrency Synchronization:**
+  - Prevents race conditions where a concurrent scan creates or reuses an artwork file that an active cleanup detects as an orphan and deletes before the scanner commits its track insertion.
+  - `scanner::scan_directory_with_progress_internal` accepts the shared `op_lock: Arc<Mutex<()>>`.
+  - The scanner acquires `op_lock.lock().await` prior to calling `write_artwork_atomic` and holds the lock continuously across the SQLite track insertion and transaction commit.
+  - `ArtworkService::clean_orphans` and `ArtworkService::recover_missing` synchronize on the identical lock across their entire discovery, reference check, and file operation cycles.
 
 - **Real Filesystem & Database Cache Inspection (`get_summary`):**
   - Computes exact file sizes from filesystem metadata (`fs::metadata`), ignoring directories, subfolders, hidden files, and temporary files.
@@ -729,12 +736,13 @@ Run against the real `cavia-music.exe` with an isolated app-data directory and i
 - **Reference-Aware Orphan Detection (`find_orphaned_artwork`):**
   - Queries active and soft-deleted tracks (`SELECT artwork_uri FROM tracks WHERE artwork_uri IS NOT NULL`) as well as playlists (`SELECT artwork_uri FROM playlists WHERE artwork_uri IS NOT NULL`).
   - Multi-track artwork deduplication is strictly respected: shared files are never detected as orphans as long as at least one track references them.
-  - Soft-deleted tracks (`is_deleted = 1`) preserve their cached artwork.
+  - Soft-deleted tracks (`is_deleted = 1`) and soft-deleted playlists (`is_deleted = 1`) strictly preserve their cached artwork.
   - Normalizes slashes and case for cross-platform robustness.
   - Fail-closed filesystem traversal: symlinks and reparse points pointing outside the cache are rejected.
 
 - **Safe Orphan Cleanup (`clean_orphans`):**
-  - TOCTOU-safe: re-checks SQLite references immediately before each file is deleted.
+  - TOCTOU-safe and fail-closed: re-checks SQLite references in both `tracks` and `playlists` immediately before each candidate file is deleted.
+  - If any database error occurs during the track or playlist reference check, deletion is refused, the error is recorded, and the file is preserved (`skipped_files += 1`).
   - Re-verifies canonical path containment inside `artworks_dir`.
   - Never deletes referenced images, directories, or unrecognized files.
   - DTO: `ArtworkCleanupResult` (`deletedFiles`, `reclaimedBytes`, `skippedFiles`, `failures`).
@@ -751,7 +759,7 @@ Run against the real `cavia-music.exe` with an isolated app-data directory and i
   - If the audio file has no embedded artwork tags, honestly clears the broken reference (`UPDATE tracks SET artwork_uri = NULL WHERE id = ?`) so it does not permanently point to a missing file.
 
 - **Scanner Integration:**
-  - Updated `services::scanner::scan_directory_with_progress` to write artwork through `write_artwork_atomic`.
+  - `services::scanner::scan_directory_with_progress` writes extracted artwork through `write_artwork_atomic` and holds `op_lock` until SQLite track insertion commits.
 
 - **Settings UI (`SettingsView.tsx`):**
   - Replaced the disabled placeholder with the full "Artwork Cache & Storage Management" card.
@@ -762,8 +770,8 @@ Run against the real `cavia-music.exe` with an isolated app-data directory and i
 
 ### Test Inventory
 
-- **Rust Suite:** 181 passed; 0 failed; 5 ignored (physical audio device only); 1 smoke test passed.
-  - 15 dedicated artwork tests in `services::artwork::tests`:
+- **Rust Suite:** 190 passed; 0 failed; 5 ignored (physical audio device only); 1 smoke test passed.
+  - 19 dedicated artwork tests in `services::artwork::tests`:
     - `test_valid_artwork_filename_rules`
     - `test_atomic_write_creates_file_and_reuses_identical`
     - `test_cache_summary_empty_cache`
@@ -773,12 +781,22 @@ Run against the real `cavia-music.exe` with an isolated app-data directory and i
     - `test_soft_deleted_track_preserves_artwork`
     - `test_missing_artwork_detection`
     - `test_clean_orphans_exact_deletion_and_preservation`
+    - `test_unreferenced_file_is_deleted_successfully`
+    - `test_playlist_reference_prevents_deletion`
+    - `test_track_reference_prevents_deletion`
+    - `test_database_error_in_track_check_prevents_deletion`
+    - `test_database_error_in_playlist_check_prevents_deletion`
     - `test_recovery_from_embedded_mp3_artwork`
     - `test_recovery_from_embedded_flac_artwork`
     - `test_batch_recovery_multiple_tracks_sharing_artwork`
     - `test_recovery_replaces_corrupt_zero_byte_cache_file`
     - `test_recovery_handles_missing_audio_honestly`
     - `test_recovery_handles_audio_with_no_embedded_artwork`
+    - `test_scanner_cleanup_concurrency_race_prevented`
+  - 3 app data dir resolution tests in `tests`:
+    - `test_resolve_app_data_dir_debug_honors_override`
+    - `test_resolve_app_data_dir_empty_override_ignored`
+    - `test_resolve_app_data_dir_release_ignores_override`
 - **Node Contract Suite (`test/artwork_cache.test.mjs`):** 35 passed; 0 failed.
   - Covers `formatBytes` bounds, filename validation, DTO camelCase structure, and mathematical invariants.
 
@@ -795,4 +813,5 @@ Run against `cavia-music.exe` using WebView2 remote debugging protocol (`--remot
 ### Known Limitations
 
 - Covers local audio file embedded artwork only (FLAC, MP3, M4A, etc.). External / remote artwork providers (Spotify PKCE, etc.) deferred to subsequent milestones.
-- Mobile runtime verification (Android/iOS) deferred to physical device testing.
+- Corrupt non-zero-byte image file recovery is not implemented (only missing and 0-byte corrupt files trigger recovery).
+- Mobile runtime verification (Android/iOS) deferred to physical device testing. Windows runtime verified.

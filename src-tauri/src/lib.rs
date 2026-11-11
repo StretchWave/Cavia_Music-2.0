@@ -57,8 +57,16 @@ pub fn resolve_app_data_dir_internal(
 }
 
 pub fn resolve_app_data_dir(platform_dir: PathBuf) -> PathBuf {
-    let env_val = std::env::var("CAVIA_APP_DATA_DIR").ok();
-    resolve_app_data_dir_internal(platform_dir, env_val.as_deref(), cfg!(debug_assertions))
+    #[cfg(debug_assertions)]
+    {
+        let env_val = std::env::var("CAVIA_APP_DATA_DIR").ok();
+        resolve_app_data_dir_internal(platform_dir, env_val.as_deref(), true)
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        resolve_app_data_dir_internal(platform_dir, None, false)
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
