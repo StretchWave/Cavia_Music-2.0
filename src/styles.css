@@ -446,7 +446,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .cavia-subpage {
-  max-width: 1120px;
+  max-width: 1180px;
   margin: 0 auto;
 }
 
@@ -493,7 +493,7 @@ h1, h2, h3, h4, h5, h6 {
    Library Hero & Personal Archive
    ========================================================================== */
 .cavia-library-page {
-  max-width: 1160px;
+  max-width: 1180px;
   margin: 0 auto;
 }
 
@@ -899,6 +899,11 @@ h1, h2, h3, h4, h5, h6 {
   box-shadow: var(--shadow-md);
 }
 
+.playlist-card:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 4px;
+}
+
 .playlist-card-art {
   height: 150px;
   border-radius: var(--radius-md);
@@ -1073,10 +1078,17 @@ h1, h2, h3, h4, h5, h6 {
   gap: 10px;
   cursor: pointer;
   transition: transform var(--transition-fast);
+  outline: none;
+  border-radius: var(--radius-md);
 }
 
 .album-card:hover {
   transform: translateY(-2px);
+}
+
+.album-card:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 4px;
 }
 
 .album-sleeve-frame {
@@ -1089,6 +1101,12 @@ h1, h2, h3, h4, h5, h6 {
   position: relative;
   overflow: hidden;
   box-shadow: var(--shadow-sm);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.album-card:hover .album-sleeve-frame {
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65);
 }
 
 .album-artwork-placeholder {
@@ -1148,6 +1166,19 @@ h1, h2, h3, h4, h5, h6 {
   text-align: center;
   gap: 12px;
   cursor: pointer;
+  outline: none;
+  border-radius: var(--radius-lg);
+  padding: 8px;
+  transition: transform var(--transition-fast);
+}
+
+.artist-card:hover {
+  transform: translateY(-2px);
+}
+
+.artist-card:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 4px;
 }
 
 .artist-avatar-frame {
@@ -1160,12 +1191,19 @@ h1, h2, h3, h4, h5, h6 {
   place-items: center;
   position: relative;
   box-shadow: var(--shadow-md);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.artist-card:hover .artist-avatar-frame {
+  border-color: var(--accent-vermilion);
+  box-shadow: 0 8px 24px rgba(214, 71, 50, 0.25);
 }
 
 .artist-monogram {
-  font-family: var(--font-display);
-  font-size: 28px;
-  font-weight: 700;
+  font-family: var(--font-editorial);
+  font-size: 32px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
   color: var(--text-secondary);
 }
 
@@ -1873,6 +1911,188 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* ==========================================================================
+   Settings: Account & Cloud Sync Controls
+   ========================================================================== */
+.sync-alert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+.sync-alert-success {
+  background: var(--status-ready-subtle);
+  border: 1px solid var(--status-ready);
+  color: var(--text-primary);
+}
+
+.sync-alert-error {
+  background: var(--status-error-subtle);
+  border: 1px solid var(--status-error);
+  color: var(--text-primary);
+}
+
+.sync-diagnostic-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  padding: 16px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+}
+
+.sync-diag-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sync-diag-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+.sync-diag-value {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.sync-auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 440px;
+}
+
+.sync-auth-actions {
+  display: flex;
+  gap: 10px;
+  padding-top: 6px;
+}
+
+.sync-boundary-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 768px) {
+  .sync-boundary-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sync-boundary-box {
+  padding: 16px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sync-boundary-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sync-boundary-title.ready {
+  color: var(--status-ready);
+}
+
+.sync-boundary-title.warn {
+  color: var(--status-warn);
+}
+
+.sync-boundary-list {
+  list-style: disc inside;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 0;
+  padding: 0;
+}
+
+.sync-danger-row {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.sync-danger-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sync-danger-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--status-error);
+}
+
+.sync-danger-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sync-info-box {
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.sync-info-title {
+  color: var(--status-ready);
+  font-weight: 600;
+  display: block;
+  margin-bottom: 4px;
+}
+
+/* Track unplayable / unavailable badges */
+.track-row-unplayable {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.track-unavailable-badge {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  padding: 2px 7px;
+  border-radius: var(--radius-xs);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-subtle);
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+/* ==========================================================================
    Persistent Player Dock
    ========================================================================== */
 .cavia-player-dock {
@@ -2317,6 +2537,10 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .expanded-heart-btn:hover:not(:disabled) {
+  color: var(--accent-vermilion);
+}
+
+.expanded-heart-btn.active {
   color: var(--accent-vermilion);
 }
 

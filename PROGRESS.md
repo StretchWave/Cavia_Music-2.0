@@ -874,3 +874,36 @@ Run against `cavia-music.exe` using WebView2 remote debugging protocol (`--remot
 - Background periodic auto-sync worker is intentionally deferred in this milestone to prevent background battery drain; synchronization runs on manual trigger ("Sync Now") or after account connection.
 - Mobile runtime verification (Android/iOS) deferred to physical device testing. Windows runtime verified.
 - Requires Supabase project configuration (`VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`) for live cloud connectivity. Detailed setup instructions provided in `docs/cloud-sync.md`.
+
+---
+
+## 8. Milestone 5.1 Implementation: Final Design Pass Across All Screens
+
+### Objective & Philosophy
+Milestone 5.1 accomplishes a comprehensive visual consistency, design-quality refinement, and hierarchy polish across the entire application without altering or diluting Cavia's established visual identity:
+- **Obsidian Dark Foundation:** Surface hierarchy structured with `#090a0d`, `#0c0e13`, `#12141a`, `#161922`, and `#1b1e28`.
+- **Aged Ivory Typography:** Primary `#f5f2eb`, secondary `#c5bfb4`, muted `#737068` / `#828792`.
+- **Restrained Vermilion Accent:** Accent primary `#d64732`, hover `#e55540`, active `#bd3926`. No secondary theme pickers or uncontrolled neon tints.
+- **Strict Prohibition on Fabricated State:** Empty collections display authentic empty states with Japanese calligraphic watermarks; no mock music content is ever injected.
+
+### Core Visual & Structural Refinements
+1. **Container & Grid Harmonization:**
+   - Standardized `.cavia-subpage` and `.cavia-library-page` content boundaries to `max-width: 1180px; margin: 0 auto;`, eliminating jarring layout jumps when navigating between Library, Tracks, Playlists, Albums, Artists, Search, and Settings.
+2. **Tactile Interactive States:**
+   - Enhanced `.album-card`, `.artist-card`, and `.playlist-card` with subtle `-2px` vertical hover lift, illuminated border transitions, and prominent `:focus-visible` keyboard focus rings.
+   - Refined `.artist-monogram` typography to utilize Cavia's editorial serif font family (`font-family: var(--font-editorial); font-size: 32px; font-weight: 600; letter-spacing: 0.04em;`) for a distinguished, record-label aesthetic.
+3. **Restored Physical Sleeve & Grooved Vinyl Stage:**
+   - In `ExpandedPlayer.tsx`, reconnected authoritative class names (`.expanded-sleeve-stage`, `.vinyl-disc`, `.sleeve-card`, `.sleeve-art-placeholder`, `.sleeve-kanji`, `.sleeve-sheen`) with existing CSS token infrastructure, restoring the 360px physical album sleeve and sliding grooved vinyl disc assembly.
+   - Updated equalizer tooltip from a placeholder note to "DSP & Equalizer unconfigured" per AGENTS.md honesty rules.
+4. **Eliminated Stray Styling in Settings & Library:**
+   - Refactored `SettingsView.tsx` Account & Cloud Sync tab: removed unstyled utility classes in favor of dedicated Cavia components (`.sync-alert`, `.sync-diagnostic-grid`, `.sync-auth-form`, `.form-field`, `.cavia-text-input`, `.sync-boundary-grid`, `.sync-danger-row`, `.sync-info-box`).
+   - Refactored `PlaylistDetailModal.tsx`: replaced unstyled utilities with `.track-row-unplayable` (reduced opacity) and `.track-unavailable-badge` for remote tracks lacking local audio files.
+
+### Verification & Testing
+- **Visual Verification Suite:**
+  - Full screenshot baseline and post-refinement suite captured at 1440×900 and 1920×1080 across empty/initial states and real populated database states.
+  - Verified visual consistency on Library (`Archive`), Tracks, Albums, Artists, Playlists, Search, Settings (General, SQLite, Account & Sync), Expanded Player (Now Playing), Queue Drawer, and Lyrics Drawer.
+- **Node Contract Suite:** 39 passed; 0 failed (`test/*.test.mjs`).
+- **Rust Test Suite:** 197 passed; 0 failed; 5 ignored (physical audio device); 1 smoke passed.
+- **Rust Formatting:** `cargo fmt -- --check` clean.
+- **Frontend Production Build:** `npm run build` completed in 1.61s with zero errors or warnings.

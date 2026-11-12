@@ -312,7 +312,7 @@ export function PlaylistDetailModal({
                     return (
                       <div
                         key={`${track.id}-${i}`}
-                        className={`track-row playlist-table-grid ${isUnplayable ? 'opacity-65 cursor-default' : ''}`}
+                        className={`track-row playlist-table-grid ${isUnplayable ? 'track-row-unplayable' : ''}`}
                         tabIndex={isUnplayable ? -1 : 0}
                         role="row"
                         onClick={() => {
@@ -345,7 +345,7 @@ export function PlaylistDetailModal({
                           <span className="track-title-text">{track.title}</span>
                           {isUnplayable && (
                             <span
-                              className="inline-block text-[10px] text-muted font-mono px-1.5 py-0.2 rounded bg-zinc-900 border border-zinc-800 ml-2"
+                              className="track-unavailable-badge"
                               title="Synced from your Cavia cloud account. Audio file is not present locally on this device."
                             >
                               Unavailable locally

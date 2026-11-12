@@ -152,51 +152,52 @@ export function ExpandedPlayer({
 
       <main className="expanded-body">
         {/* Left Column: Tactical Artwork & Vinyl Assembly */}
-        <div className="expanded-visual-column">
-          <div className="expanded-artwork-container">
-            <div className="expanded-vinyl-record" aria-hidden="true">
-              <div className={`vinyl-grooves-disc ${isPlaying ? 'spinning-slow' : ''}`}>
-                <div className="vinyl-center-label">
-                  <span className="vinyl-label-text">CAVIA 2.0</span>
-                </div>
-              </div>
+        <div className="expanded-sleeve-stage">
+          <div className={`vinyl-disc ${isPlaying ? 'spinning' : ''}`} aria-hidden="true">
+            <span className="groove-a" />
+            <span className="groove-b" />
+            <span className="groove-c" />
+            <div className="vinyl-center-label">
+              <span className="vinyl-label-text">藏</span>
+              <span className="vinyl-spindle" />
             </div>
+          </div>
 
-            <div className="expanded-artwork-card">
-              {currentTrack?.artworkUri ? (
-                <img
-                  src={formatArtworkUri(currentTrack.artworkUri)}
-                  alt={currentTrack.title}
-                  className="expanded-artwork-image"
-                />
-              ) : (
-                <div className="expanded-empty-art">
-                  <span className="expanded-empty-kanji" aria-hidden="true">
-                    音
-                  </span>
-                  <p className="expanded-empty-caption">
-                    {currentTrack ? currentTrack.title : 'Ready for Audio'}
-                  </p>
-                </div>
-              )}
-            </div>
+          <div className="sleeve-card">
+            {currentTrack?.artworkUri ? (
+              <img
+                src={formatArtworkUri(currentTrack.artworkUri)}
+                alt={currentTrack.title}
+                className="sleeve-art-img"
+              />
+            ) : (
+              <div className="sleeve-art-placeholder">
+                <span className="sleeve-kanji" aria-hidden="true">
+                  音
+                </span>
+                <span className="sleeve-label">
+                  {currentTrack ? currentTrack.title : 'CAVIA ARCHIVE'}
+                </span>
+              </div>
+            )}
+            <div className="sleeve-sheen" aria-hidden="true" />
           </div>
         </div>
 
         {/* Right Column: Editorial Metadata & Physical Transports */}
-        <div className="expanded-controls-column">
-          <div className="expanded-track-headline">
-            <div className="expanded-titles">
+        <div className="expanded-info-column">
+          <div className="expanded-metadata-header">
+            <div className="expanded-title-group">
               <div className="cavia-eyebrow">
                 <span className="eyebrow-accent-line" />
                 <span>
                   {currentTrack?.trackNumber ? `TRACK ${currentTrack.trackNumber}` : 'NOW PLAYING'}
                 </span>
               </div>
-              <h1 className="expanded-title">
+              <h1 className="expanded-track-title">
                 {currentTrack?.title ?? (playback.errorMessage ? 'Playback Halted' : 'No audio loaded')}
               </h1>
-              <p className="expanded-artist">
+              <p className="expanded-track-artist">
                 {currentTrack?.artist ? `${currentTrack.artist} — ${currentTrack.album}` : 'Select a recording to listen'}
               </p>
               {playback.errorMessage && (
@@ -209,7 +210,7 @@ export function ExpandedPlayer({
 
             <button
               type="button"
-              className={`expanded-like-btn ${currentTrack?.isLiked ? 'active' : ''}`}
+              className={`expanded-heart-btn ${currentTrack?.isLiked ? 'active' : ''}`}
               disabled={!currentTrack || !isBackendReady}
               onClick={() => {
                 if (currentTrack) onToggleLike?.(currentTrack.id);
@@ -389,7 +390,7 @@ export function ExpandedPlayer({
               type="button"
               className="expanded-chip-btn"
               disabled
-              title="DSP & Equalizer planned for Milestone 4"
+              title="DSP & Equalizer unconfigured"
               aria-disabled="true"
             >
               <SlidersHorizontal size={16} />

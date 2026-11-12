@@ -856,16 +856,16 @@ export function SettingsView({
           </div>
 
           {syncSuccessMsg && (
-            <div className="cavia-alert cavia-alert-success text-xs p-3">
-              <CheckCircle2 size={15} className="mr-1.5 inline" />
-              {syncSuccessMsg}
+            <div className="sync-alert sync-alert-success">
+              <CheckCircle2 size={15} />
+              <span>{syncSuccessMsg}</span>
             </div>
           )}
 
           {syncError && (
-            <div className="cavia-alert cavia-alert-error text-xs p-3">
-              <AlertTriangle size={15} className="mr-1.5 inline" />
-              {syncError}
+            <div className="sync-alert sync-alert-error">
+              <AlertTriangle size={15} />
+              <span>{syncError}</span>
             </div>
           )}
 
@@ -880,7 +880,7 @@ export function SettingsView({
             </div>
 
             {syncStatus?.authenticated ? (
-              <div className="space-y-4">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 <div className="setting-status-line">
                   <Badge variant="ready" size="sm">
                     AUTHENTICATED
@@ -890,28 +890,30 @@ export function SettingsView({
                   </span>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 p-3 bg-obsidian-dark rounded border border-zinc-900 text-xs">
-                  <div>
-                    <span className="text-muted block text-[11px]">ACCOUNT EMAIL</span>
-                    <strong className="text-ivory font-mono">{syncStatus.accountEmail || 'User'}</strong>
+                <div className="sync-diagnostic-grid">
+                  <div className="sync-diag-item">
+                    <span className="sync-diag-label">ACCOUNT EMAIL</span>
+                    <strong className="sync-diag-value">{syncStatus.accountEmail || 'User'}</strong>
                   </div>
-                  <div>
-                    <span className="text-muted block text-[11px]">ACCOUNT ID</span>
-                    <strong className="text-ivory font-mono text-[11px] truncate block" title={syncStatus.accountId || ''}>
+                  <div className="sync-diag-item">
+                    <span className="sync-diag-label">ACCOUNT ID</span>
+                    <strong className="sync-diag-value" title={syncStatus.accountId || ''}>
                       {syncStatus.accountId || '—'}
                     </strong>
                   </div>
-                  <div>
-                    <span className="text-muted block text-[11px]">DEVICE IDENTIFIER</span>
-                    <strong className="text-ivory font-mono text-[11px]">{syncStatus.deviceId}</strong>
+                  <div className="sync-diag-item">
+                    <span className="sync-diag-label">DEVICE IDENTIFIER</span>
+                    <strong className="sync-diag-value">{syncStatus.deviceId}</strong>
                   </div>
-                  <div>
-                    <span className="text-muted block text-[11px]">REFRESH TOKEN STORAGE</span>
-                    <strong className="text-ready">OS Credential Manager (Encrypted)</strong>
+                  <div className="sync-diag-item">
+                    <span className="sync-diag-label">REFRESH TOKEN STORAGE</span>
+                    <strong className="sync-diag-value" style={{ color: 'var(--color-ready)' }}>
+                      OS Credential Manager (Encrypted)
+                    </strong>
                   </div>
                 </div>
 
-                <div className="flex gap-2 pt-2">
+                <div style={{ display: 'flex', gap: '8px', paddingTop: '4px' }}>
                   <Button
                     variant="outline"
                     size="sm"
@@ -923,7 +925,7 @@ export function SettingsView({
                 </div>
               </div>
             ) : (
-              <div className="space-y-4">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 <div className="setting-status-line">
                   <Badge variant="neutral" size="sm">
                     SIGNED OUT
@@ -933,14 +935,12 @@ export function SettingsView({
                   </span>
                 </div>
 
-                <form onSubmit={handleLogin} className="space-y-3 max-w-md">
-                  <div>
-                    <label className="text-xs font-medium text-ivory block mb-1">
-                      Email Address
-                    </label>
+                <form onSubmit={handleLogin} className="sync-auth-form">
+                  <div className="form-field">
+                    <label>EMAIL ADDRESS</label>
                     <input
                       type="email"
-                      className="cavia-input w-full text-xs"
+                      className="cavia-text-input"
                       placeholder="you@example.com"
                       value={authEmail}
                       onChange={(e) => setAuthEmail(e.target.value)}
@@ -949,13 +949,11 @@ export function SettingsView({
                     />
                   </div>
 
-                  <div>
-                    <label className="text-xs font-medium text-ivory block mb-1">
-                      Password
-                    </label>
+                  <div className="form-field">
+                    <label>PASSWORD</label>
                     <input
                       type="password"
-                      className="cavia-input w-full text-xs"
+                      className="cavia-text-input"
                       placeholder="••••••••••••"
                       value={authPassword}
                       onChange={(e) => setAuthPassword(e.target.value)}
@@ -964,7 +962,7 @@ export function SettingsView({
                     />
                   </div>
 
-                  <div className="flex gap-2 pt-2">
+                  <div className="sync-auth-actions">
                     <Button
                       type="submit"
                       variant="primary"
@@ -998,7 +996,7 @@ export function SettingsView({
               </div>
             </div>
 
-            <div className="space-y-4">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div className="setting-row">
                 <div className="setting-info">
                   <strong className="setting-label">Enable Synchronization</strong>
@@ -1017,36 +1015,43 @@ export function SettingsView({
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 p-3 bg-obsidian-dark rounded border border-zinc-900 text-xs">
-                <div>
-                  <span className="text-muted block text-[11px]">LAST SYNCED</span>
-                  <strong className="text-ivory">
+              <div className="sync-diagnostic-grid">
+                <div className="sync-diag-item">
+                  <span className="sync-diag-label">LAST SYNCED</span>
+                  <strong className="sync-diag-value">
                     {syncStatus?.lastSyncedAt
                       ? new Date(syncStatus.lastSyncedAt).toLocaleString()
                       : 'Never'}
                   </strong>
                 </div>
-                <div>
-                  <span className="text-muted block text-[11px]">OUTBOX QUEUE</span>
-                  <strong className={syncStatus?.pendingOutboxCount ? 'text-warn' : 'text-ready'}>
+                <div className="sync-diag-item">
+                  <span className="sync-diag-label">OUTBOX QUEUE</span>
+                  <strong
+                    className="sync-diag-value"
+                    style={{ color: syncStatus?.pendingOutboxCount ? 'var(--color-warn)' : 'var(--color-ready)' }}
+                  >
                     {syncStatus?.pendingOutboxCount ?? 0} pending changes
                   </strong>
                 </div>
-                <div>
-                  <span className="text-muted block text-[11px]">SYNC STATUS</span>
-                  <strong className={syncStatus?.syncEnabled ? 'text-ready' : 'text-muted'}>
+                <div className="sync-diag-item">
+                  <span className="sync-diag-label">SYNC STATUS</span>
+                  <strong
+                    className="sync-diag-value"
+                    style={{ color: syncStatus?.syncEnabled ? 'var(--color-ready)' : 'var(--text-muted)' }}
+                  >
                     {syncStatus?.syncEnabled ? 'Active' : 'Disabled'}
                   </strong>
                 </div>
               </div>
 
               {syncStatus?.lastError && (
-                <div className="cavia-alert cavia-alert-error text-xs p-2.5">
-                  <strong>Last Sync Error:</strong> {syncStatus.lastError}
+                <div className="sync-alert sync-alert-error">
+                  <AlertTriangle size={15} />
+                  <span><strong>Last Sync Error:</strong> {syncStatus.lastError}</span>
                 </div>
               )}
 
-              <div className="pt-2 flex gap-2">
+              <div style={{ paddingTop: '4px', display: 'flex', gap: '8px' }}>
                 <Button
                   variant="primary"
                   size="sm"
@@ -1070,12 +1075,12 @@ export function SettingsView({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-              <div className="p-3 bg-obsidian-dark rounded border border-zinc-900 space-y-2">
-                <strong className="text-ready flex items-center gap-1.5">
-                  <CheckCircle2 size={13} /> Synchronized via Cloud
+            <div className="sync-boundary-grid">
+              <div className="sync-boundary-box">
+                <strong className="sync-boundary-title" style={{ color: 'var(--color-ready)' }}>
+                  <CheckCircle2 size={14} /> Synchronized via Cloud
                 </strong>
-                <ul className="text-muted text-[11px] space-y-1 list-disc list-inside">
+                <ul className="sync-boundary-list">
                   <li>Playlist titles, descriptions, and IDs</li>
                   <li>Playlist track order and positions</li>
                   <li>Track metadata snapshots (title, artist, album, duration)</li>
@@ -1085,11 +1090,11 @@ export function SettingsView({
                 </ul>
               </div>
 
-              <div className="p-3 bg-obsidian-dark rounded border border-zinc-900 space-y-2">
-                <strong className="text-warn flex items-center gap-1.5">
-                  <Lock size={13} /> Excluded & Strictly Local
+              <div className="sync-boundary-box">
+                <strong className="sync-boundary-title" style={{ color: 'var(--color-warn)' }}>
+                  <Lock size={14} /> Excluded & Strictly Local
                 </strong>
-                <ul className="text-muted text-[11px] space-y-1 list-disc list-inside">
+                <ul className="sync-boundary-list">
                   <li>Audio files and binary music streams (0 bytes uploaded)</li>
                   <li>Local file paths and Windows drive letters</li>
                   <li>Embedded artwork cache files and local image paths</li>
@@ -1101,10 +1106,10 @@ export function SettingsView({
             </div>
 
             {syncStatus?.authenticated && (
-              <div className="mt-4 pt-4 border-t border-zinc-900 flex justify-between items-center">
-                <div>
-                  <strong className="text-xs text-rose-400 block">Delete Cloud Account Data</strong>
-                  <span className="text-muted text-[11px]">
+              <div className="sync-danger-row">
+                <div className="sync-danger-info">
+                  <strong className="sync-danger-title">Delete Cloud Account Data</strong>
+                  <span className="sync-danger-desc">
                     Permanently deletes your synchronized playlists and favorites from the cloud. Local files remain untouched.
                   </span>
                 </div>
@@ -1112,7 +1117,7 @@ export function SettingsView({
                   variant="outline"
                   size="sm"
                   onClick={() => setShowDeleteCloudModal(true)}
-                  className="text-rose-400 border-rose-900/50 hover:bg-rose-950/20"
+                  style={{ color: 'var(--color-error)', borderColor: 'rgba(223, 88, 73, 0.4)' }}
                 >
                   Delete Cloud Data
                 </Button>
@@ -1130,14 +1135,13 @@ export function SettingsView({
               </div>
             </div>
 
-            <div className="space-y-3">
-              <div className="space-y-2">
-                <label className="text-xs font-medium text-ivory block">
-                  Supabase Project URL
-                </label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', maxWidth: '540px' }}>
+              <div className="form-field">
+                <label>SUPABASE PROJECT URL</label>
                 <input
                   type="text"
-                  className="cavia-input w-full font-mono text-xs"
+                  className="cavia-text-input"
+                  style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}
                   placeholder="https://your-project.supabase.co"
                   value={configUrlInput}
                   onChange={(e) => setConfigUrlInput(e.target.value)}
@@ -1145,24 +1149,23 @@ export function SettingsView({
                 />
               </div>
 
-              <div className="space-y-2">
-                <label className="text-xs font-medium text-ivory block">
-                  Supabase Anon Key (Public only)
-                </label>
+              <div className="form-field">
+                <label>SUPABASE ANON KEY (PUBLIC ONLY)</label>
                 <input
                   type="password"
-                  className="cavia-input w-full font-mono text-xs"
+                  className="cavia-text-input"
+                  style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}
                   placeholder="eyJhbGciOi..."
                   value={configKeyInput}
                   onChange={(e) => setConfigKeyInput(e.target.value)}
                   disabled={isSavingConfig}
                 />
-                <p className="text-muted-xs text-[11px]">
+                <p className="text-muted-xs" style={{ marginTop: '4px' }}>
                   Never enter a Supabase service-role key. Cavia uses Postgres Row Level Security (RLS) with the public anon key.
                 </p>
               </div>
 
-              <div className="pt-1">
+              <div style={{ paddingTop: '4px' }}>
                 <Button
                   variant="outline"
                   size="sm"
@@ -1385,8 +1388,8 @@ export function SettingsView({
           <p className="text-dim-sm" style={{ lineHeight: '1.5' }}>
             This will permanently delete all synchronized playlists, tracks, and favorites from your cloud account.
           </p>
-          <div className="p-3 bg-obsidian-dark rounded border border-zinc-900 text-xs text-muted">
-            <strong className="text-ready block mb-1">Local Library Sovereignty:</strong>
+          <div className="sync-info-box">
+            <strong className="sync-info-title">Local Library Sovereignty:</strong>
             All local audio files, local playlists, and local database entries on this device will remain completely intact.
           </div>
         </div>

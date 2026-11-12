@@ -50,7 +50,7 @@
 - [x] Optional account & cloud sync (Milestone 4.6: local-first cloud-assisted synchronization via Supabase Auth & PostgreSQL; RLS policies enforcing auth.uid(); zero audio upload and zero fake track availability; durable SQLite outbox mutation journal with transactional writes; tombstones for collision-proof deletions; SHA-256 track identity matching; OS Credential Manager integration for refresh tokens; 197 Rust + 1 smoke + 39 Node.js tests passing; live cloud synchronization verified against test backend with documented external setup requirements; mobile runtime unverified)
 
 ## Milestone 5 — Design and release quality
-- [ ] Final design pass across all screens
+- [x] Final design pass across all screens (Milestone 5.1: comprehensive visual consistency and design-quality pass across all views; standardized container max-width to 1180px; tactile interactive hover lifts, illuminated borders, and focus-visible states on album, artist, and playlist cards; restored 360px physical vinyl sleeve stage and spinning grooved disc in ExpandedPlayer; eliminated stray styling in Settings Account & Sync and PlaylistDetailModal in favor of authoritative obsidian / aged ivory / restrained vermilion design system tokens; 197 Rust tests, 1 smoke test, 39 Node contract tests passing; verified across 1440x900 and 1920x1080 desktop viewports)
 - [ ] UI screenshot review at mobile/tablet/desktop sizes
 - [ ] Keyboard, mouse, touch, accessibility and reduced-motion audits
 - [ ] Performance/memory/startup benchmarks
