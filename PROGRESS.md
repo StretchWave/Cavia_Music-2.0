@@ -815,3 +815,62 @@ Run against `cavia-music.exe` using WebView2 remote debugging protocol (`--remot
 - Covers local audio file embedded artwork only (FLAC, MP3, M4A, etc.). External / remote artwork providers (Spotify PKCE, etc.) deferred to subsequent milestones.
 - Corrupt non-zero-byte image file recovery is not implemented (only missing and 0-byte corrupt files trigger recovery).
 - Mobile runtime verification (Android/iOS) deferred to physical device testing. Windows runtime verified.
+
+---
+
+## 7. Milestone 4.6 Implementation: Optional Account & Cloud Sync
+
+### Core Capabilities & Architecture
+- **Local-First, Cloud-Assisted Paradigm:**
+  - Local SQLite database remains authoritative for all audio playback, library search, and local collections.
+  - The application functions 100% offline and never requires an account for core functionality.
+- **Strict Data Exclusion & Privacy Boundary:**
+  - Zero audio upload: No music files, byte streams, or encoded audio are ever transmitted to the cloud.
+  - Zero filesystem path leakage: Absolute host paths, Windows drive paths, content URIs, and security-scoped URLs are excluded from synchronization payloads.
+  - Local artwork cache files, active playback queues, volume levels, playback positions, and search indexes remain strictly local to each device.
+- **Honest Track Availability (Zero Fake Audio Records):**
+  - Synchronized playlist entries without matching local audio files are stored in `playlist_tracks` with `track_id = NULL` and metadata snapshots (title, artist, album, duration_ms, content_hash).
+  - Front-end honestly renders them as "Unavailable locally" with play actions disabled; Play All and Shuffle automatically filter to playable local audio tracks.
+  - When local files are later scanned or indexed matching the SHA-256 `content_hash`, Cavia atomically links `track_id`, restoring immediate local playback.
+- **Durable Local Change Journal (`sync_outbox`):**
+  - Offline and online mutations (playlist create, update, delete, track add, remove, reorder, and like/unlike) are transactionally recorded alongside local SQLite changes.
+  - Outbox items carry unique UUIDv4 operation IDs for server-side deduplication and idempotent retries.
+- **Tombstones & Deterministic Conflict Resolution:**
+  - Deletions create persistent tombstones in `sync_tombstones`.
+  - When stale or delayed remote updates arrive for an entity with a tombstone, the update is discarded to prevent resurrection.
+  - Reordering uses position indices with two-phase collision avoidance; server monotonic event sequence assigns canonical order during multi-device synchronization.
+- **Backend Architecture (Supabase PostgreSQL + RLS):**
+  - Supabase Auth handles email/password sessions.
+  - Stored credentials (refresh tokens) reside in OS secure storage (`keyring` crate utilizing Windows Credential Manager / macOS Keychain); access tokens are held in-memory with automatic refresh.
+  - Postgres Row Level Security (RLS) policies strictly enforce `auth.uid() = user_id` on all sync tables (`cloud_playlists`, `cloud_playlist_tracks`, `cloud_liked_tracks`, `cloud_devices`, `cloud_sync_events`).
+  - Zero Supabase service-role keys: Cavia uses only the public anon key with JWT bearer tokens.
+- **Settings UI Integration:**
+  - Dedicated "Account & Sync" tab in `SettingsView`.
+  - Signed-out state: Clean login and account registration form.
+  - Signed-in state: User email, user ID, device ID, secure token storage status, sync toggle, and "Sync Now" action.
+  - Real-time status cards: Last synced timestamp, pending outbox mutation count, and data boundary explanations.
+  - Destructive action modal: "Delete Cloud Data" allows users to wipe their cloud account data with explicit confirmation without deleting local audio files or SQLite records.
+
+### Automated Test Coverage
+- **Rust Unit & Multi-Device Simulation (`services/sync/tests.rs`):**
+  - `test_outbox_playlist_lifecycle_mutations`: Verifies create, update, delete outbox operations and tombstone generation.
+  - `test_outbox_playlist_tracks_and_reorder`: Verifies track additions, reorder tracking, track removal, and entry tombstones.
+  - `test_outbox_like_and_unlike_tracking`: Verifies like/unlike outbox journaling and tombstone handling.
+  - `test_unavailable_remote_track_display_and_match_on_scan`: Verifies honest remote_sync representation and automatic linking upon local file scan match.
+  - `test_two_device_sync_simulation_and_tombstone_protection`: Exercises two independent SQLite databases simulating Device A and Device B with push/pull relay, renames, deletions, and tombstone protection against resurrection.
+  - `test_delete_cloud_data_clears_sync_without_deleting_local_music`: Proves that clearing cloud data empties outbox without touching local tracks or playlists.
+- **Postgres RLS Test Suite (`test/verify_supabase_rls.sql`):**
+  - Tests multi-user isolation (User A vs User B) and anonymous role lockdown under Row Level Security.
+- **Node Contract Suite (`test/cloud_sync.test.mjs`):**
+  - 4 test cases covering DTO structures, unplayable track detection, payload data sanitization, and tombstone conflict handling.
+
+### Test Results
+- **Rust Test Suite:** 197 passed; 0 failed; 5 ignored (physical audio device); 1 smoke passed.
+- **Node Test Suite:** 39 passed; 0 failed.
+- **Rust Formatting:** `cargo fmt -- --check` clean.
+- **Frontend Production Build:** `npm run build` built in 871 ms with code 0.
+
+### Known Limitations
+- Background periodic auto-sync worker is intentionally deferred in this milestone to prevent background battery drain; synchronization runs on manual trigger ("Sync Now") or after account connection.
+- Mobile runtime verification (Android/iOS) deferred to physical device testing. Windows runtime verified.
+- Requires Supabase project configuration (`VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`) for live cloud connectivity. Detailed setup instructions provided in `docs/cloud-sync.md`.

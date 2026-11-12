@@ -1,4 +1,5 @@
 pub mod artwork;
+pub mod credentials;
 pub mod library;
 pub mod lyrics;
 pub mod metadata;
@@ -6,3 +7,4 @@ pub mod playback;
 pub mod queue;
 pub mod scanner;
 pub mod search;
+pub mod sync;

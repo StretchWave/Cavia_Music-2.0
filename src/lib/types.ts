@@ -18,7 +18,7 @@ export interface Track {
   albumArtist?: string;
   durationMs: number;
   artworkUri?: string;
-  sourceKind: 'local' | 'provider';
+  sourceKind: 'local' | 'provider' | 'remote_sync';
   providerId?: string;
   fileUri?: string;
   releaseYear?: number;
@@ -99,5 +99,30 @@ export interface ProviderInfo {
     lyrics: boolean;
   };
   notes: string;
+}
+
+export interface SyncAccountStatus {
+  authenticated: boolean;
+  accountId?: string;
+  accountEmail?: string;
+  deviceId: string;
+  syncEnabled: boolean;
+  lastSyncedAt?: string;
+  pendingOutboxCount: number;
+  lastError?: string;
+  backendConfigured: boolean;
+}
+
+export interface SyncResult {
+  pushedCount: number;
+  pulledCount: number;
+  success: boolean;
+  errorMessage?: string;
+}
+
+export interface SyncConfigDTO {
+  supabaseUrl: string;
+  supabaseAnonKey: string;
+  isConfigured: boolean;
 }
 

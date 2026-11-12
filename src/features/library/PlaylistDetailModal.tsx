@@ -238,33 +238,53 @@ export function PlaylistDetailModal({
               </p>
 
               <div className="playlist-action-bar">
-                <Button
-                  variant="primary"
-                  size="md"
-                  icon={<Play size={16} />}
-                  disabled={!isBackendReady || tracks.length === 0}
-                  onClick={() => {
-                    onPlayTracks?.(tracks, 0, false);
-                    onClose();
-                  }}
-                  title="Play playlist from beginning"
-                >
-                  Play All
-                </Button>
+                {(() => {
+                  const playableTracks = tracks.filter((t) => t.fileUri && t.sourceKind !== 'remote_sync');
+                  const hasPlayable = isBackendReady && playableTracks.length > 0;
+                  return (
+                    <>
+                      <Button
+                        variant="primary"
+                        size="md"
+                        icon={<Play size={16} />}
+                        disabled={!hasPlayable}
+                        onClick={() => {
+                          if (hasPlayable) {
+                            onPlayTracks?.(playableTracks, 0, false);
+                            onClose();
+                          }
+                        }}
+                        title={
+                          hasPlayable
+                            ? 'Play playlist from beginning'
+                            : 'No playable local audio files available in this playlist'
+                        }
+                      >
+                        Play All
+                      </Button>
 
-                <Button
-                  variant="outline"
-                  size="md"
-                  icon={<Shuffle size={16} />}
-                  disabled={!isBackendReady || tracks.length === 0}
-                  onClick={() => {
-                    onPlayTracks?.(tracks, 0, true);
-                    onClose();
-                  }}
-                  title="Shuffle play playlist"
-                >
-                  Shuffle
-                </Button>
+                      <Button
+                        variant="outline"
+                        size="md"
+                        icon={<Shuffle size={16} />}
+                        disabled={!hasPlayable}
+                        onClick={() => {
+                          if (hasPlayable) {
+                            onPlayTracks?.(playableTracks, 0, true);
+                            onClose();
+                          }
+                        }}
+                        title={
+                          hasPlayable
+                            ? 'Shuffle play playlist'
+                            : 'No playable local audio files available in this playlist'
+                        }
+                      >
+                        Shuffle
+                      </Button>
+                    </>
+                  );
+                })()}
 
                 <Badge variant="neutral" size="sm">
                   {tracks.length} {tracks.length === 1 ? 'TRACK' : 'TRACKS'}
@@ -287,74 +307,91 @@ export function PlaylistDetailModal({
                   <span className="col-playlist-actions">REORDER / REMOVE</span>
                 </div>
                 <div className="tracks-table-body">
-                  {tracks.map((track, i) => (
-                    <div
-                      key={`${track.id}-${i}`}
-                      className="track-row playlist-table-grid"
-                      tabIndex={0}
-                      role="row"
-                      onClick={() => {
-                        onPlayTracks?.(tracks, i, false);
-                        onClose();
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          onPlayTracks?.(tracks, i, false);
+                  {tracks.map((track, i) => {
+                    const isUnplayable = !track.fileUri || track.sourceKind === 'remote_sync';
+                    return (
+                      <div
+                        key={`${track.id}-${i}`}
+                        className={`track-row playlist-table-grid ${isUnplayable ? 'opacity-65 cursor-default' : ''}`}
+                        tabIndex={isUnplayable ? -1 : 0}
+                        role="row"
+                        onClick={() => {
+                          if (isUnplayable) return;
+                          const playable = tracks.filter((t) => t.fileUri && t.sourceKind !== 'remote_sync');
+                          const playIndex = playable.findIndex((t) => t.id === track.id);
+                          onPlayTracks?.(playable, playIndex >= 0 ? playIndex : 0, false);
                           onClose();
-                        }
-                      }}
-                    >
-                      <span className="col-num">{i + 1}</span>
-                      <span className="col-title">
-                        {track.artworkUri && (
-                          <img
-                            src={formatArtworkUri(track.artworkUri)}
-                            alt=""
-                            className="track-row-art"
-                          />
-                        )}
-                        <span className="track-title-text">{track.title}</span>
-                      </span>
-                      <span className="col-artist">{track.artist}</span>
-                      <span className="col-album">{track.album}</span>
-                      <span className="col-duration">{formatDuration(track.durationMs)}</span>
-                      <span
-                        className="col-playlist-actions"
-                        onClick={(e) => e.stopPropagation()}
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            if (isUnplayable) return;
+                            const playable = tracks.filter((t) => t.fileUri && t.sourceKind !== 'remote_sync');
+                            const playIndex = playable.findIndex((t) => t.id === track.id);
+                            onPlayTracks?.(playable, playIndex >= 0 ? playIndex : 0, false);
+                            onClose();
+                          }
+                        }}
                       >
-                        <button
-                          type="button"
-                          className="playlist-track-action-btn"
-                          disabled={i === 0}
-                          onClick={(e) => handleMoveTrack(i, i - 1, e)}
-                          aria-label={`Move ${track.title} up`}
-                          title={i === 0 ? 'First track' : 'Move up'}
+                        <span className="col-num">{i + 1}</span>
+                        <span className="col-title">
+                          {track.artworkUri && (
+                            <img
+                              src={formatArtworkUri(track.artworkUri)}
+                              alt=""
+                              className="track-row-art"
+                            />
+                          )}
+                          <span className="track-title-text">{track.title}</span>
+                          {isUnplayable && (
+                            <span
+                              className="inline-block text-[10px] text-muted font-mono px-1.5 py-0.2 rounded bg-zinc-900 border border-zinc-800 ml-2"
+                              title="Synced from your Cavia cloud account. Audio file is not present locally on this device."
+                            >
+                              Unavailable locally
+                            </span>
+                          )}
+                        </span>
+                        <span className="col-artist">{track.artist}</span>
+                        <span className="col-album">{track.album}</span>
+                        <span className="col-duration">{formatDuration(track.durationMs)}</span>
+                        <span
+                          className="col-playlist-actions"
+                          onClick={(e) => e.stopPropagation()}
                         >
-                          <ChevronUp size={14} />
-                        </button>
-                        <button
-                          type="button"
-                          className="playlist-track-action-btn"
-                          disabled={i === tracks.length - 1}
-                          onClick={(e) => handleMoveTrack(i, i + 1, e)}
-                          aria-label={`Move ${track.title} down`}
-                          title={i === tracks.length - 1 ? 'Last track' : 'Move down'}
-                        >
-                          <ChevronDown size={14} />
-                        </button>
-                        <button
-                          type="button"
-                          className="playlist-track-action-btn btn-danger-hover"
-                          onClick={(e) => handleRemoveTrack(i, e)}
-                          aria-label={`Remove ${track.title} from playlist`}
-                          title="Remove from playlist"
-                        >
-                          <Trash2 size={13} />
-                        </button>
-                      </span>
-                    </div>
-                  ))}
+                          <button
+                            type="button"
+                            className="playlist-track-action-btn"
+                            disabled={i === 0}
+                            onClick={(e) => handleMoveTrack(i, i - 1, e)}
+                            aria-label={`Move ${track.title} up`}
+                            title={i === 0 ? 'First track' : 'Move up'}
+                          >
+                            <ChevronUp size={14} />
+                          </button>
+                          <button
+                            type="button"
+                            className="playlist-track-action-btn"
+                            disabled={i === tracks.length - 1}
+                            onClick={(e) => handleMoveTrack(i, i + 1, e)}
+                            aria-label={`Move ${track.title} down`}
+                            title={i === tracks.length - 1 ? 'Last track' : 'Move down'}
+                          >
+                            <ChevronDown size={14} />
+                          </button>
+                          <button
+                            type="button"
+                            className="playlist-track-action-btn btn-danger-hover"
+                            onClick={(e) => handleRemoveTrack(i, e)}
+                            aria-label={`Remove ${track.title} from playlist`}
+                            title="Remove from playlist"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             ) : (

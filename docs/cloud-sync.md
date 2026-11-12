@@ -1,0 +1,62 @@
+# Cavia Music 2.0 — Milestone 4.6: Optional Account & Cloud Sync Architecture
+
+## 1. Overview & Principles
+
+Cavia Music 2.0 is designed as a **local-first, cloud-assisted** music system.
+- **Local SQLite is authoritative** for playback, indexing, artwork, and local libraries.
+- The app operates **100% offline** and without an account.
+- **Zero Audio Upload**: Audio files, file bytes, and local filesystem paths are **never** uploaded to the cloud.
+- **Zero Fake Availability**: Cloud-synced playlist tracks that do not exist locally on the current device are rendered honestly as unplayable/remote-only ("Metadata only"), with playback controls disabled.
+- **Durable Local Change Journal (Outbox)**: Mutations made offline or online are queued in `sync_outbox` transactionally with local SQLite modifications.
+- **Idempotency & Tombstones**: Each mutation carries a unique operation UUID. Deletions produce tombstones in `sync_tombstones` to prevent stale resurrection.
+- **Supabase Backend with Row Level Security (RLS)**: Client authentication uses standard JWT bearer tokens. Postgres RLS guarantees user data isolation via `auth.uid() = user_id`.
+- **Zero Service-Role Key**: Cavia **never** ships or requires Supabase service-role keys or database passwords.
+
+---
+
+## 2. Supabase Setup Instructions
+
+To enable optional cloud synchronization for a Cavia deployment:
+
+1. **Create a Supabase Project**:
+   - Go to [supabase.com](https://supabase.com) and create a free project.
+2. **Apply Migrations**:
+   - In the Supabase Dashboard, open the **SQL Editor**.
+   - Copy and execute the contents of `supabase/migrations/20261112000000_cloud_sync_schema.sql`.
+   - Optionally run `test/verify_supabase_rls.sql` to verify RLS isolation.
+3. **Configure Environment Variables**:
+   - In `.env` (or via the Settings UI in Cavia):
+     ```env
+     VITE_SUPABASE_URL=https://your-project.supabase.co
+     VITE_SUPABASE_ANON_KEY=eyJhbGciOi...
+     ```
+   - Only the public `anon` key is permitted.
+
+---
+
+## 3. Data Sync Model
+
+### Synchronized Data
+- **Playlists**: ID, name, description, artwork URI, timestamps, deleted state.
+- **Playlist Tracks**: Stable entry ID, playlist ID, track identity snapshot (title, artist, album, duration_ms, content_hash), position, added timestamp.
+- **Liked Tracks**: Track identity snapshot, liked/unliked status, modification timestamp.
+- **Device Registrations**: Device ID, device name, platform, last seen.
+- **Sync Journal Events**: Operation ID, sequence, payload, created timestamp.
+
+### Explicitly Excluded Data
+- Local audio files and byte streams.
+- Absolute file paths, Windows drive paths, content URIs, iOS file URLs.
+- Artwork cache files and local filesystem paths.
+- Local SQLite database files.
+- Active playback queue, playback position, volume, and audio device settings.
+- Scanned directory roots and import history.
+- Plaintext credentials and secrets.
+
+---
+
+## 4. Conflict Resolution & Tombstones
+
+- **Deletions**: Soft-deleted locally with `is_deleted = 1` and recorded in `sync_tombstones`. When remote events arrive for an entity with a tombstone, older edits are discarded to prevent resurrection.
+- **Reordering**: Ordered by position index with two-phase collision avoidance. In concurrent sync, server monotonic event sequence assigns canonical order.
+- **Track Linking**: When an unavailable remote track's exact audio file (SHA-256 `content_hash`) is later scanned locally, Cavia links the local track ID, immediately enabling local playback.
+

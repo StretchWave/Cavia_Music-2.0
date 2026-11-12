@@ -8,6 +8,7 @@ use services::playback::PlaybackService;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use state::AppState;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fs, io};
 use tauri::{Emitter, Manager, RunEvent};
@@ -132,7 +133,23 @@ pub fn run() {
             let artwork =
                 services::artwork::ArtworkService::new(pool.clone(), artworks_dir.clone());
 
-            app.manage(AppState::new(pool, artworks_dir, playback, lyrics, artwork));
+            let credentials: Arc<dyn services::credentials::CredentialStore> =
+                Arc::new(services::credentials::KeyringStore::new());
+
+            let sync = Arc::new(services::sync::SyncEngine::new(
+                pool.clone(),
+                credentials.clone(),
+            ));
+
+            app.manage(AppState::new(
+                pool,
+                artworks_dir,
+                playback,
+                lyrics,
+                artwork,
+                credentials,
+                sync,
+            ));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -160,6 +177,15 @@ pub fn run() {
             commands::library::search_library,
             commands::library::scan_music_directory,
             commands::library::cancel_scan,
+            commands::sync::sync_get_status,
+            commands::sync::sync_signup,
+            commands::sync::sync_login,
+            commands::sync::sync_logout,
+            commands::sync::sync_toggle,
+            commands::sync::sync_now,
+            commands::sync::sync_delete_cloud_data,
+            commands::sync::sync_get_config,
+            commands::sync::sync_set_config,
             commands::playback::get_playback_state,
             commands::playback::play_track,
             commands::playback::play,

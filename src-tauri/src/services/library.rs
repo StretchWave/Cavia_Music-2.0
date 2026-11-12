@@ -193,28 +193,77 @@ pub async fn get_liked_tracks(pool: &SqlitePool) -> Result<Vec<Track>, String> {
 }
 
 pub async fn toggle_track_liked(pool: &SqlitePool, track_id: &str) -> Result<bool, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Database error beginning transaction: {e}"))?;
+
     let exists = sqlx::query("SELECT 1 FROM liked_tracks WHERE track_id = ?")
         .bind(track_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| format!("Database error checking liked state: {e}"))?
         .is_some();
 
-    if exists {
+    // Fetch track metadata snapshot for sync outbox
+    let trk_row = sqlx::query(
+        "SELECT title, artist, album, duration_ms, content_hash FROM tracks WHERE id = ?",
+    )
+    .bind(track_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .unwrap_or(None);
+
+    let (title, artist, album, duration_ms, content_hash) = match trk_row {
+        Some(r) => (
+            r.get::<String, _>("title"),
+            r.get::<String, _>("artist"),
+            r.get::<String, _>("album"),
+            r.get::<i64, _>("duration_ms"),
+            r.get::<Option<String>, _>("content_hash"),
+        ),
+        None => (
+            "Unknown Title".to_string(),
+            "".to_string(),
+            "".to_string(),
+            0,
+            None,
+        ),
+    };
+
+    let new_liked = if exists {
         sqlx::query("DELETE FROM liked_tracks WHERE track_id = ?")
             .bind(track_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| format!("Failed to unlike track: {e}"))?;
-        Ok(false)
+        false
     } else {
         sqlx::query("INSERT INTO liked_tracks (track_id) VALUES (?)")
             .bind(track_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| format!("Failed to like track: {e}"))?;
-        Ok(true)
-    }
+        true
+    };
+
+    let _ = crate::services::sync::outbox::OutboxService::record_track_like_status(
+        &mut *tx,
+        track_id,
+        content_hash.as_deref(),
+        &title,
+        &artist,
+        &album,
+        duration_ms,
+        new_liked,
+    )
+    .await;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit liked state transaction: {e}"))?;
+
+    Ok(new_liked)
 }
 
 pub async fn get_playlists(pool: &SqlitePool) -> Result<Vec<Playlist>, String> {
@@ -227,7 +276,7 @@ pub async fn get_playlists(pool: &SqlitePool) -> Result<Vec<Playlist>, String> {
             p.artwork_uri,
             p.source_provider,
             p.created_at,
-            (SELECT COUNT(*) FROM playlist_tracks pt JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND t.is_deleted = 0) AS track_count
+            (SELECT COUNT(*) FROM playlist_tracks pt LEFT JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND (t.id IS NULL OR t.is_deleted = 0)) AS track_count
         FROM playlists p
         WHERE p.is_deleted = 0
         ORDER BY p.created_at DESC
@@ -261,27 +310,27 @@ pub async fn get_playlist_tracks(
     let rows = sqlx::query(
         r#"
         SELECT
-            t.id,
-            t.title,
-            t.artist,
-            t.album,
+            COALESCE(t.id, pt.id) AS id,
+            COALESCE(t.title, pt.title, 'Unknown Title') AS title,
+            COALESCE(t.artist, pt.artist, 'Unknown Artist') AS artist,
+            COALESCE(t.album, pt.album, '') AS album,
             t.album_artist,
-            t.duration_ms,
+            COALESCE(t.duration_ms, pt.duration_ms, 0) AS duration_ms,
             t.artwork_uri,
-            t.source_kind,
+            CASE WHEN t.id IS NOT NULL THEN t.source_kind ELSE 'remote_sync' END AS source_kind,
             t.provider_id,
             t.file_uri,
             t.release_year,
             t.track_number,
             t.disc_number,
             t.genre,
-            t.play_count,
-            t.date_added,
+            COALESCE(t.play_count, 0) AS play_count,
+            COALESCE(t.date_added, pt.added_at) AS date_added,
             CASE WHEN l.track_id IS NOT NULL THEN 1 ELSE 0 END AS is_liked
         FROM playlist_tracks pt
-        JOIN tracks t ON pt.track_id = t.id
+        LEFT JOIN tracks t ON pt.track_id = t.id AND t.is_deleted = 0
         LEFT JOIN liked_tracks l ON t.id = l.track_id
-        WHERE pt.playlist_id = ? AND t.is_deleted = 0
+        WHERE pt.playlist_id = ?
         ORDER BY pt.position ASC
         "#,
     )
@@ -322,19 +371,36 @@ pub async fn create_playlist(
     description: &str,
 ) -> Result<Playlist, String> {
     let id = format!("pl-{}", Uuid::new_v4());
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
     sqlx::query("INSERT INTO playlists (id, name, description) VALUES (?, ?, ?)")
         .bind(&id)
         .bind(name)
         .bind(description)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("Failed to create playlist: {e}"))?;
 
     let row = sqlx::query("SELECT created_at FROM playlists WHERE id = ?")
         .bind(&id)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| format!("Failed to retrieve created playlist: {e}"))?;
+
+    let _ = crate::services::sync::outbox::OutboxService::record_playlist_create(
+        &mut *tx,
+        &id,
+        name,
+        description,
+    )
+    .await;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit create playlist: {e}"))?;
 
     Ok(Playlist {
         id,
@@ -349,11 +415,24 @@ pub async fn create_playlist(
 }
 
 pub async fn delete_playlist(pool: &SqlitePool, playlist_id: &str) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
     sqlx::query("UPDATE playlists SET is_deleted = 1 WHERE id = ?")
         .bind(playlist_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("Failed to delete playlist: {e}"))?;
+
+    let _ =
+        crate::services::sync::outbox::OutboxService::record_playlist_delete(&mut *tx, playlist_id)
+            .await;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit delete playlist: {e}"))?;
 
     Ok(())
 }
@@ -374,16 +453,24 @@ pub async fn add_track_to_playlist(
         return Err(format!("Playlist '{playlist_id}' not found or deleted"));
     }
 
-    let track_exists: Option<i64> =
-        sqlx::query_scalar("SELECT 1 FROM tracks WHERE id = ? AND is_deleted = 0")
-            .bind(track_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| format!("Failed to verify track: {e}"))?;
+    let track_row = sqlx::query(
+        "SELECT title, artist, album, duration_ms, content_hash FROM tracks WHERE id = ? AND is_deleted = 0",
+    )
+    .bind(track_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to verify track: {e}"))?;
 
-    if track_exists.is_none() {
-        return Err(format!("Track '{track_id}' not found or deleted"));
-    }
+    let track_row = match track_row {
+        Some(r) => r,
+        None => return Err(format!("Track '{track_id}' not found or deleted")),
+    };
+
+    let title: String = track_row.get("title");
+    let artist: String = track_row.get("artist");
+    let album: String = track_row.get("album");
+    let duration_ms: i64 = track_row.get("duration_ms");
+    let content_hash: Option<String> = track_row.get("content_hash");
 
     let mut tx = pool
         .begin()
@@ -400,15 +487,39 @@ pub async fn add_track_to_playlist(
 
     let entry_id = format!("plt-{}", Uuid::new_v4());
     sqlx::query(
-        "INSERT INTO playlist_tracks (id, playlist_id, track_id, position) VALUES (?, ?, ?, ?)",
+        r#"
+        INSERT INTO playlist_tracks (
+            id, playlist_id, track_id, cloud_track_id, title, artist, album, duration_ms, content_hash, position
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
     )
     .bind(&entry_id)
     .bind(playlist_id)
     .bind(track_id)
+    .bind(track_id)
+    .bind(&title)
+    .bind(&artist)
+    .bind(&album)
+    .bind(duration_ms)
+    .bind(&content_hash)
     .bind(next_pos)
     .execute(&mut *tx)
     .await
     .map_err(|e| format!("Failed to insert track into playlist: {e}"))?;
+
+    let _ = crate::services::sync::outbox::OutboxService::record_track_add(
+        &mut *tx,
+        playlist_id,
+        &entry_id,
+        track_id,
+        &title,
+        &artist,
+        &album,
+        duration_ms,
+        content_hash.as_deref(),
+        next_pos,
+    )
+    .await;
 
     sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(playlist_id)
@@ -470,6 +581,14 @@ pub async fn remove_track_from_playlist(
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("Failed to delete playlist track: {e}"))?;
+
+    let _ = crate::services::sync::outbox::OutboxService::record_track_remove(
+        &mut *tx,
+        playlist_id,
+        &entry_id,
+        position,
+    )
+    .await;
 
     // Phase 1: Shift subsequent rows into large temporary space to avoid UNIQUE(playlist_id, position) collisions
     sqlx::query(
@@ -606,6 +725,14 @@ pub async fn reorder_playlist_tracks(
     .await
     .map_err(|e| format!("Failed to place moving track at target position: {e}"))?;
 
+    let _ = crate::services::sync::outbox::OutboxService::record_tracks_reorder(
+        &mut *tx,
+        playlist_id,
+        from_pos,
+        to_pos,
+    )
+    .await;
+
     // Step 4: Update playlists.updated_at
     sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(playlist_id)
@@ -631,19 +758,36 @@ pub async fn update_playlist(
         return Err("Playlist name cannot be empty".to_string());
     }
 
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
     let result = sqlx::query(
         "UPDATE playlists SET name = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND is_deleted = 0",
     )
     .bind(trimmed_name)
     .bind(description.trim())
     .bind(playlist_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| format!("Failed to update playlist: {e}"))?;
 
     if result.rows_affected() == 0 {
         return Err(format!("Playlist '{playlist_id}' not found or deleted"));
     }
+
+    let _ = crate::services::sync::outbox::OutboxService::record_playlist_update(
+        &mut *tx,
+        playlist_id,
+        trimmed_name,
+        description.trim(),
+    )
+    .await;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit update playlist: {e}"))?;
 
     let row = sqlx::query(
         r#"
@@ -654,7 +798,7 @@ pub async fn update_playlist(
             p.artwork_uri,
             p.source_provider,
             p.created_at,
-            (SELECT COUNT(*) FROM playlist_tracks pt JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND t.is_deleted = 0) AS track_count
+            (SELECT COUNT(*) FROM playlist_tracks pt LEFT JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND (t.id IS NULL OR t.is_deleted = 0)) AS track_count
         FROM playlists p
         WHERE p.id = ? AND p.is_deleted = 0
         "#,

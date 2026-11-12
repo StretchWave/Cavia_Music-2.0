@@ -1,6 +1,8 @@
 use crate::services::artwork::ArtworkService;
+use crate::services::credentials::CredentialStore;
 use crate::services::lyrics::LyricsService;
 use crate::services::playback::PlaybackService;
+use crate::services::sync::SyncEngine;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,6 +17,9 @@ pub struct AppState {
     pub playback: PlaybackService,
     pub lyrics: LyricsService,
     pub artwork: ArtworkService,
+    #[allow(dead_code)]
+    pub credentials: Arc<dyn CredentialStore>,
+    pub sync: Arc<SyncEngine>,
 }
 
 impl AppState {
@@ -24,6 +29,8 @@ impl AppState {
         playback: PlaybackService,
         lyrics: LyricsService,
         artwork: ArtworkService,
+        credentials: Arc<dyn CredentialStore>,
+        sync: Arc<SyncEngine>,
     ) -> Self {
         Self {
             database,
@@ -32,6 +39,8 @@ impl AppState {
             playback,
             lyrics,
             artwork,
+            credentials,
+            sync,
         }
     }
 }

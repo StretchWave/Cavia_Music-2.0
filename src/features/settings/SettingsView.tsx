@@ -3,11 +3,13 @@ import {
   AlertTriangle,
   AudioWaveform,
   CheckCircle2,
+  Cloud,
   Database,
   HardDrive,
   Info,
   Layers,
   Lock,
+  LogOut,
   Music2,
   Palette,
   Radio,
@@ -17,6 +19,7 @@ import {
   Sliders,
   Sparkles,
   Trash2,
+  User,
   Volume2,
   Wrench,
 } from 'lucide-react';
@@ -25,7 +28,7 @@ import { Badge } from '../../components/Badge';
 import { Button } from '../../components/Button';
 import { Modal } from '../../components/Modal';
 import type { PlatformHealth } from '../../lib/platform';
-import type { ProviderInfo } from '../../lib/types';
+import type { ProviderInfo, SyncAccountStatus, SyncConfigDTO } from '../../lib/types';
 import {
   getArtworkCacheSummary,
   cleanOrphanedArtwork,
@@ -35,6 +38,17 @@ import {
   type ArtworkCleanupResult,
   type ArtworkRecoveryResult,
 } from '../../lib/artwork';
+import {
+  getSyncStatus,
+  syncSignup,
+  syncLogin,
+  syncLogout,
+  toggleSync,
+  syncNow,
+  deleteCloudData,
+  getSyncConfig,
+  setSyncConfig,
+} from '../../lib/sync';
 
 interface SettingsViewProps {
   health: PlatformHealth | null;
@@ -42,7 +56,7 @@ interface SettingsViewProps {
   onDensityChange: (density: 'standard' | 'compact') => void;
 }
 
-type SettingsSection = 'appearance' | 'audio' | 'library' | 'providers' | 'about';
+type SettingsSection = 'appearance' | 'audio' | 'library' | 'providers' | 'account' | 'about';
 
 export function SettingsView({
   health,
@@ -75,11 +89,145 @@ export function SettingsView({
     }
   };
 
+  // Cloud Sync state
+  const [syncStatus, setSyncStatus] = useState<SyncAccountStatus | null>(null);
+  const [_syncConfig, setSyncConfigState] = useState<SyncConfigDTO | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [showDeleteCloudModal, setShowDeleteCloudModal] = useState(false);
+  const [isDeletingCloud, setIsDeletingCloud] = useState(false);
+  const [configUrlInput, setConfigUrlInput] = useState('');
+  const [configKeyInput, setConfigKeyInput] = useState('');
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
+
+  const fetchSyncInfo = async () => {
+    try {
+      const [status, cfg] = await Promise.all([getSyncStatus(), getSyncConfig()]);
+      setSyncStatus(status);
+      setSyncConfigState(cfg);
+      if (cfg) {
+        setConfigUrlInput(cfg.supabaseUrl);
+        setConfigKeyInput(cfg.supabaseAnonKey);
+      }
+    } catch (e) {
+      console.error('Failed to load sync info:', e);
+    }
+  };
+
   useEffect(() => {
     if (activeTab === 'library') {
       fetchArtworkSummary();
+    } else if (activeTab === 'account' || activeTab === 'providers') {
+      fetchSyncInfo();
     }
   }, [activeTab]);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authEmail.trim() || !authPassword) return;
+    setIsAuthenticating(true);
+    setSyncError(null);
+    try {
+      const status = await syncLogin(authEmail.trim(), authPassword);
+      setSyncStatus(status);
+      setAuthPassword('');
+      setSyncSuccessMsg('Signed in successfully');
+      setTimeout(() => setSyncSuccessMsg(null), 3000);
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsAuthenticating(false);
+    }
+  };
+
+  const handleSignup = async () => {
+    if (!authEmail.trim() || !authPassword) return;
+    setIsAuthenticating(true);
+    setSyncError(null);
+    try {
+      const status = await syncSignup(authEmail.trim(), authPassword);
+      setSyncStatus(status);
+      setAuthPassword('');
+      setSyncSuccessMsg('Account created successfully');
+      setTimeout(() => setSyncSuccessMsg(null), 3000);
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsAuthenticating(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await syncLogout();
+      await fetchSyncInfo();
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleToggleSync = async (enabled: boolean) => {
+    try {
+      await toggleSync(enabled);
+      await fetchSyncInfo();
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleSyncNow = async () => {
+    setIsSyncing(true);
+    setSyncError(null);
+    try {
+      const result = await syncNow();
+      if (result.success) {
+        setSyncSuccessMsg(`Sync complete: ${result.pushedCount} pushed, ${result.pulledCount} pulled`);
+        setTimeout(() => setSyncSuccessMsg(null), 4000);
+      } else if (result.errorMessage) {
+        setSyncError(result.errorMessage);
+      }
+      await fetchSyncInfo();
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleConfirmDeleteCloudData = async () => {
+    setIsDeletingCloud(true);
+    setSyncError(null);
+    try {
+      await deleteCloudData();
+      setShowDeleteCloudModal(false);
+      setSyncSuccessMsg('Cloud data deleted successfully. Local library remains intact.');
+      setTimeout(() => setSyncSuccessMsg(null), 4000);
+      await fetchSyncInfo();
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsDeletingCloud(false);
+    }
+  };
+
+  const handleSaveConfig = async () => {
+    setIsSavingConfig(true);
+    setSyncError(null);
+    try {
+      await setSyncConfig(configUrlInput.trim(), configKeyInput.trim());
+      setSyncSuccessMsg('Supabase configuration saved');
+      setTimeout(() => setSyncSuccessMsg(null), 3000);
+      await fetchSyncInfo();
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSavingConfig(false);
+    }
+  };
 
   const handleConfirmClean = async () => {
     setIsCleaning(true);
@@ -142,6 +290,23 @@ export function SettingsView({
       notes: 'Planned for Milestone 4. No account or API secret required.',
     },
     {
+      id: 'cavia_cloud_sync',
+      name: 'Cavia Cloud Sync (Supabase)',
+      category: 'streaming',
+      description: 'Optional cross-device synchronization for playlists and favorites. RLS protected with zero audio upload.',
+      status: syncStatus?.authenticated ? 'operational' : 'unconfigured',
+      capabilities: {
+        catalogueSearch: false,
+        metadataLookup: true,
+        playback: false,
+        caching: true,
+        lyrics: false,
+      },
+      notes: syncStatus?.authenticated
+        ? `Connected as ${syncStatus.accountEmail || syncStatus.accountId}. Refresh token protected in OS secure storage.`
+        : 'Optional. Operates 100% offline when unconfigured.',
+    },
+    {
       id: 'spotify',
       name: 'Spotify PKCE',
       category: 'metadata',
@@ -199,6 +364,7 @@ export function SettingsView({
             { id: 'audio', label: 'Audio Engine', icon: <Volume2 size={14} /> },
             { id: 'library', label: 'Library & SQLite', icon: <Database size={14} /> },
             { id: 'providers', label: 'Providers', icon: <Radio size={14} /> },
+            { id: 'account', label: 'Account & Sync', icon: <Cloud size={14} /> },
             { id: 'about', label: 'About & Policy', icon: <Info size={14} /> },
           ]}
           activeId={activeTab}
@@ -674,6 +840,343 @@ export function SettingsView({
         </div>
       )}
 
+      {/* Tab: Account & Cloud Sync */}
+      {activeTab === 'account' && (
+        <div className="settings-content-pane">
+          {/* Architecture Banner */}
+          <div className="cavia-banner banner-info">
+            <Cloud size={16} className="banner-icon text-ready" />
+            <div>
+              <strong>Local-First, Cloud-Assisted Architecture</strong>
+              <p>
+                Cavia accounts and cloud synchronization are completely optional. Your local music library,
+                playlists, and settings operate 100% offline. Audio files and local paths are never uploaded.
+              </p>
+            </div>
+          </div>
+
+          {syncSuccessMsg && (
+            <div className="cavia-alert cavia-alert-success text-xs p-3">
+              <CheckCircle2 size={15} className="mr-1.5 inline" />
+              {syncSuccessMsg}
+            </div>
+          )}
+
+          {syncError && (
+            <div className="cavia-alert cavia-alert-error text-xs p-3">
+              <AlertTriangle size={15} className="mr-1.5 inline" />
+              {syncError}
+            </div>
+          )}
+
+          {/* Account Status Card */}
+          <div className="settings-card">
+            <div className="card-head">
+              <User size={18} className="card-icon text-vermilion" />
+              <div>
+                <h3>Cavia Account</h3>
+                <p>Manage your account identity and authentication session</p>
+              </div>
+            </div>
+
+            {syncStatus?.authenticated ? (
+              <div className="space-y-4">
+                <div className="setting-status-line">
+                  <Badge variant="ready" size="sm">
+                    AUTHENTICATED
+                  </Badge>
+                  <span className="text-muted-xs font-mono">
+                    {syncStatus.accountEmail || syncStatus.accountId}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 p-3 bg-obsidian-dark rounded border border-zinc-900 text-xs">
+                  <div>
+                    <span className="text-muted block text-[11px]">ACCOUNT EMAIL</span>
+                    <strong className="text-ivory font-mono">{syncStatus.accountEmail || 'User'}</strong>
+                  </div>
+                  <div>
+                    <span className="text-muted block text-[11px]">ACCOUNT ID</span>
+                    <strong className="text-ivory font-mono text-[11px] truncate block" title={syncStatus.accountId || ''}>
+                      {syncStatus.accountId || '—'}
+                    </strong>
+                  </div>
+                  <div>
+                    <span className="text-muted block text-[11px]">DEVICE IDENTIFIER</span>
+                    <strong className="text-ivory font-mono text-[11px]">{syncStatus.deviceId}</strong>
+                  </div>
+                  <div>
+                    <span className="text-muted block text-[11px]">REFRESH TOKEN STORAGE</span>
+                    <strong className="text-ready">OS Credential Manager (Encrypted)</strong>
+                  </div>
+                </div>
+
+                <div className="flex gap-2 pt-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={<LogOut size={14} />}
+                    onClick={handleLogout}
+                  >
+                    Sign Out
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="setting-status-line">
+                  <Badge variant="neutral" size="sm">
+                    SIGNED OUT
+                  </Badge>
+                  <span className="text-muted-xs">
+                    No account connected · Working offline
+                  </span>
+                </div>
+
+                <form onSubmit={handleLogin} className="space-y-3 max-w-md">
+                  <div>
+                    <label className="text-xs font-medium text-ivory block mb-1">
+                      Email Address
+                    </label>
+                    <input
+                      type="email"
+                      className="cavia-input w-full text-xs"
+                      placeholder="you@example.com"
+                      value={authEmail}
+                      onChange={(e) => setAuthEmail(e.target.value)}
+                      disabled={isAuthenticating}
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-medium text-ivory block mb-1">
+                      Password
+                    </label>
+                    <input
+                      type="password"
+                      className="cavia-input w-full text-xs"
+                      placeholder="••••••••••••"
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      disabled={isAuthenticating}
+                      required
+                    />
+                  </div>
+
+                  <div className="flex gap-2 pt-2">
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      size="sm"
+                      disabled={isAuthenticating || !authEmail.trim() || !authPassword}
+                    >
+                      {isAuthenticating ? 'Signing in...' : 'Sign In'}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleSignup}
+                      disabled={isAuthenticating || !authEmail.trim() || !authPassword}
+                    >
+                      Create Account
+                    </Button>
+                  </div>
+                </form>
+              </div>
+            )}
+          </div>
+
+          {/* Cloud Sync Controls Card */}
+          <div className="settings-card">
+            <div className="card-head">
+              <Cloud size={18} className="card-icon text-vermilion" />
+              <div>
+                <h3>Cloud Synchronization</h3>
+                <p>Sync playlists and liked tracks across your devices</p>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div className="setting-row">
+                <div className="setting-info">
+                  <strong className="setting-label">Enable Synchronization</strong>
+                  <span className="setting-desc">
+                    Synchronize playlist structure, track order, and favorites with your cloud account
+                  </span>
+                </div>
+                <div className="setting-control">
+                  <input
+                    type="checkbox"
+                    className="cavia-toggle"
+                    checked={syncStatus?.syncEnabled ?? false}
+                    onChange={(e) => handleToggleSync(e.target.checked)}
+                    disabled={!syncStatus?.authenticated}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 p-3 bg-obsidian-dark rounded border border-zinc-900 text-xs">
+                <div>
+                  <span className="text-muted block text-[11px]">LAST SYNCED</span>
+                  <strong className="text-ivory">
+                    {syncStatus?.lastSyncedAt
+                      ? new Date(syncStatus.lastSyncedAt).toLocaleString()
+                      : 'Never'}
+                  </strong>
+                </div>
+                <div>
+                  <span className="text-muted block text-[11px]">OUTBOX QUEUE</span>
+                  <strong className={syncStatus?.pendingOutboxCount ? 'text-warn' : 'text-ready'}>
+                    {syncStatus?.pendingOutboxCount ?? 0} pending changes
+                  </strong>
+                </div>
+                <div>
+                  <span className="text-muted block text-[11px]">SYNC STATUS</span>
+                  <strong className={syncStatus?.syncEnabled ? 'text-ready' : 'text-muted'}>
+                    {syncStatus?.syncEnabled ? 'Active' : 'Disabled'}
+                  </strong>
+                </div>
+              </div>
+
+              {syncStatus?.lastError && (
+                <div className="cavia-alert cavia-alert-error text-xs p-2.5">
+                  <strong>Last Sync Error:</strong> {syncStatus.lastError}
+                </div>
+              )}
+
+              <div className="pt-2 flex gap-2">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={<RefreshCw size={14} className={isSyncing ? 'animate-spin' : ''} />}
+                  onClick={handleSyncNow}
+                  disabled={isSyncing || !syncStatus?.authenticated || !syncStatus?.syncEnabled}
+                >
+                  {isSyncing ? 'Synchronizing...' : 'Sync Now'}
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Data Privacy & Sovereignty Card */}
+          <div className="settings-card">
+            <div className="card-head">
+              <ShieldCheck size={18} className="card-icon text-ready" />
+              <div>
+                <h3>Data Privacy & Storage Boundary</h3>
+                <p>Exact breakdown of synchronized metadata versus local-only data</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+              <div className="p-3 bg-obsidian-dark rounded border border-zinc-900 space-y-2">
+                <strong className="text-ready flex items-center gap-1.5">
+                  <CheckCircle2 size={13} /> Synchronized via Cloud
+                </strong>
+                <ul className="text-muted text-[11px] space-y-1 list-disc list-inside">
+                  <li>Playlist titles, descriptions, and IDs</li>
+                  <li>Playlist track order and positions</li>
+                  <li>Track metadata snapshots (title, artist, album, duration)</li>
+                  <li>Track content hashes (SHA-256) for local linking</li>
+                  <li>Liked/favorited tracks list</li>
+                  <li>Device ID and registered platform</li>
+                </ul>
+              </div>
+
+              <div className="p-3 bg-obsidian-dark rounded border border-zinc-900 space-y-2">
+                <strong className="text-warn flex items-center gap-1.5">
+                  <Lock size={13} /> Excluded & Strictly Local
+                </strong>
+                <ul className="text-muted text-[11px] space-y-1 list-disc list-inside">
+                  <li>Audio files and binary music streams (0 bytes uploaded)</li>
+                  <li>Local file paths and Windows drive letters</li>
+                  <li>Embedded artwork cache files and local image paths</li>
+                  <li>Local SQLite database files</li>
+                  <li>Playback queue, volume, and playback speed</li>
+                  <li>Local search indexes and scan history</li>
+                </ul>
+              </div>
+            </div>
+
+            {syncStatus?.authenticated && (
+              <div className="mt-4 pt-4 border-t border-zinc-900 flex justify-between items-center">
+                <div>
+                  <strong className="text-xs text-rose-400 block">Delete Cloud Account Data</strong>
+                  <span className="text-muted text-[11px]">
+                    Permanently deletes your synchronized playlists and favorites from the cloud. Local files remain untouched.
+                  </span>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowDeleteCloudModal(true)}
+                  className="text-rose-400 border-rose-900/50 hover:bg-rose-950/20"
+                >
+                  Delete Cloud Data
+                </Button>
+              </div>
+            )}
+          </div>
+
+          {/* Backend Configuration Card */}
+          <div className="settings-card">
+            <div className="card-head">
+              <HardDrive size={18} className="card-icon text-muted" />
+              <div>
+                <h3>Supabase Backend Configuration</h3>
+                <p>Public endpoint URL and anonymous key for cloud sync</p>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="space-y-2">
+                <label className="text-xs font-medium text-ivory block">
+                  Supabase Project URL
+                </label>
+                <input
+                  type="text"
+                  className="cavia-input w-full font-mono text-xs"
+                  placeholder="https://your-project.supabase.co"
+                  value={configUrlInput}
+                  onChange={(e) => setConfigUrlInput(e.target.value)}
+                  disabled={isSavingConfig}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs font-medium text-ivory block">
+                  Supabase Anon Key (Public only)
+                </label>
+                <input
+                  type="password"
+                  className="cavia-input w-full font-mono text-xs"
+                  placeholder="eyJhbGciOi..."
+                  value={configKeyInput}
+                  onChange={(e) => setConfigKeyInput(e.target.value)}
+                  disabled={isSavingConfig}
+                />
+                <p className="text-muted-xs text-[11px]">
+                  Never enter a Supabase service-role key. Cavia uses Postgres Row Level Security (RLS) with the public anon key.
+                </p>
+              </div>
+
+              <div className="pt-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleSaveConfig}
+                  disabled={isSavingConfig}
+                >
+                  {isSavingConfig ? 'Saving...' : 'Save Configuration'}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Tab: About */}
       {activeTab === 'about' && (
         <div className="settings-content-pane">
@@ -846,6 +1349,46 @@ export function SettingsView({
           <p className="text-dim-xs" style={{ color: 'var(--text-muted)' }}>
             Referenced album and track artwork will remain completely intact.
           </p>
+        </div>
+      </Modal>
+
+      {/* Delete Cloud Data Confirmation Modal */}
+      <Modal
+        isOpen={showDeleteCloudModal}
+        onClose={() => setShowDeleteCloudModal(false)}
+        title="Delete Cloud Account Data"
+        eyebrow="DESTRUCTIVE ACTION"
+        size="sm"
+        footer={
+          <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', width: '100%' }}>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowDeleteCloudModal(false)}
+              disabled={isDeletingCloud}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<Trash2 size={14} />}
+              onClick={handleConfirmDeleteCloudData}
+              disabled={isDeletingCloud}
+            >
+              {isDeletingCloud ? 'Deleting...' : 'Delete Cloud Data'}
+            </Button>
+          </div>
+        }
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <p className="text-dim-sm" style={{ lineHeight: '1.5' }}>
+            This will permanently delete all synchronized playlists, tracks, and favorites from your cloud account.
+          </p>
+          <div className="p-3 bg-obsidian-dark rounded border border-zinc-900 text-xs text-muted">
+            <strong className="text-ready block mb-1">Local Library Sovereignty:</strong>
+            All local audio files, local playlists, and local database entries on this device will remain completely intact.
+          </div>
         </div>
       </Modal>
     </section>

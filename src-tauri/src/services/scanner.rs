@@ -350,7 +350,7 @@ where
 
         // The critical section covers atomic artwork caching AND track insertion in SQLite,
         // synchronizing through the exact same op_lock that ArtworkService::clean_orphans uses.
-        let (_artwork_uri, insert_res) = {
+        let (_artwork_uri, inserted_track_id, insert_res) = {
             let _artwork_guard = if metadata.picture_data.is_some() {
                 Some(op_lock.lock().await)
             } else {
@@ -420,12 +420,19 @@ where
             .execute(&pool)
             .await;
 
-            (artwork_uri, insert_res)
+            (artwork_uri, track_id, insert_res)
         };
 
         match insert_res {
             Ok(_) => {
                 new_tracks_count += 1;
+                let _ = sqlx::query(
+                    "UPDATE playlist_tracks SET track_id = ? WHERE content_hash = ? AND track_id IS NULL",
+                )
+                .bind(&inserted_track_id)
+                .bind(&content_hash)
+                .execute(&pool)
+                .await;
                 let _ = sqlx::query(
                     "INSERT INTO import_history (id, source_uri, content_hash, status) VALUES (?, ?, ?, 'success')",
                 )
