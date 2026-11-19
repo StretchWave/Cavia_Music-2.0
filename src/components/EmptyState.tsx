@@ -25,7 +25,7 @@ export function EmptyState({
     <section className={`cavia-empty-state ${className}`}>
       <div className="empty-state-art">
         {glyph && <span className="empty-glyph" aria-hidden="true">{glyph}</span>}
-        {icon && <div className="empty-icon-frame">{icon}</div>}
+        {icon && <div className="empty-icon-frame" aria-hidden="true">{icon}</div>}
       </div>
 
       <div className="empty-state-content">

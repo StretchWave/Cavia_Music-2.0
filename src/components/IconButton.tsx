@@ -22,17 +22,22 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
   },
   ref
 ) {
+  const ariaPressed = props['aria-pressed'] !== undefined ? props['aria-pressed'] : (active ? 'true' : undefined);
+
   return (
     <button
       ref={ref}
       type="button"
       className={`cavia-icon-btn icon-btn-${variant} icon-btn-${size} ${active ? 'active' : ''} ${className}`}
       aria-label={label}
+      aria-pressed={ariaPressed}
       title={title ?? label}
       disabled={disabled}
       {...props}
     >
-      {icon}
+      <span aria-hidden="true" style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+        {icon}
+      </span>
     </button>
   );
 });

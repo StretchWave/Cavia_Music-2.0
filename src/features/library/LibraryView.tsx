@@ -96,41 +96,25 @@ export function LibraryView({
 
         <div className="stat-strip-divider" />
 
-        <div
+        <button
+          type="button"
           className="stat-interactive-cell"
           onClick={() => onNavigate('playlists')}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              onNavigate('playlists');
-            }
-          }}
-          tabIndex={0}
-          role="button"
-          aria-label="View playlists"
         >
           <span className="stat-cell-label">PLAYLISTS</span>
           <strong className="stat-cell-value">{summary?.playlists ?? playlists.length}</strong>
-        </div>
+        </button>
 
         <div className="stat-strip-divider" />
 
-        <div
+        <button
+          type="button"
           className="stat-interactive-cell"
           onClick={() => onNavigate('liked')}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              onNavigate('liked');
-            }
-          }}
-          tabIndex={0}
-          role="button"
-          aria-label="View liked tracks"
         >
           <span className="stat-cell-label">LIKED SONGS</span>
           <strong className="stat-cell-value">{summary?.liked_tracks ?? '0'}</strong>
-        </div>
+        </button>
 
         <div className="stat-strip-divider" />
 

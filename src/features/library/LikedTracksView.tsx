@@ -78,16 +78,16 @@ export function LikedTracksView({
       </div>
 
       {tracks.length > 0 ? (
-        <div className="tracks-table">
-          <div className="tracks-table-head">
-            <span className="col-num">#</span>
-            <span className="col-title">TITLE</span>
-            <span className="col-artist">ARTIST</span>
-            <span className="col-album">ALBUM</span>
-            <span className="col-duration">TIME</span>
-            <span className="col-action" />
+        <div className="tracks-table" role="table" aria-label="Liked tracks list">
+          <div className="tracks-table-head" role="row">
+            <span className="col-num" role="columnheader">#</span>
+            <span className="col-title" role="columnheader">TITLE</span>
+            <span className="col-artist" role="columnheader">ARTIST</span>
+            <span className="col-album" role="columnheader">ALBUM</span>
+            <span className="col-duration" role="columnheader">TIME</span>
+            <span className="col-action" role="columnheader" aria-label="Actions" />
           </div>
-          <div className="tracks-table-body">
+          <div className="tracks-table-body" role="rowgroup">
             {tracks.map((track, i) => {
               const isCurrent = currentTrackId === track.id;
               return (
@@ -96,6 +96,7 @@ export function LikedTracksView({
                   className={`track-row ${isCurrent ? 'active' : ''}`}
                   tabIndex={0}
                   role="row"
+                  aria-label={`Track ${track.trackNumber || i + 1}: ${track.title} by ${track.artist || 'Unknown Artist'}`}
                   onClick={() => onPlayTrack?.(track.id)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
@@ -104,14 +105,14 @@ export function LikedTracksView({
                     }
                   }}
                 >
-                  <span className="col-num">
+                  <span className="col-num" role="cell">
                     {isCurrent && isPlaying ? (
                       <span className="track-playing-indicator" title="Playing">▶</span>
                     ) : (
                       track.trackNumber || i + 1
                     )}
                   </span>
-                  <span className="col-title">
+                  <span className="col-title" role="cell">
                     {track.artworkUri && (
                       <img
                         src={formatArtworkUri(track.artworkUri)}
@@ -128,10 +129,10 @@ export function LikedTracksView({
                       </span>
                     </span>
                   </span>
-                  <span className="col-artist">{track.artist || 'Unknown Artist'}</span>
-                  <span className="col-album">{track.album || 'Unknown Album'}</span>
-                  <span className="col-duration">{formatTime(track.durationMs)}</span>
-                  <span className="col-action" onClick={(e) => e.stopPropagation()}>
+                  <span className="col-artist" role="cell">{track.artist || 'Unknown Artist'}</span>
+                  <span className="col-album" role="cell">{track.album || 'Unknown Album'}</span>
+                  <span className="col-duration" role="cell">{formatTime(track.durationMs)}</span>
+                  <span className="col-action" role="cell" onClick={(e) => e.stopPropagation()}>
                     <button
                       type="button"
                       className="track-action-inline-btn"
@@ -145,7 +146,8 @@ export function LikedTracksView({
                       type="button"
                       className="track-like-inline-btn active"
                       onClick={() => onToggleLike?.(track.id)}
-                      aria-label="Remove from liked tracks"
+                      aria-label={`Remove ${track.title} from liked tracks`}
+                      aria-pressed="true"
                       title="Remove from Liked"
                     >
                       <Heart size={15} fill="var(--accent-vermilion)" color="var(--accent-vermilion)" />

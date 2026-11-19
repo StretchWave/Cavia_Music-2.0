@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
+  Check,
   ChevronDown,
   FastForward,
   Heart,
@@ -68,22 +69,79 @@ export function ExpandedPlayer({
 
   const activePosition = scrubPosition !== null ? scrubPosition : positionMs;
   const displayDuration = playback.status === 'error' || !currentTrack ? 0 : durationMs;
+  const [copiedShare, setCopiedShare] = useState(false);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const previousActiveElementRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
+    if (!isOpen) return;
+
+    previousActiveElementRef.current = document.activeElement as HTMLElement | null;
+    document.body.style.overflow = 'hidden';
+
+    // Focus close button initially
+    const timer = setTimeout(() => {
+      if (overlayRef.current) {
+        const firstFocusable = overlayRef.current.querySelector<HTMLElement>(
+          'button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        );
+        firstFocusable?.focus();
+      }
+    }, 50);
+
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape' && isOpen) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
         onClose();
+        return;
+      }
+
+      // Trap focus
+      if (e.key === 'Tab' && overlayRef.current) {
+        const focusables = Array.from(
+          overlayRef.current.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+          )
+        ).filter((el) => el.offsetParent !== null);
+
+        if (focusables.length === 0) return;
+
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
       }
     }
-    if (isOpen) {
-      document.body.style.overflow = 'hidden';
-      window.addEventListener('keydown', handleKeyDown);
-    }
+
+    window.addEventListener('keydown', handleKeyDown);
+
     return () => {
+      clearTimeout(timer);
       document.body.style.overflow = '';
       window.removeEventListener('keydown', handleKeyDown);
+      if (previousActiveElementRef.current && typeof previousActiveElementRef.current.focus === 'function') {
+        previousActiveElementRef.current.focus();
+      }
     };
   }, [isOpen, onClose]);
+
+  const handleShareTrack = async () => {
+    if (!currentTrack) return;
+    try {
+      const text = `${currentTrack.title} — ${currentTrack.artist}${currentTrack.album ? ` (${currentTrack.album})` : ''}`;
+      await navigator.clipboard.writeText(text);
+      setCopiedShare(true);
+      setTimeout(() => setCopiedShare(false), 2500);
+    } catch {
+      // Ignore clipboard write failures
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -96,10 +154,16 @@ export function ExpandedPlayer({
   };
 
   return (
-    <div className="cavia-expanded-player-overlay" role="dialog" aria-modal="true" aria-label="Expanded player">
+    <div
+      ref={overlayRef}
+      className="cavia-expanded-player-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Expanded player"
+    >
       <div className="expanded-background-ambient" aria-hidden="true" />
 
-      <header className="expanded-header">
+      <div className="expanded-header">
         <IconButton
           label="Collapse full player"
           icon={<ChevronDown size={22} />}
@@ -141,16 +205,17 @@ export function ExpandedPlayer({
               : 'AUDIO ENGINE STANDBY'}
           </Badge>
           <IconButton
-            label="Share track"
-            icon={<Share2 size={18} />}
+            label={copiedShare ? 'Copied track metadata' : 'Share track'}
+            icon={copiedShare ? <Check size={18} className="text-ready" /> : <Share2 size={18} />}
             variant="ghost"
             disabled={!currentTrack}
-            title={!currentTrack ? 'No track playing' : 'Share track link'}
+            onClick={handleShareTrack}
+            title={!currentTrack ? 'No track playing' : (copiedShare ? 'Copied to clipboard' : 'Copy track info to clipboard')}
           />
         </div>
-      </header>
+      </div>
 
-      <main className="expanded-body">
+      <div className="expanded-body">
         {/* Left Column: Tactical Artwork & Vinyl Assembly */}
         <div className="expanded-sleeve-stage">
           <div className={`vinyl-disc ${isPlaying ? 'spinning' : ''}`} aria-hidden="true">
@@ -216,7 +281,8 @@ export function ExpandedPlayer({
                 if (currentTrack) onToggleLike?.(currentTrack.id);
               }}
               title={!currentTrack ? 'No track playing' : (currentTrack.isLiked ? 'Remove from Liked' : 'Add to Liked')}
-              aria-label="Like track"
+              aria-label={currentTrack?.isLiked ? 'Remove from Liked' : 'Save to Liked'}
+              aria-pressed={currentTrack?.isLiked ? 'true' : 'false'}
             >
               <Heart
                 size={22}
@@ -304,6 +370,7 @@ export function ExpandedPlayer({
               }}
               disabled={!isBackendReady || displayDuration <= 0}
               label="Seek track position"
+              ariaValueText={`${formatTime(activePosition)} of ${formatTime(displayDuration)}`}
               showFill={displayDuration > 0}
             />
             <div className="expanded-time-labels">
@@ -413,14 +480,15 @@ export function ExpandedPlayer({
                   onCommit={(newVol) => onVolumeChange?.(newVol)}
                   disabled={!isBackendReady}
                   label="Volume"
+                  ariaValueText={isMuted ? 'Muted' : `${volume}%`}
                 />
               </div>
             </div>
           </div>
         </div>
-      </main>
+      </div>
 
-      <footer className="expanded-footer">
+      <div className="expanded-footer">
         <div className="expanded-pipeline-note">
           <span
             className={`pipeline-dot ${
@@ -443,7 +511,7 @@ export function ExpandedPlayer({
               : 'AUDIO ENGINE: STANDBY'}
           </span>
         </div>
-      </footer>
+      </div>
     </div>
   );
 }

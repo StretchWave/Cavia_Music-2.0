@@ -29,6 +29,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     <button
       ref={ref}
       disabled={disabled || isLoading}
+      aria-busy={isLoading ? 'true' : undefined}
       className={`cavia-btn btn-${variant} btn-${size} ${className}`}
       {...props}
     >

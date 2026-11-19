@@ -967,3 +967,77 @@ Comprehensive automated audit executed against live application via WebView2 Chr
 
 ### Known Limitations
 - Emulated WebView2 viewport testing verified CSS media queries, layout constraints, and safe-area variables. Physical touch gestures, mobile notch rendering, and hardware-specific edge-to-edge behavior on physical Android and iOS devices are deferred to native device verification.
+
+---
+
+## 10. Milestone 5.3 Implementation: Interaction Consistency, Accessibility and Usability Audit
+
+### Objective & Standards
+Milestone 5.3 achieves full interaction consistency, keyboard parity, screen-reader semantics, and usability hardening across Cavia Music 2.0. The audit was conducted against WCAG 2.2 AA principles with zero tolerance for fake functionality, broken keyboard focus, or silent interaction failures:
+- **Zero Fake Functionality:** Every visible control performs a real, verifiable action; decorative elements use `aria-hidden="true"` and never masquerade as interactive controls (`role="button" tabIndex={0}`).
+- **Input Parity:** All core features operable via mouse, keyboard, touch, and assistive technologies.
+- **Focus Management:** Visible high-contrast focus rings (`:focus-visible`), comprehensive focus trapping within modal dialogs and slide-out / bottom-sheet drawers, and deterministic focus restoration to trigger elements upon dismissal.
+- **WAI-ARIA Pattern Compliance:** Tablist roving tabindex with arrow-key navigation, slider `aria-valuetext` updates, explicit table semantics for track listings, and WCAG 2.5.3 (Label in Name) conformance.
+
+### Automated Axe-Core Audit Results
+Automated WCAG 2.2 accessibility verification was executed across all 15 application views and modal/drawer states using `axe-core` injected into the live application via Chrome DevTools Protocol (CDP) on WebView2:
+
+| Screen / View | Baseline Violations | Post-Remediation Violations | Passed Checks | Status |
+|---|:---:|:---:|:---:|:---:|
+| **Library (Archive)** | 6 | **0** | 38 | **Pass** |
+| **Tracks** | 6 | **0** | 38 | **Pass** |
+| **Playlists** | 6 | **0** | 38 | **Pass** |
+| **Playlist Detail Modal** | 7 | **0** | 38 | **Pass** |
+| **Albums** | 6 | **0** | 38 | **Pass** |
+| **Artists** | 6 | **0** | 38 | **Pass** |
+| **Liked Tracks** | 6 | **0** | 38 | **Pass** |
+| **Search** | 6 | **0** | 38 | **Pass** |
+| **Settings (Appearance)** | 8 | **0** | 38 | **Pass** |
+| **Settings (Audio)** | 8 | **0** | 38 | **Pass** |
+| **Settings (Library Cache)** | 8 | **0** | 38 | **Pass** |
+| **Settings (Account Sync)** | 9 | **0** | 38 | **Pass** |
+| **Queue Drawer** | 9 | **0** | 42 | **Pass** |
+| **Lyrics Drawer** | 8 | **0** | 40 | **Pass** |
+| **Expanded Player** | 9 | **0** | 40 | **Pass** |
+
+**Total Unique Violation Types Remaining: 0** (down from 9 baseline violation types across 100+ DOM nodes).
+
+### Remediations & Technical Details
+1. **WCAG Color Contrast & Token Hardening:**
+   - Updated `--text-dim` from `#545863` to `#8e94a0` (contrast ratio against `#090a0d` increased from 2.65:1 to 6.36:1, far exceeding WCAG AA 4.5:1 requirement).
+   - Replaced low-contrast version tag text color with `--text-dim` (`#8e94a0`).
+   - Hardened `.btn-primary` vermilion background to `#cd3d28` with bold `font-weight: 600` (contrast ratio 4.82:1 against aged ivory text).
+2. **Landmarks & Document Structure:**
+   - Added skip-to-content link (`.skip-link`) as first child of `<body>` bypassing sidebar navigation directly to `<main id="main-content">`.
+   - Removed invalid nested `role="banner"` from `<header className="cavia-topbar">` inside `<main>`.
+   - Removed invalid `role="region"` from `<footer>` in `PlayerDock.tsx`.
+   - Converted internal `<header>` and `<main>` containers in `ExpandedPlayer.tsx` to semantic `<div>` elements, eliminating duplicate top-level landmark conflicts.
+   - Synchronized document `<title>` with active route (`Cavia Music — {page}`) and introduced an accessible live announcement region (`role="status" aria-live="polite"`).
+3. **Modal & Drawer Focus Trapping & Restoration:**
+   - Implemented full focus trapping (Tab / Shift+Tab looping) and focus restoration to trigger elements across `Modal.tsx`, `PlaylistDetailModal.tsx`, `QueueDrawer.tsx`, `LyricsDrawer.tsx`, and `ExpandedPlayer.tsx`.
+   - Converted drawer backdrops from `<aside role="dialog">` to container `<div>` with dedicated inner `.cavia-drawer-panel` bearing `role="dialog" aria-modal="true"`.
+   - Auto-focuses `[autofocus]` inputs or first interactive control upon opening.
+4. **WAI-ARIA Tabs & Sliders:**
+   - `Tabs.tsx`: Implemented WAI-ARIA roving tabindex (`tabIndex={isActive ? 0 : -1}`) with `ArrowLeft`, `ArrowRight`, `ArrowUp`, `ArrowDown`, `Home`, and `End` keyboard navigation and programmatic focus management.
+   - `Slider.tsx`: Added `ariaValueText` prop providing screen readers formatted values (e.g. `"1:24 of 3:45"`, `"Muted"`, `"80%"`).
+5. **Accessible Queue Non-Drag Reordering:**
+   - Converted `.queue-list` to an ordered list (`<ol>`) with `<li>` items.
+   - Added explicit Move Up (`ChevronUp`) and Move Down (`ChevronDown`) accessible action buttons for users unable to perform drag-and-drop.
+   - Added `Alt+ArrowUp` and `Alt+ArrowDown` keyboard shortcuts for reordering queue items.
+6. **Form Controls & Label Matching (WCAG 2.5.3):**
+   - Fixed all form `<label htmlFor="...">` and `<input id="...">` pairings in `SettingsView.tsx`.
+   - Eliminated pseudo-buttons in `LibraryView.tsx` (`stat-interactive-cell`), replacing them with semantic `<button type="button">` elements without mismatched ARIA labels.
+   - Aligned accessible names with visible button text in `PlayerDock.tsx`, `ExpandedPlayer.tsx`, and `QueueDrawer.tsx`, completely eliminating all `label-content-name-mismatch` violations.
+7. **Global Keyboard Shortcuts & Safeguards:**
+   - Registered `Space` for Play/Pause, `Ctrl/Cmd+K` for Search, and `Ctrl/Cmd+,` for Settings.
+   - Added guards preventing global shortcuts from triggering while user is actively typing inside `<input>`, `<textarea>`, or content-editable elements.
+
+### Verification & Testing
+- **Axe-Core Automated Audit:** 0 violations across all 15 views; 38–42 passed checks per view.
+- **Node Contract Suite:** 39 passed; 0 failed (`test/*.test.mjs`).
+- **Rust Checks:** `cargo check --manifest-path src-tauri/Cargo.toml` passed cleanly.
+- **Rust Formatting:** `cargo fmt --check --manifest-path src-tauri/Cargo.toml` clean.
+- **Frontend Production Build:** `npm run build` compiled cleanly in 601ms.
+
+### Known Limitations
+- Physical touch screen reader testing (iOS VoiceOver and Android TalkBack gestures) is deferred to native device verification. All desktop and WebView2 screen reader semantics and keyboard flows are verified.

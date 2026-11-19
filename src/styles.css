@@ -64,6 +64,39 @@ a {
   text-decoration: none;
 }
 
+.skip-link {
+  position: absolute;
+  top: -60px;
+  left: 16px;
+  z-index: 10000;
+  padding: 8px 16px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 2px solid var(--accent-vermilion);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: top 0.15s ease;
+}
+.skip-link:focus-visible {
+  top: 16px;
+  outline: none;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
 /* ==========================================================================
    Typography Foundations
    ========================================================================== */
@@ -316,8 +349,8 @@ h1, h2, h3, h4, h5, h6 {
 .sidebar-version-tag span {
   display: block;
   margin-top: 2px;
-  color: rgba(255, 255, 255, 0.25);
-  font-size: 8px;
+  color: var(--text-muted);
+  font-size: 9px;
 }
 
 /* ==========================================================================
@@ -625,6 +658,11 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .stat-interactive-cell {
+  background: none;
+  border: none;
+  text-align: left;
+  font-family: inherit;
+  color: inherit;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -2137,16 +2175,42 @@ h1, h2, h3, h4, h5, h6 {
 .dock-track-section {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
   min-width: 0;
-  cursor: pointer;
-  padding: 6px 8px;
+  padding: 4px 6px;
   border-radius: var(--radius-md);
   transition: background var(--transition-fast);
 }
 
 .dock-track-section:hover {
   background: rgba(255, 255, 255, 0.03);
+}
+
+.dock-track-trigger {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  flex: 1;
+  text-align: left;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+}
+
+.mobile-mini-info-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
 }
 
 .dock-art-container {
@@ -2223,13 +2287,23 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .dock-like-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  min-height: 36px;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-full);
   color: var(--text-dim);
-  transition: color var(--transition-fast);
-  padding: 4px;
+  transition: color var(--transition-fast), transform var(--transition-fast);
+  padding: 8px;
+  flex-shrink: 0;
 }
 
 .dock-like-btn:hover:not(:disabled) {
   color: var(--accent-vermilion);
+  transform: scale(1.1);
 }
 
 .dock-center-controls {
@@ -2800,10 +2874,84 @@ h1, h2, h3, h4, h5, h6 {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 14px;
+  padding: 8px 12px;
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.02);
   border: 1px solid var(--border-subtle);
+  list-style: none;
+}
+
+.queue-track-play-trigger {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+}
+
+.queue-track-play-trigger:focus-visible {
+  outline: 2px solid var(--accent-vermilion);
+  outline-offset: 2px;
+}
+
+.queue-reorder-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.queue-reorder-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  border-radius: var(--radius-xs);
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color 0.12s ease, background-color 0.12s ease;
+}
+
+.queue-reorder-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.queue-reorder-btn:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.queue-remove-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  border-radius: var(--radius-xs);
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color 0.12s ease, background-color 0.12s ease;
+}
+
+.queue-remove-btn:hover {
+  color: var(--accent-vermilion);
+  background: var(--accent-vermilion-subtle);
 }
 
 .active-queue-item {
@@ -3291,8 +3439,9 @@ h1, h2, h3, h4, h5, h6 {
 .btn-lg { height: 48px; padding: 0 24px; font-size: 14px; }
 
 .btn-primary {
-  background: var(--accent-vermilion);
-  color: #fff;
+  background: #cd3d28;
+  color: #ffffff;
+  font-weight: 600;
   box-shadow: 0 4px 16px var(--accent-vermilion-glow);
 }
 

@@ -9,6 +9,7 @@ interface SliderProps {
   onCommit?: (value: number) => void;
   disabled?: boolean;
   label: string;
+  ariaValueText?: string;
   className?: string;
   showFill?: boolean;
 }
@@ -22,6 +23,7 @@ export function Slider({
   onCommit,
   disabled = false,
   label,
+  ariaValueText,
   className = '',
   showFill = true,
 }: SliderProps) {
@@ -105,6 +107,7 @@ export function Slider({
         aria-valuemin={min}
         aria-valuemax={max}
         aria-valuenow={displayVal}
+        aria-valuetext={ariaValueText}
         aria-disabled={disabled}
         className="cavia-range-input"
         style={{

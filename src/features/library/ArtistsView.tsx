@@ -7,9 +7,10 @@ interface ArtistsViewProps {
   artists: Artist[];
   onImportFolder?: () => void;
   isScanning?: boolean;
+  onPlayArtist?: (artist: Artist) => void;
 }
 
-export function ArtistsView({ artists, onImportFolder, isScanning }: ArtistsViewProps) {
+export function ArtistsView({ artists, onImportFolder, isScanning, onPlayArtist }: ArtistsViewProps) {
   return (
     <section className="cavia-subpage artists-page">
       <div className="subpage-header">
@@ -42,7 +43,20 @@ export function ArtistsView({ artists, onImportFolder, isScanning }: ArtistsView
       {artists.length > 0 ? (
         <div className="artists-grid">
           {artists.map((artist) => (
-            <article key={artist.id} className="artist-card" tabIndex={0} role="button">
+            <article
+              key={artist.id}
+              className="artist-card"
+              tabIndex={0}
+              role="button"
+              aria-label={`Play tracks by ${artist.name}`}
+              onClick={() => onPlayArtist?.(artist)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onPlayArtist?.(artist);
+                }
+              }}
+            >
               <div className="artist-avatar-frame">
                 <span className="artist-monogram">
                   {artist.name.slice(0, 2).toUpperCase()}

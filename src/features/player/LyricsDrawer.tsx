@@ -41,6 +41,8 @@ export function LyricsDrawer({
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const activeLineRef = useRef<HTMLParagraphElement | null>(null);
+  const drawerRef = useRef<HTMLDivElement | null>(null);
+  const previousActiveElementRef = useRef<HTMLElement | null>(null);
   const prevActiveIndexRef = useRef<number>(-1);
   const programmaticScrollRef = useRef<boolean>(false);
   const programmaticScrollTimerRef = useRef<number | null>(null);
@@ -49,18 +51,61 @@ export function LyricsDrawer({
   // not subscribe to playback events independently.
   const currentPositionMs = playbackPositionMs ?? 0;
 
-  // Keyboard escape handler
+  // Focus management and keyboard escape handler
   useEffect(() => {
+    if (!isOpen) return;
+
+    previousActiveElementRef.current = document.activeElement as HTMLElement | null;
+    document.body.style.overflow = 'hidden';
+
+    const timer = setTimeout(() => {
+      if (drawerRef.current) {
+        const firstFocusable = drawerRef.current.querySelector<HTMLElement>(
+          'button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        );
+        firstFocusable?.focus();
+      }
+    }, 50);
+
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape' && isOpen) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
         onClose();
+        return;
+      }
+
+      // Trap focus
+      if (e.key === 'Tab' && drawerRef.current) {
+        const focusables = Array.from(
+          drawerRef.current.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+          )
+        ).filter((el) => el.offsetParent !== null);
+
+        if (focusables.length === 0) return;
+
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
       }
     }
-    if (isOpen) {
-      window.addEventListener('keydown', handleKeyDown);
-    }
+
+    window.addEventListener('keydown', handleKeyDown);
+
     return () => {
+      clearTimeout(timer);
+      document.body.style.overflow = '';
       window.removeEventListener('keydown', handleKeyDown);
+      if (previousActiveElementRef.current && typeof previousActiveElementRef.current.focus === 'function') {
+        previousActiveElementRef.current.focus();
+      }
     };
   }, [isOpen, onClose]);
 
@@ -249,14 +294,12 @@ export function LyricsDrawer({
   const hasPlain = !!(lyrics?.plainLyrics && lyrics.plainLyrics.trim().length > 0);
 
   return (
-    <aside
-      className="cavia-drawer-backdrop"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Lyrics view"
-    >
+    <div className="cavia-drawer-backdrop" onClick={onClose}>
       <div
+        ref={drawerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Lyrics view"
         className="cavia-drawer-panel lyrics-panel"
         onClick={(e) => e.stopPropagation()}
       >
@@ -434,7 +477,7 @@ export function LyricsDrawer({
           </span>
         </div>
       </div>
-    </aside>
+    </div>
   );
 }
 

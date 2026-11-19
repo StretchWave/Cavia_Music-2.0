@@ -9,6 +9,7 @@ interface AlbumsViewProps {
   onImportFolder?: () => void;
   isScanning?: boolean;
   onAddAlbumToPlaylist?: (album: Album) => void;
+  onPlayAlbum?: (album: Album) => void;
 }
 
 export function AlbumsView({
@@ -16,6 +17,7 @@ export function AlbumsView({
   onImportFolder,
   isScanning,
   onAddAlbumToPlaylist,
+  onPlayAlbum,
 }: AlbumsViewProps) {
   return (
     <section className="cavia-subpage albums-page">
@@ -51,7 +53,20 @@ export function AlbumsView({
           {albums.map((album) => {
             const formattedArt = formatArtworkUri(album.artworkUri);
             return (
-              <article key={album.id} className="album-card" tabIndex={0} role="button">
+              <article
+                key={album.id}
+                className="album-card"
+                tabIndex={0}
+                role="button"
+                aria-label={`Play album ${album.title} by ${album.artist}`}
+                onClick={() => onPlayAlbum?.(album)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onPlayAlbum?.(album);
+                  }
+                }}
+              >
                 <div className="album-sleeve-frame">
                   {formattedArt ? (
                     <img

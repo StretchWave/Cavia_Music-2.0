@@ -548,6 +548,82 @@ export function App() {
     }
   };
 
+  const handlePlayAlbum = useCallback(
+    async (album: Album) => {
+      const albumTracks = tracks.filter(
+        (t) =>
+          t.album.toLowerCase() === album.title.toLowerCase() &&
+          (t.albumArtist?.toLowerCase() === album.artist.toLowerCase() ||
+            t.artist.toLowerCase() === album.artist.toLowerCase())
+      );
+      if (albumTracks.length > 0) {
+        await handlePlayPlaylistTracks(albumTracks, 0, false);
+      }
+    },
+    [tracks]
+  );
+
+  const handlePlayArtist = useCallback(
+    async (artist: Artist) => {
+      const artistTracks = tracks.filter(
+        (t) =>
+          t.artist.toLowerCase() === artist.name.toLowerCase() ||
+          t.albumArtist?.toLowerCase() === artist.name.toLowerCase()
+      );
+      if (artistTracks.length > 0) {
+        await handlePlayPlaylistTracks(artistTracks, 0, false);
+      }
+    },
+    [tracks]
+  );
+
+  const [routeAnnouncement, setRouteAnnouncement] = useState('');
+
+  useEffect(() => {
+    document.title = `Cavia Music — ${pageLabels[page]}`;
+    setRouteAnnouncement(`Navigated to ${pageLabels[page]}`);
+  }, [page]);
+
+  useEffect(() => {
+    function handleGlobalKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      // Space -> Toggle Play/Pause
+      if (e.code === 'Space') {
+        e.preventDefault();
+        handleTogglePlay();
+      }
+
+      // Cmd/Ctrl + K -> Focus or jump to Search
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPage('search');
+        setTimeout(() => {
+          const searchInput = document.querySelector<HTMLInputElement>('.cavia-search-field');
+          searchInput?.focus();
+        }, 50);
+      }
+
+      // Cmd/Ctrl + , -> Settings
+      if ((e.metaKey || e.ctrlKey) && e.key === ',') {
+        e.preventDefault();
+        setPage('settings');
+      }
+    }
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [handleTogglePlay]);
+
   const handleNext = async () => {
     try {
       await nextTrack();
@@ -705,6 +781,16 @@ export function App() {
 
   return (
     <div className={`cavia-app-frame ${density === 'compact' ? 'density-compact' : ''} show-kanji`}>
+      {/* Skip to Main Content Link for Keyboard / Screen Readers */}
+      <a href="#main-content" className="skip-link">
+        Skip to main content
+      </a>
+
+      {/* Screen reader live announcement region for route changes */}
+      <div className="sr-only" role="status" aria-live="polite">
+        {routeAnnouncement}
+      </div>
+
       {/* Desktop Sidebar Navigation */}
       <aside className="cavia-sidebar" aria-label="Main Navigation">
         <div className="brand-lockup">
@@ -730,6 +816,7 @@ export function App() {
                   key={item.page}
                   type="button"
                   className={`nav-item ${isActive ? 'active' : ''}`}
+                  aria-current={isActive ? 'page' : undefined}
                   onClick={() => setPage(item.page)}
                 >
                   <Icon size={17} strokeWidth={1.8} />
@@ -753,6 +840,7 @@ export function App() {
                   key={item.page}
                   type="button"
                   className={`nav-item ${isActive ? 'active' : ''}`}
+                  aria-current={isActive ? 'page' : undefined}
                   onClick={() => setPage(item.page)}
                 >
                   <Icon size={17} strokeWidth={1.8} />
@@ -781,6 +869,7 @@ export function App() {
           <button
             type="button"
             className={`nav-item ${page === 'settings' ? 'active' : ''}`}
+            aria-current={page === 'settings' ? 'page' : undefined}
             onClick={() => setPage('settings')}
           >
             <Settings2 size={17} strokeWidth={1.8} />
@@ -795,8 +884,8 @@ export function App() {
       </aside>
 
       {/* Main Content Shell */}
-      <main className="cavia-main-shell">
-        <header className="cavia-topbar" role="banner">
+      <main id="main-content" className="cavia-main-shell">
+        <header className="cavia-topbar">
           <div className="breadcrumbs">
             <span className="crumb-brand">CAVIA</span>
             <span className="crumb-slash">/</span>
@@ -824,12 +913,11 @@ export function App() {
             <button
               type="button"
               className="profile-button"
-              aria-label="Guest session profile"
               title="Local session · No account required"
             >
-              <span className="profile-avatar">C</span>
+              <span className="profile-avatar" aria-hidden="true">C</span>
               <span className="profile-name">LOCAL</span>
-              <ChevronDown size={13} />
+              <ChevronDown size={13} aria-hidden="true" />
             </button>
           </div>
         </header>
@@ -977,6 +1065,7 @@ export function App() {
               onImportFolder={handleImportFolder}
               isScanning={isScanning}
               onAddAlbumToPlaylist={handleOpenAddAlbumToPlaylist}
+              onPlayAlbum={handlePlayAlbum}
             />
           )}
 
@@ -985,6 +1074,7 @@ export function App() {
               artists={artists}
               onImportFolder={handleImportFolder}
               isScanning={isScanning}
+              onPlayArtist={handlePlayArtist}
             />
           )}
 
@@ -1131,6 +1221,7 @@ export function App() {
               key={item.page}
               type="button"
               className={`mobile-nav-btn ${isActive ? 'active' : ''}`}
+              aria-current={isActive ? 'page' : undefined}
               onClick={() => setPage(item.page)}
             >
               <Icon size={19} />

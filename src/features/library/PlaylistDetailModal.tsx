@@ -49,6 +49,7 @@ export function PlaylistDetailModal({
   const [editDesc, setEditDesc] = useState('');
   const [editError, setEditError] = useState<string | null>(null);
   const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   useEffect(() => {
     setCurrentPlaylist(playlist);
@@ -78,14 +79,7 @@ export function PlaylistDetailModal({
   if (!currentPlaylist) return null;
 
   const handleDelete = () => {
-    if (
-      window.confirm(
-        `Delete playlist "${currentPlaylist.name}"? This removes the playlist from your local database.`
-      )
-    ) {
-      onDeletePlaylist?.(currentPlaylist.id);
-      onClose();
-    }
+    setShowDeleteConfirm(true);
   };
 
   const handleRemoveTrack = async (index: number, e: React.MouseEvent) => {
@@ -297,16 +291,16 @@ export function PlaylistDetailModal({
           <div className="playlist-tracks-section">
             <h3 className="section-label">TRACK LIST</h3>
             {tracks.length > 0 ? (
-              <div className="tracks-table">
-                <div className="tracks-table-head playlist-table-grid">
-                  <span className="col-num">#</span>
-                  <span className="col-title">TITLE</span>
-                  <span className="col-artist">ARTIST</span>
-                  <span className="col-album">ALBUM</span>
-                  <span className="col-duration">TIME</span>
-                  <span className="col-playlist-actions">REORDER / REMOVE</span>
+              <div className="tracks-table" role="table" aria-label={`Tracks in ${currentPlaylist.name}`}>
+                <div className="tracks-table-head playlist-table-grid" role="row">
+                  <span className="col-num" role="columnheader">#</span>
+                  <span className="col-title" role="columnheader">TITLE</span>
+                  <span className="col-artist" role="columnheader">ARTIST</span>
+                  <span className="col-album" role="columnheader">ALBUM</span>
+                  <span className="col-duration" role="columnheader">TIME</span>
+                  <span className="col-playlist-actions" role="columnheader">REORDER / REMOVE</span>
                 </div>
-                <div className="tracks-table-body">
+                <div className="tracks-table-body" role="rowgroup">
                   {tracks.map((track, i) => {
                     const isUnplayable = !track.fileUri || track.sourceKind === 'remote_sync';
                     return (
@@ -315,6 +309,7 @@ export function PlaylistDetailModal({
                         className={`track-row playlist-table-grid ${isUnplayable ? 'track-row-unplayable' : ''}`}
                         tabIndex={isUnplayable ? -1 : 0}
                         role="row"
+                        aria-label={`Track ${i + 1}: ${track.title} by ${track.artist}${isUnplayable ? ' (Unavailable locally)' : ''}`}
                         onClick={() => {
                           if (isUnplayable) return;
                           const playable = tracks.filter((t) => t.fileUri && t.sourceKind !== 'remote_sync');
@@ -333,8 +328,8 @@ export function PlaylistDetailModal({
                           }
                         }}
                       >
-                        <span className="col-num">{i + 1}</span>
-                        <span className="col-title">
+                        <span className="col-num" role="cell">{i + 1}</span>
+                        <span className="col-title" role="cell">
                           {track.artworkUri && (
                             <img
                               src={formatArtworkUri(track.artworkUri)}
@@ -358,11 +353,12 @@ export function PlaylistDetailModal({
                             </span>
                           )}
                         </span>
-                        <span className="col-artist">{track.artist}</span>
-                        <span className="col-album">{track.album}</span>
-                        <span className="col-duration">{formatDuration(track.durationMs)}</span>
+                        <span className="col-artist" role="cell">{track.artist}</span>
+                        <span className="col-album" role="cell">{track.album}</span>
+                        <span className="col-duration" role="cell">{formatDuration(track.durationMs)}</span>
                         <span
                           className="col-playlist-actions"
+                          role="cell"
                           onClick={(e) => e.stopPropagation()}
                         >
                           <button
@@ -412,6 +408,42 @@ export function PlaylistDetailModal({
           </div>
         </div>
       </Modal>
+
+      {/* Delete Confirmation Alert Dialog */}
+      {showDeleteConfirm && (
+        <Modal
+          isOpen={showDeleteConfirm}
+          onClose={() => setShowDeleteConfirm(false)}
+          title={`Delete "${currentPlaylist.name}"?`}
+          eyebrow="CONFIRM DELETION"
+          size="sm"
+          role="alertdialog"
+          footer={
+            <div className="modal-actions-right">
+              <Button variant="ghost" size="sm" onClick={() => setShowDeleteConfirm(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                className="text-danger"
+                onClick={() => {
+                  onDeletePlaylist?.(currentPlaylist.id);
+                  setShowDeleteConfirm(false);
+                  onClose();
+                }}
+                icon={<Trash2 size={14} />}
+              >
+                Delete Playlist
+              </Button>
+            </div>
+          }
+        >
+          <p className="text-dim-sm" style={{ lineHeight: 1.5 }}>
+            Are you sure you want to delete <strong>{currentPlaylist.name}</strong>? This removes the playlist from your local database. Your original audio files remain untouched.
+          </p>
+        </Modal>
+      )}
 
       {/* Edit Details Sub-Modal */}
       {isEditModalOpen && (

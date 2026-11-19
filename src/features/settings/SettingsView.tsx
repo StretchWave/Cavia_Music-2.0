@@ -937,8 +937,9 @@ export function SettingsView({
 
                 <form onSubmit={handleLogin} className="sync-auth-form">
                   <div className="form-field">
-                    <label>EMAIL ADDRESS</label>
+                    <label htmlFor="sync-email">EMAIL ADDRESS</label>
                     <input
+                      id="sync-email"
                       type="email"
                       className="cavia-text-input"
                       placeholder="you@example.com"
@@ -950,8 +951,9 @@ export function SettingsView({
                   </div>
 
                   <div className="form-field">
-                    <label>PASSWORD</label>
+                    <label htmlFor="sync-password">PASSWORD</label>
                     <input
+                      id="sync-password"
                       type="password"
                       className="cavia-text-input"
                       placeholder="••••••••••••"
@@ -999,18 +1001,22 @@ export function SettingsView({
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div className="setting-row">
                 <div className="setting-info">
-                  <strong className="setting-label">Enable Synchronization</strong>
+                  <label htmlFor="enable-cloud-sync" className="setting-label" style={{ cursor: 'pointer' }}>
+                    Enable Synchronization
+                  </label>
                   <span className="setting-desc">
                     Synchronize playlist structure, track order, and favorites with your cloud account
                   </span>
                 </div>
                 <div className="setting-control">
                   <input
+                    id="enable-cloud-sync"
                     type="checkbox"
                     className="cavia-toggle"
                     checked={syncStatus?.syncEnabled ?? false}
                     onChange={(e) => handleToggleSync(e.target.checked)}
                     disabled={!syncStatus?.authenticated}
+                    aria-label="Enable Cloud Synchronization"
                   />
                 </div>
               </div>
@@ -1137,8 +1143,9 @@ export function SettingsView({
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', maxWidth: '540px' }}>
               <div className="form-field">
-                <label>SUPABASE PROJECT URL</label>
+                <label htmlFor="supabase-url">SUPABASE PROJECT URL</label>
                 <input
+                  id="supabase-url"
                   type="text"
                   className="cavia-text-input"
                   style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}
@@ -1150,8 +1157,9 @@ export function SettingsView({
               </div>
 
               <div className="form-field">
-                <label>SUPABASE ANON KEY (PUBLIC ONLY)</label>
+                <label htmlFor="supabase-key">SUPABASE ANON KEY (PUBLIC ONLY)</label>
                 <input
+                  id="supabase-key"
                   type="password"
                   className="cavia-text-input"
                   style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}

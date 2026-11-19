@@ -403,17 +403,17 @@ export function SearchView({
                 )}
               </div>
 
-              <div className="tracks-table">
-                <div className="tracks-table-head">
-                  <span className="col-num">#</span>
-                  <span className="col-title">TITLE</span>
-                  <span className="col-artist">ARTIST</span>
-                  <span className="col-album">ALBUM</span>
-                  <span className="col-duration">TIME</span>
-                  <span className="col-action">ACTION</span>
+              <div className="tracks-table" role="table" aria-label="Search track results">
+                <div className="tracks-table-head" role="row">
+                  <span className="col-num" role="columnheader">#</span>
+                  <span className="col-title" role="columnheader">TITLE</span>
+                  <span className="col-artist" role="columnheader">ARTIST</span>
+                  <span className="col-album" role="columnheader">ALBUM</span>
+                  <span className="col-duration" role="columnheader">TIME</span>
+                  <span className="col-action" role="columnheader">ACTION</span>
                 </div>
 
-                <div className="tracks-table-body">
+                <div className="tracks-table-body" role="rowgroup">
                   {results.tracks.map((track, i) => {
                     const isCurrent = track.id === currentTrackId;
                     const isLiked = track.isLiked || likedTrackIds.has(track.id);
@@ -425,6 +425,7 @@ export function SearchView({
                         className={`track-row ${isCurrent ? 'current' : ''}`}
                         tabIndex={0}
                         role="row"
+                        aria-label={`Track ${track.trackNumber || i + 1}: ${track.title} by ${track.artist || 'Unknown Artist'}`}
                         onClick={() => onPlayTrack?.(track.id)}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' || e.key === ' ') {
@@ -433,7 +434,7 @@ export function SearchView({
                           }
                         }}
                       >
-                        <span className="col-num">
+                        <span className="col-num" role="cell">
                           {isCurrent && isPlaying ? (
                             <span className="track-playing-indicator" title="Playing">
                               ▶
@@ -443,7 +444,7 @@ export function SearchView({
                           )}
                         </span>
 
-                        <span className="col-title">
+                        <span className="col-title" role="cell">
                           {formattedArt ? (
                             <img
                               src={formattedArt}
@@ -459,11 +460,11 @@ export function SearchView({
                           <span className="track-title-text">{track.title}</span>
                         </span>
 
-                        <span className="col-artist">{track.artist || 'Unknown Artist'}</span>
-                        <span className="col-album">{track.album || 'Unknown Album'}</span>
-                        <span className="col-duration">{formatDuration(track.durationMs)}</span>
+                        <span className="col-artist" role="cell">{track.artist || 'Unknown Artist'}</span>
+                        <span className="col-album" role="cell">{track.album || 'Unknown Album'}</span>
+                        <span className="col-duration" role="cell">{formatDuration(track.durationMs)}</span>
 
-                        <span className="col-action" onClick={(e) => e.stopPropagation()}>
+                        <span className="col-action" role="cell" onClick={(e) => e.stopPropagation()}>
                           <button
                             type="button"
                             className="track-action-inline-btn"
@@ -479,6 +480,7 @@ export function SearchView({
                             className={`track-like-inline-btn ${isLiked ? 'active' : ''}`}
                             onClick={() => onToggleLike?.(track.id)}
                             aria-label={isLiked ? 'Remove from liked songs' : 'Add to liked songs'}
+                            aria-pressed={isLiked ? 'true' : 'false'}
                             title={isLiked ? 'Liked' : 'Like track'}
                           >
                             <Heart

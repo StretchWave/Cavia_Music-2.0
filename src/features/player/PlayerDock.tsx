@@ -92,55 +92,50 @@ export function PlayerDock({
               : 'Audio engine standby';
 
   return (
-    <footer className="cavia-player-dock" role="region" aria-label="Audio player">
+    <footer className="cavia-player-dock" aria-label="Audio player">
       {/* Track Information */}
-      <div
-        className="dock-track-section"
-        onClick={onOpenExpanded}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            onOpenExpanded();
-          }
-        }}
-        role="button"
-        tabIndex={0}
-        aria-label="Open expanded player"
-      >
-        <div className="dock-art-container">
-          <div className="dock-art-frame">
-            {currentTrack?.artworkUri ? (
-              <img src={formatArtworkUri(currentTrack.artworkUri)} alt="" className="dock-artwork-img" />
-            ) : (
-              <div className="dock-art-empty" aria-hidden="true">
-                <Disc3 size={20} className={isPlaying ? 'spinning' : ''} />
-              </div>
-            )}
+      <div className="dock-track-section">
+        <button
+          type="button"
+          className="dock-track-trigger"
+          onClick={onOpenExpanded}
+          title="Open expanded player"
+        >
+          <div className="dock-art-container">
+            <div className="dock-art-frame">
+              {currentTrack?.artworkUri ? (
+                <img src={formatArtworkUri(currentTrack.artworkUri)} alt="" className="dock-artwork-img" />
+              ) : (
+                <div className="dock-art-empty" aria-hidden="true">
+                  <Disc3 size={20} className={isPlaying ? 'spinning' : ''} />
+                </div>
+              )}
+            </div>
+            <span className="dock-vinyl-peeking" aria-hidden="true" />
           </div>
-          <span className="dock-vinyl-peeking" aria-hidden="true" />
-        </div>
 
-        <div className="dock-track-info">
-          <strong className="dock-track-title">
-            {currentTrack?.title ?? (playback.errorMessage ? 'Playback Halted' : 'No audio loaded')}
-          </strong>
-          <span className={`dock-track-artist ${playback.errorMessage ? 'dock-error-text' : ''}`}>
-            {playback.errorMessage
-              ? playback.errorMessage
-              : currentTrack?.artist
-              ? `${currentTrack.artist} — ${currentTrack.album}`
-              : 'Select a track to start playback'}
-          </span>
-        </div>
+          <div className="dock-track-info">
+            <strong className="dock-track-title">
+              {currentTrack?.title ?? (playback.errorMessage ? 'Playback Halted' : 'No audio loaded')}
+            </strong>
+            <span className={`dock-track-artist ${playback.errorMessage ? 'dock-error-text' : ''}`}>
+              {playback.errorMessage
+                ? playback.errorMessage
+                : currentTrack?.artist
+                ? `${currentTrack.artist} — ${currentTrack.album}`
+                : 'Select a track to start playback'}
+            </span>
+          </div>
+        </button>
 
         <button
           type="button"
           className={`dock-like-btn ${currentTrack?.isLiked ? 'active' : ''}`}
           disabled={!currentTrack || !isBackendReady}
           title={!currentTrack ? 'No active track to like' : (currentTrack.isLiked ? 'Remove from Liked' : 'Save to Liked')}
-          aria-label="Like current track"
-          onClick={(e) => {
-            e.stopPropagation();
+          aria-label={currentTrack?.isLiked ? 'Remove from Liked' : 'Save to Liked'}
+          aria-pressed={currentTrack?.isLiked ? 'true' : 'false'}
+          onClick={() => {
             if (currentTrack) onToggleLike?.(currentTrack.id);
           }}
         >
@@ -175,7 +170,7 @@ export function PlayerDock({
             className="dock-play-btn"
             disabled={!isBackendReady}
             onClick={onTogglePlay}
-            title={isPlaying ? 'Pause' : 'Play'}
+            title={!isBackendReady ? engineTooltip : (isPlaying ? 'Pause' : 'Play')}
             aria-label={isPlaying ? 'Pause' : 'Play'}
           >
             {isPlaying ? <Pause size={17} /> : <Play size={17} className="play-triangle" />}
@@ -214,6 +209,7 @@ export function PlayerDock({
               }}
               disabled={!isBackendReady || durationMs <= 0}
               label="Seek track position"
+              ariaValueText={`${formatTime(activePosition)} of ${formatTime(displayDuration)}`}
               showFill={durationMs > 0}
             />
           </div>
@@ -286,6 +282,7 @@ export function PlayerDock({
           className="dock-speed-pill"
           disabled={!isBackendReady}
           title={!isBackendReady ? 'Playback engine unavailable' : 'Click to cycle playback rate'}
+          aria-label={`Playback speed: ${playbackSpeed}x`}
           onClick={onCycleSpeed}
         >
           <span>{playbackSpeed}x</span>
@@ -323,6 +320,7 @@ export function PlayerDock({
               onCommit={(newVol) => onVolumeChange?.(newVol)}
               disabled={!isBackendReady}
               label="Adjust volume"
+              ariaValueText={isMuted ? 'Muted' : `${volume}%`}
             />
           </div>
         </div>
@@ -337,38 +335,33 @@ export function PlayerDock({
       </div>
 
       {/* Mobile Mini-Player View */}
-      <div
-        className="dock-mobile-touch-bar"
-        onClick={onOpenExpanded}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            onOpenExpanded();
-          }
-        }}
-        role="button"
-        tabIndex={0}
-        aria-label="Open expanded player"
-      >
-        <div className="mobile-mini-art">
-          {currentTrack?.artworkUri ? (
-            <img src={formatArtworkUri(currentTrack.artworkUri)} alt="" className="mobile-mini-art-img" />
-          ) : (
-            <Headphones size={16} />
-          )}
-        </div>
-        <div className="mobile-mini-info">
-          <strong>{currentTrack?.title ?? 'No audio loaded'}</strong>
-          <span>{currentTrack?.artist ?? 'Select a track to play'}</span>
-        </div>
-        <div className="mobile-mini-actions" onClick={(e) => e.stopPropagation()}>
+      <div className="dock-mobile-touch-bar">
+        <button
+          type="button"
+          className="mobile-mini-info-btn"
+          onClick={onOpenExpanded}
+          title="Open expanded player"
+        >
+          <div className="mobile-mini-art">
+            {currentTrack?.artworkUri ? (
+              <img src={formatArtworkUri(currentTrack.artworkUri)} alt="" className="mobile-mini-art-img" />
+            ) : (
+              <Headphones size={16} />
+            )}
+          </div>
+          <div className="mobile-mini-info">
+            <strong>{currentTrack?.title ?? 'No audio loaded'}</strong>
+            <span>{currentTrack?.artist ?? 'Select a track to play'}</span>
+          </div>
+        </button>
+        <div className="mobile-mini-actions">
           <button
             type="button"
             className="mobile-mini-play"
             disabled={!isBackendReady}
             onClick={onTogglePlay}
-            title={engineTooltip}
-            aria-label="Play/Pause"
+            title={isPlaying ? 'Pause' : 'Play'}
+            aria-label={isPlaying ? 'Pause' : 'Play'}
           >
             {isPlaying ? <Pause size={15} /> : <Play size={15} />}
           </button>
