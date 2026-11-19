@@ -907,3 +907,63 @@ Milestone 5.1 accomplishes a comprehensive visual consistency, design-quality re
 - **Rust Test Suite:** 197 passed; 0 failed; 5 ignored (physical audio device); 1 smoke passed.
 - **Rust Formatting:** `cargo fmt -- --check` clean.
 - **Frontend Production Build:** `npm run build` completed in 1.61s with zero errors or warnings.
+
+---
+
+## 9. Milestone 5.2 Implementation: Responsive Layout & Multi-Viewport Optimization
+
+### Objective & Architectural Principles
+Milestone 5.2 ensures that Cavia Music 2.0 feels purposefully designed and balanced across mobile devices, small tablets, laptops, and large desktop screens without relying on naive downscaling or compromising the obsidian/aged ivory/restrained vermilion design identity:
+- **Zero Horizontal Page Overflow:** Eliminates unintended horizontal scroll across all major screens (`document.documentElement.scrollWidth === document.documentElement.clientWidth`).
+- **Mobile as a Distinct Layout:** Adapts navigation, table rows, artwork grids, and player docks into touch-friendly, space-conscious mobile compositions rather than compressed desktop layouts.
+- **Intentional Tablet Behavior:** Implements a 68px icon-rail sidebar mode between 769px and 1024px, preserving main-panel content width and preventing sidebar bloat.
+- **Safe Area Inset Protection:** Added `viewport-fit=cover` to `<meta name="viewport">` and integrated CSS `env(safe-area-inset-*)` into topbar, bottom navigation, modals, and player dock.
+- **Bounded Horizontal Containers:** Horizontally scrollable tab strips (`.cavia-tabs`, `.settings-tabs-wrap`) are properly bounded without triggering page-level scrolling.
+
+### Core Enhancements Implemented
+1. **Application Shell & Navigation:**
+   - **Desktop (≥1025px):** 220px fixed sidebar, spacious 1180px centered content view, 3-column PlayerDock.
+   - **Tablet (769px–1024px):** Sidebar converts into a compact 68px icon rail (hiding text captions, counts, integrity badge, and colophon); PlayerDock grid transitions to `minmax(160px, 1fr) minmax(240px, 1.3fr) auto`.
+   - **Mobile (≤768px):** Desktop sidebar hidden; bottom navigation pinned above safe areas (`bottom: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom, 0px))`); topbar with safe-area padding (`env(safe-area-inset-top, 0px)`); subpage headers stack vertically.
+2. **Track Lists & Tables (`TracksView`, `LikedTracksView`, `PlaylistDetailModal`):**
+   - Transformed rigid 6-column tables into responsive 4-column compact rows (`#`, `Art+Title+Subtitle`, `Time`, `Actions`) on viewports ≤768px.
+   - Desktop separate "Artist" and "Album" columns are hidden on mobile, replaced by an integrated `.track-subtitle-mobile` displaying `{artist} · {album}` with text truncation.
+   - Preserved all track actions (inline like, play, context menu) with expanded touch targets (36–40px).
+3. **Artwork & Card Grids:**
+   - **Albums:** 2-column mobile grid (`minmax(136px, 1fr)`), 3–4 column tablet grid (`minmax(160px, 1fr)`), responsive multi-column desktop grid.
+   - **Artists:** 2-column mobile grid (`minmax(126px, 1fr)`), circular avatars adapt proportionally.
+   - **Playlists:** Adaptive card columns with truncated titles and metadata.
+4. **PlayerDock & ExpandedPlayer:**
+   - **PlayerDock:** On mobile (≤768px), secondary volume and time indicators are hidden; primary play/pause and skip controls remain prominent with 40px touch targets; dock is anchored above bottom navigation.
+   - **ExpandedPlayer:** Bounded container with `overflow-x: hidden;`; sleeve stage scales fluidly (`max-width: min(340px, 80vw)`); spinning vinyl disc tucks cleanly behind sleeve on mobile; header engine badge hidden to avoid crowding header controls; audio engine note wraps without overflowing.
+5. **Drawers & Modals (`QueueDrawer`, `LyricsDrawer`, `PlaylistDetailModal`):**
+   - On viewports ≤768px, slide-out desktop drawers transform into 85dvh bottom sheets with rounded top corners, touch handles, and backdrop dismiss.
+   - Modal dialogs resize to 92vw with safe-area bottom padding.
+
+### 12-Viewport Test Matrix & Verification Results
+Comprehensive automated audit executed against live application via WebView2 Chrome DevTools Protocol (CDP) across 12 viewports and 12 screens:
+
+| Category | Viewport | Shell Mode | Overflows Detected | Touch Targets Validated |
+|---|---|---|---|---|
+| Compact Mobile | 360 × 800 | Bottom Nav + Mobile MiniDock | **0** | Pass (≥36px) |
+| Standard Mobile | 390 × 844 | Bottom Nav + Mobile MiniDock | **0** | Pass (≥36px) |
+| Large Mobile | 430 × 932 | Bottom Nav + Mobile MiniDock | **0** | Pass (≥36px) |
+| Intermediate Mobile | 500 × 800 | Bottom Nav + Mobile MiniDock | **0** | Pass (≥36px) |
+| Small Tablet | 600 × 900 | Bottom Nav + Expanded Shell | **0** | Pass (≥36px) |
+| Tablet Portrait | 768 × 1024 | Bottom Nav / Transition | **0** | Pass (≥36px) |
+| Intermediate Tablet | 900 × 700 | 68px Icon Rail Sidebar | **0** | Pass |
+| Tablet Landscape | 1024 × 768 | 68px Icon Rail Sidebar | **0** | Pass |
+| Intermediate Laptop | 1100 × 800 | 220px Full Sidebar | **0** | Pass |
+| Small Laptop | 1280 × 800 | 220px Full Sidebar | **0** | Pass |
+| Standard Desktop | 1440 × 900 | 220px Full Sidebar | **0** | Pass |
+| Large Desktop | 1920 × 1080 | 220px Full Sidebar | **0** | Pass |
+
+### Test & Compilation Results
+- **Node Contract Suite:** 39 passed; 0 failed (`test/*.test.mjs`).
+- **Rust Checks:** `cargo check --manifest-path src-tauri/Cargo.toml` passed cleanly.
+- **Rust Formatting:** `cargo fmt --check --manifest-path src-tauri/Cargo.toml` clean.
+- **Frontend Production Build:** `npm run build` compiled cleanly in 518ms.
+- **Evidence:** Full 12-viewport screenshot captures archived in `scratch/screenshots/verified_m52/` and structured report in `verification_results.json`.
+
+### Known Limitations
+- Emulated WebView2 viewport testing verified CSS media queries, layout constraints, and safe-area variables. Physical touch gestures, mobile notch rendering, and hardware-specific edge-to-edge behavior on physical Android and iOS devices are deferred to native device verification.

@@ -51,7 +51,7 @@
 
 ## Milestone 5 — Design and release quality
 - [x] Final design pass across all screens (Milestone 5.1: comprehensive visual consistency and design-quality pass across all views; standardized container max-width to 1180px; tactile interactive hover lifts, illuminated borders, and focus-visible states on album, artist, and playlist cards; restored 360px physical vinyl sleeve stage and spinning grooved disc in ExpandedPlayer; eliminated stray styling in Settings Account & Sync and PlaylistDetailModal in favor of authoritative obsidian / aged ivory / restrained vermilion design system tokens; 197 Rust tests, 1 smoke test, 39 Node contract tests passing; verified across 1440x900 and 1920x1080 desktop viewports)
-- [ ] UI screenshot review at mobile/tablet/desktop sizes
+- [x] UI screenshot review at mobile/tablet/desktop sizes (Milestone 5.2: Responsive layout & multi-viewport optimization across 12 viewports from 360×800 to 1920×1080; zero horizontal page overflows; mobile-first track table reorganization into title + subtitle; 68px tablet icon-rail sidebar; 85dvh bottom sheets; mobile-optimized PlayerDock and bounded ExpandedPlayer sleeve; viewport-fit=cover safe area insets; 39 Node contract tests passing; verified via live Tauri application and CDP)
 - [ ] Keyboard, mouse, touch, accessibility and reduced-motion audits
 - [ ] Performance/memory/startup benchmarks
 - [ ] Clean-machine installer and mobile release builds

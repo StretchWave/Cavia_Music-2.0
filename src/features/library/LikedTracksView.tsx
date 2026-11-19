@@ -120,7 +120,13 @@ export function LikedTracksView({
                         loading="lazy"
                       />
                     )}
-                    <span className="track-title-text">{track.title}</span>
+                    <span className="track-meta-cell">
+                      <span className="track-title-text">{track.title}</span>
+                      <span className="track-subtitle-mobile">
+                        {track.artist || 'Unknown Artist'}
+                        {track.album ? ` · ${track.album}` : ''}
+                      </span>
+                    </span>
                   </span>
                   <span className="col-artist">{track.artist || 'Unknown Artist'}</span>
                   <span className="col-album">{track.album || 'Unknown Album'}</span>

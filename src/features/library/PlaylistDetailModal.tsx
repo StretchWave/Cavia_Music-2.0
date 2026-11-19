@@ -342,7 +342,13 @@ export function PlaylistDetailModal({
                               className="track-row-art"
                             />
                           )}
-                          <span className="track-title-text">{track.title}</span>
+                          <span className="track-meta-cell">
+                            <span className="track-title-text">{track.title}</span>
+                            <span className="track-subtitle-mobile">
+                              {track.artist || 'Unknown Artist'}
+                              {track.album ? ` · ${track.album}` : ''}
+                            </span>
+                          </span>
                           {isUnplayable && (
                             <span
                               className="track-unavailable-badge"
