@@ -148,6 +148,34 @@ export async function listenPlaybackState(
   });
 }
 
+// Live playback position publisher for high-frequency subscriber components
+let currentPositionPayload: PositionUpdatePayload = {
+  positionMs: 0,
+  durationMs: 0,
+};
+const positionListeners = new Set<(pos: PositionUpdatePayload) => void>();
+
+export function subscribePlaybackPosition(
+  callback: (pos: PositionUpdatePayload) => void
+): () => void {
+  positionListeners.add(callback);
+  callback(currentPositionPayload);
+  return () => {
+    positionListeners.delete(callback);
+  };
+}
+
+export function notifyPlaybackPosition(pos: PositionUpdatePayload): void {
+  currentPositionPayload = pos;
+  for (const listener of positionListeners) {
+    listener(pos);
+  }
+}
+
+export function getCurrentPlaybackPosition(): PositionUpdatePayload {
+  return currentPositionPayload;
+}
+
 export async function listenPlaybackPosition(
   callback: (pos: PositionUpdatePayload) => void
 ): Promise<UnlistenFn> {

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { memo, useState, useEffect } from 'react';
 import {
   AlertTriangle,
   AudioWaveform,
@@ -58,7 +58,7 @@ interface SettingsViewProps {
 
 type SettingsSection = 'appearance' | 'audio' | 'library' | 'providers' | 'account' | 'about';
 
-export function SettingsView({
+export const SettingsView = memo(function SettingsView({
   health,
   density,
   onDensityChange,
@@ -1404,4 +1404,4 @@ export function SettingsView({
       </Modal>
     </section>
   );
-}
+});

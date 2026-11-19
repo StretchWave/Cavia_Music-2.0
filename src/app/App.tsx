@@ -45,6 +45,7 @@ import {
   listenPlaybackPosition,
   listenPlaybackState,
   nextTrack,
+  notifyPlaybackPosition,
   playPause,
   playTrack,
   previousTrack,
@@ -240,6 +241,12 @@ export function App() {
     getPlaybackState()
       .then((state) => {
         if (state) {
+          notifyPlaybackPosition({
+            positionMs: state.positionMs,
+            durationMs: state.durationMs,
+            trackId: state.currentTrack?.id,
+            generation: state.generation,
+          });
           setPlayback((prev) => ({
             ...prev,
             status: state.status,
@@ -260,6 +267,12 @@ export function App() {
       .catch((err) => console.error('Failed to get initial playback state:', err));
 
     listenPlaybackState((snap) => {
+      notifyPlaybackPosition({
+        positionMs: snap.positionMs,
+        durationMs: snap.durationMs,
+        trackId: snap.currentTrack?.id,
+        generation: snap.generation,
+      });
       setPlayback((prev) => {
         if (snap.generation !== undefined && prev.generation !== undefined && snap.generation < prev.generation) {
           return prev;
@@ -285,23 +298,9 @@ export function App() {
     });
 
     listenPlaybackPosition((pos) => {
-      setPlayback((prev) => {
-        // Discard stale position events from prior generations, previous tracks, or idle player
-        if (pos.generation !== undefined && prev.generation !== undefined && pos.generation < prev.generation) {
-          return prev;
-        }
-        if (pos.trackId && prev.currentTrack?.id && pos.trackId !== prev.currentTrack.id) {
-          return prev;
-        }
-        if (!prev.currentTrack || prev.status === 'stopped' || prev.status === 'idle') {
-          return prev;
-        }
-        return {
-          ...prev,
-          positionMs: pos.positionMs,
-          durationMs: pos.durationMs > 0 ? pos.durationMs : prev.durationMs,
-        };
-      });
+      // High-frequency position ticks notify subscriber player components directly,
+      // preventing continuous root App and subview re-renders during playback.
+      notifyPlaybackPosition(pos);
     }).then((fn) => {
       unlistenPos = fn;
     });
@@ -320,7 +319,7 @@ export function App() {
     };
   }, []);
 
-  const handleRetryShutdown = async () => {
+  const handleRetryShutdown = useCallback(async () => {
     try {
       setIsRetryingShutdown(true);
       await retryShutdown();
@@ -330,17 +329,17 @@ export function App() {
     } finally {
       setIsRetryingShutdown(false);
     }
-  };
+  }, []);
 
-  const handleForceExit = async () => {
+  const handleForceExit = useCallback(async () => {
     try {
       await forceExit();
     } catch (err) {
       console.error('Failed to force exit:', err);
     }
-  };
+  }, []);
 
-  const handleImportFolder = async () => {
+  const handleImportFolder = useCallback(async () => {
     try {
       setScanError(null);
       const selected = await pickMusicFolder();
@@ -374,17 +373,17 @@ export function App() {
       setScanError(err instanceof Error ? err.message : String(err));
       setTimeout(() => setScanError(null), 8000);
     }
-  };
+  }, [refreshLibrary]);
 
-  const handleCancelScan = async () => {
+  const handleCancelScan = useCallback(async () => {
     try {
       await cancelScan();
     } catch (err) {
       console.error('Error cancelling scan:', err);
     }
-  };
+  }, []);
 
-  const handleToggleLike = async (trackId: string) => {
+  const handleToggleLike = useCallback(async (trackId: string) => {
     try {
       const isLiked = await toggleLikedTrack(trackId);
       setTracks((prev) =>
@@ -394,9 +393,9 @@ export function App() {
     } catch (err) {
       console.error('Error toggling like:', err);
     }
-  };
+  }, [refreshLibrary]);
 
-  const handleCreatePlaylist = async (name: string, description: string) => {
+  const handleCreatePlaylist = useCallback(async (name: string, description: string) => {
     try {
       const created = await createPlaylist(name, description);
       setPlaylists((prev) => [created, ...prev]);
@@ -404,9 +403,9 @@ export function App() {
     } catch (err) {
       console.error('Error creating playlist in SQLite:', err);
     }
-  };
+  }, [refreshLibrary]);
 
-  const handleDeletePlaylist = async (playlistId: string) => {
+  const handleDeletePlaylist = useCallback(async (playlistId: string) => {
     try {
       await deletePlaylist(playlistId);
       setPlaylists((prev) => prev.filter((p) => p.id !== playlistId));
@@ -414,7 +413,7 @@ export function App() {
     } catch (err) {
       console.error('Error deleting playlist from SQLite:', err);
     }
-  };
+  }, [refreshLibrary]);
 
   const handleOpenAddToPlaylist = useCallback((track: Track) => {
     setAddToPlaylistData({
@@ -442,7 +441,7 @@ export function App() {
   );
 
   // Playback transport handlers (native Rust backend authoritative)
-  const handleTogglePlay = async () => {
+  const handleTogglePlay = useCallback(async () => {
     try {
       await playPause();
     } catch (err) {
@@ -450,9 +449,9 @@ export function App() {
       console.error('Play/Pause failed:', msg);
       showPlaybackError(`Playback failed: ${msg}`);
     }
-  };
+  }, [showPlaybackError]);
 
-  const handleRetryDevice = async () => {
+  const handleRetryDevice = useCallback(async () => {
     try {
       await retryAudioDevice();
       const nextHealth = await getPlatformHealth();
@@ -462,9 +461,9 @@ export function App() {
       console.error('Retry audio device failed:', msg);
       showPlaybackError(`Device retry failed: ${msg}`);
     }
-  };
+  }, [showPlaybackError]);
 
-  const handlePlayTrack = async (trackId: string) => {
+  const handlePlayTrack = useCallback(async (trackId: string) => {
     try {
       await setQueue(tracks.map((t) => t.id), trackId);
     } catch (err) {
@@ -472,9 +471,9 @@ export function App() {
       console.error('Play track failed:', msg);
       showPlaybackError(`Playback failed: ${msg}`);
     }
-  };
+  }, [showPlaybackError, tracks]);
 
-  const handlePlayAll = async () => {
+  const handlePlayAll = useCallback(async () => {
     try {
       if (tracks.length > 0) {
         await setQueue(tracks.map((t) => t.id));
@@ -484,9 +483,9 @@ export function App() {
       console.error('Play all failed:', msg);
       showPlaybackError(`Playback failed: ${msg}`);
     }
-  };
+  }, [showPlaybackError, tracks]);
 
-  const handleShuffleAll = async () => {
+  const handleShuffleAll = useCallback(async () => {
     try {
       if (tracks.length > 0) {
         await setShuffle(true);
@@ -497,9 +496,9 @@ export function App() {
       console.error('Shuffle all failed:', msg);
       showPlaybackError(`Shuffle all failed: ${msg}`);
     }
-  };
+  }, [showPlaybackError, tracks]);
 
-  const handlePlayLikedTrack = async (trackId: string) => {
+  const handlePlayLikedTrack = useCallback(async (trackId: string) => {
     try {
       await setQueue(likedTracks.map((t) => t.id), trackId);
     } catch (err) {
@@ -507,9 +506,9 @@ export function App() {
       console.error('Play liked track failed:', msg);
       showPlaybackError(`Playback failed: ${msg}`);
     }
-  };
+  }, [likedTracks, showPlaybackError]);
 
-  const handlePlayAllLiked = async () => {
+  const handlePlayAllLiked = useCallback(async () => {
     try {
       if (likedTracks.length > 0) {
         await setQueue(likedTracks.map((t) => t.id));
@@ -519,9 +518,9 @@ export function App() {
       console.error('Play all liked failed:', msg);
       showPlaybackError(`Playback failed: ${msg}`);
     }
-  };
+  }, [likedTracks, showPlaybackError]);
 
-  const handleShuffleAllLiked = async () => {
+  const handleShuffleAllLiked = useCallback(async () => {
     try {
       if (likedTracks.length > 0) {
         await setShuffle(true);
@@ -532,9 +531,9 @@ export function App() {
       console.error('Shuffle all liked failed:', msg);
       showPlaybackError(`Shuffle all liked failed: ${msg}`);
     }
-  };
+  }, [likedTracks, showPlaybackError]);
 
-  const handlePlayPlaylistTracks = async (playlistTracks: Track[], startIndex = 0, shuffle = false) => {
+  const handlePlayPlaylistTracks = useCallback(async (playlistTracks: Track[], startIndex = 0, shuffle = false) => {
     try {
       if (playlistTracks.length > 0) {
         if (shuffle) await setShuffle(true);
@@ -546,7 +545,7 @@ export function App() {
       console.error('Play playlist tracks failed:', msg);
       showPlaybackError(`Playback failed: ${msg}`);
     }
-  };
+  }, [showPlaybackError]);
 
   const handlePlayAlbum = useCallback(
     async (album: Album) => {
@@ -560,7 +559,7 @@ export function App() {
         await handlePlayPlaylistTracks(albumTracks, 0, false);
       }
     },
-    [tracks]
+    [handlePlayPlaylistTracks, tracks]
   );
 
   const handlePlayArtist = useCallback(
@@ -574,7 +573,7 @@ export function App() {
         await handlePlayPlaylistTracks(artistTracks, 0, false);
       }
     },
-    [tracks]
+    [handlePlayPlaylistTracks, tracks]
   );
 
   const [routeAnnouncement, setRouteAnnouncement] = useState('');
@@ -624,7 +623,7 @@ export function App() {
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
   }, [handleTogglePlay]);
 
-  const handleNext = async () => {
+  const handleNext = useCallback(async () => {
     try {
       await nextTrack();
     } catch (err) {
@@ -632,9 +631,9 @@ export function App() {
       console.error('Next track failed:', msg);
       showPlaybackError(`Next track failed: ${msg}`);
     }
-  };
+  }, [showPlaybackError]);
 
-  const handlePrevious = async () => {
+  const handlePrevious = useCallback(async () => {
     try {
       await previousTrack();
     } catch (err) {
@@ -642,19 +641,28 @@ export function App() {
       console.error('Previous track failed:', msg);
       showPlaybackError(`Previous track failed: ${msg}`);
     }
-  };
+  }, [showPlaybackError]);
 
-  const handleSeek = async (positionMs: number) => {
-    try {
-      await seek(positionMs, playback.generation);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('Seek failed:', msg);
-      showPlaybackError(`Seek failed: ${msg}`);
-    }
-  };
+  const handleSeek = useCallback(
+    async (positionMs: number) => {
+      try {
+        notifyPlaybackPosition({
+          positionMs,
+          durationMs: playback.durationMs,
+          trackId: playback.currentTrack?.id,
+          generation: playback.generation,
+        });
+        await seek(positionMs, playback.generation);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('Seek failed:', msg);
+        showPlaybackError(`Seek failed: ${msg}`);
+      }
+    },
+    [playback.currentTrack?.id, playback.durationMs, playback.generation, showPlaybackError]
+  );
 
-  const handleVolume = async (vol: number) => {
+  const handleVolume = useCallback(async (vol: number) => {
     try {
       await setVolume(vol);
     } catch (err) {
@@ -662,9 +670,9 @@ export function App() {
       console.error('Set volume failed:', msg);
       showPlaybackError(`Volume change failed: ${msg}`);
     }
-  };
+  }, [showPlaybackError]);
 
-  const handleToggleMute = async () => {
+  const handleToggleMute = useCallback(async () => {
     try {
       await toggleMute();
     } catch (err) {
@@ -672,9 +680,9 @@ export function App() {
       console.error('Toggle mute failed:', msg);
       showPlaybackError(`Toggle mute failed: ${msg}`);
     }
-  };
+  }, [showPlaybackError]);
 
-  const handleCycleRepeat = async () => {
+  const handleCycleRepeat = useCallback(async () => {
     try {
       const next = playback.repeatMode === 'off' ? 'all' : playback.repeatMode === 'all' ? 'one' : 'off';
       await setRepeatMode(next);
@@ -683,9 +691,9 @@ export function App() {
       console.error('Cycle repeat failed:', msg);
       showPlaybackError(`Repeat mode change failed: ${msg}`);
     }
-  };
+  }, [playback.repeatMode, showPlaybackError]);
 
-  const handleToggleShuffle = async () => {
+  const handleToggleShuffle = useCallback(async () => {
     try {
       await setShuffle(!playback.isShuffle);
     } catch (err) {
@@ -693,9 +701,9 @@ export function App() {
       console.error('Toggle shuffle failed:', msg);
       showPlaybackError(`Shuffle toggle failed: ${msg}`);
     }
-  };
+  }, [playback.isShuffle, showPlaybackError]);
 
-  const handleCycleSpeed = async () => {
+  const handleCycleSpeed = useCallback(async () => {
     try {
       const speeds = [1.0, 1.25, 1.5, 2.0, 0.75];
       const curIdx = speeds.indexOf(playback.playbackSpeed);
@@ -706,9 +714,9 @@ export function App() {
       console.error('Set speed failed:', msg);
       showPlaybackError(`Playback speed change failed: ${msg}`);
     }
-  };
+  }, [playback.playbackSpeed, showPlaybackError]);
 
-  const handleClearQueue = async () => {
+  const handleClearQueue = useCallback(async () => {
     try {
       await clearQueue();
     } catch (err) {
@@ -716,9 +724,9 @@ export function App() {
       console.error('Clear queue failed:', msg);
       showPlaybackError(`Clear queue failed: ${msg}`);
     }
-  };
+  }, [showPlaybackError]);
 
-  const handleRemoveQueueTrack = async (trackId: string, index?: number) => {
+  const handleRemoveQueueTrack = useCallback(async (trackId: string, index?: number) => {
     try {
       if (typeof index === 'number') {
         await removeFromQueueByIndex(index);
@@ -730,9 +738,9 @@ export function App() {
       console.error('Remove from queue failed:', msg);
       showPlaybackError(`Remove track failed: ${msg}`);
     }
-  };
+  }, [showPlaybackError]);
 
-  const handleReorderQueue = async (fromIndex: number, toIndex: number) => {
+  const handleReorderQueue = useCallback(async (fromIndex: number, toIndex: number) => {
     try {
       await reorderQueue(fromIndex, toIndex);
     } catch (err) {
@@ -740,9 +748,9 @@ export function App() {
       console.error('Reorder queue failed:', msg);
       showPlaybackError(`Reorder queue failed: ${msg}`);
     }
-  };
+  }, [showPlaybackError]);
 
-  const handleSelectQueueTrack = async (trackId: string) => {
+  const handleSelectQueueTrack = useCallback(async (trackId: string) => {
     try {
       await playTrack(trackId);
     } catch (err) {
@@ -750,7 +758,7 @@ export function App() {
       console.error('Select queue track failed:', msg);
       showPlaybackError(`Playback failed: ${msg}`);
     }
-  };
+  }, [showPlaybackError]);
 
   const isBackendReady = health?.audio_backend === 'ready';
 
@@ -778,6 +786,11 @@ export function App() {
     { label: 'Artists', page: 'artists' as const, icon: AudioWaveform, count: artists.length },
     { label: 'Liked Tracks', page: 'liked' as const, icon: Heart, count: summary?.liked_tracks ?? likedTracks.length },
   ];
+
+  const likedTrackIds = useMemo(
+    () => new Set(likedTracks.map((t) => t.id)),
+    [likedTracks]
+  );
 
   return (
     <div className={`cavia-app-frame ${density === 'compact' ? 'density-compact' : ''} show-kanji`}>
@@ -1103,7 +1116,7 @@ export function App() {
               onPlaylistUpdated={refreshLibrary}
               onDeletePlaylist={handleDeletePlaylist}
               allTracks={tracks}
-              likedTrackIds={new Set(likedTracks.map((t) => t.id))}
+              likedTrackIds={likedTrackIds}
               currentTrackId={playback.currentTrack?.id}
               isPlaying={playback.status === 'playing'}
             />

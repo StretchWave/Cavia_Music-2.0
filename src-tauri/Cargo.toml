@@ -15,6 +15,11 @@ name = "cavia-music"
 path = "src/main.rs"
 test = false
 
+[[bin]]
+name = "cavia-bench"
+path = "src/bin/benchmarks.rs"
+test = false
+
 [build-dependencies]
 tauri-build = { version = "2.7.2", features = [] }
 
@@ -47,3 +52,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 [features]
 default = []
 desktop-mpv = ["dep:rsmpv"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

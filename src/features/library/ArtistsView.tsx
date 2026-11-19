@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { AudioWaveform, FolderPlus } from 'lucide-react';
 import { EmptyState } from '../../components/EmptyState';
 import { Button } from '../../components/Button';
@@ -10,7 +11,7 @@ interface ArtistsViewProps {
   onPlayArtist?: (artist: Artist) => void;
 }
 
-export function ArtistsView({ artists, onImportFolder, isScanning, onPlayArtist }: ArtistsViewProps) {
+export const ArtistsView = memo(function ArtistsView({ artists, onImportFolder, isScanning, onPlayArtist }: ArtistsViewProps) {
   return (
     <section className="cavia-subpage artists-page">
       <div className="subpage-header">
@@ -95,4 +96,4 @@ export function ArtistsView({ artists, onImportFolder, isScanning, onPlayArtist 
       )}
     </section>
   );
-}
+});

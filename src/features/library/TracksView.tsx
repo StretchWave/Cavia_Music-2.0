@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { FolderPlus, Heart, ListPlus, Music2, Play, Shuffle } from 'lucide-react';
 import { EmptyState } from '../../components/EmptyState';
 import { Button } from '../../components/Button';
@@ -18,7 +19,7 @@ interface TracksViewProps {
   onAddToPlaylist?: (track: Track) => void;
 }
 
-export function TracksView({
+export const TracksView = memo(function TracksView({
   tracks,
   isBackendReady,
   onToggleLike,
@@ -201,4 +202,4 @@ export function TracksView({
       )}
     </section>
   );
-}
+});

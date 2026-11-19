@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { Disc3, FolderPlus, ListPlus } from 'lucide-react';
 import { EmptyState } from '../../components/EmptyState';
 import { Button } from '../../components/Button';
@@ -12,7 +13,7 @@ interface AlbumsViewProps {
   onPlayAlbum?: (album: Album) => void;
 }
 
-export function AlbumsView({
+export const AlbumsView = memo(function AlbumsView({
   albums,
   onImportFolder,
   isScanning,
@@ -132,4 +133,4 @@ export function AlbumsView({
       )}
     </section>
   );
-}
+});

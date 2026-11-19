@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { usePlaybackPosition } from '../../lib/usePlaybackPosition';
 import {
   AlertCircle,
   Disc,
@@ -47,9 +48,9 @@ export function LyricsDrawer({
   const programmaticScrollRef = useRef<boolean>(false);
   const programmaticScrollTimerRef = useRef<number | null>(null);
 
-  // App.tsx owns the single authoritative playback position; the drawer must
-  // not subscribe to playback events independently.
-  const currentPositionMs = playbackPositionMs ?? 0;
+  // Subscribe directly to live position to decouple updates from parent App re-renders
+  const livePos = usePlaybackPosition(playbackPositionMs ?? 0, trackDurationMs ?? 0);
+  const currentPositionMs = livePos.positionMs || (playbackPositionMs ?? 0);
 
   // Focus management and keyboard escape handler
   useEffect(() => {

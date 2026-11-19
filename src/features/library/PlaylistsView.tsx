@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import {
   Calendar,
   Disc3,
@@ -22,7 +22,7 @@ interface PlaylistsViewProps {
   onPlaylistUpdated?: () => void;
 }
 
-export function PlaylistsView({
+export const PlaylistsView = memo(function PlaylistsView({
   playlists,
   onCreatePlaylist,
   onDeletePlaylist,
@@ -206,4 +206,4 @@ export function PlaylistsView({
       />
     </section>
   );
-}
+});

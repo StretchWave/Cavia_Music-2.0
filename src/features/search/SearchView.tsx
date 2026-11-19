@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type KeyboardEvent } from 'react';
+import { memo, useState, useEffect, useRef, type KeyboardEvent } from 'react';
 import {
   Clock,
   Disc3,
@@ -42,7 +42,7 @@ export interface SearchViewProps {
   isPlaying?: boolean;
 }
 
-export function SearchView({
+export const SearchView = memo(function SearchView({
   isBackendReady = true,
   onPlayTrack,
   onPlayTracks,
@@ -742,4 +742,4 @@ export function SearchView({
       )}
     </section>
   );
-}
+});

@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import {
   Disc3,
   FolderPlus,
@@ -22,7 +23,7 @@ interface LibraryViewProps {
   isScanning?: boolean;
 }
 
-export function LibraryView({
+export const LibraryView = memo(function LibraryView({
   summary,
   health,
   connectionError,
@@ -301,5 +302,5 @@ export function LibraryView({
       )}
     </div>
   );
-}
+});
 

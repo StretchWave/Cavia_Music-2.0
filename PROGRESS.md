@@ -1041,3 +1041,81 @@ Automated WCAG 2.2 accessibility verification was executed across all 15 applica
 
 ### Known Limitations
 - Physical touch screen reader testing (iOS VoiceOver and Android TalkBack gestures) is deferred to native device verification. All desktop and WebView2 screen reader semantics and keyboard flows are verified.
+
+---
+
+## 15. Milestone 5.4: Performance Profiling, Benchmarking and Optimization
+
+Milestone 5.4 established an empirical, reproducible performance baseline for Cavia Music 2.0 across its native Rust engine, SQLite database, audio engine, lyrics parser, and React 19 frontend. Three material architectural bottlenecks were identified and resolved with justified, verified optimizations:
+
+### 1. Database Index Optimization & Scanner Acceleration ($O(N) \to O(\log N)$)
+- **Bottleneck Identified:** The audio scanner ran two queries per discovered audio file to detect existing or moved tracks: `SELECT ... WHERE content_hash = ?` and `SELECT ... WHERE file_uri = ?`. Because neither column had an index, scanning a 2,000-file folder against a 50,000-track library executed 4,000 full table scans requiring ~30 seconds of pure database scan time.
+- **Optimization:** Added forward-only migration `src-tauri/migrations/0006_performance_indexes.sql`:
+  - `idx_tracks_content_hash ON tracks(content_hash)`
+  - `idx_tracks_file_uri ON tracks(file_uri)`
+  - `idx_tracks_active_title ON tracks(title COLLATE NOCASE) WHERE is_deleted = 0`
+  - `idx_tracks_active_album ON tracks(album COLLATE NOCASE, artist COLLATE NOCASE) WHERE is_deleted = 0`
+  - `idx_tracks_active_artist ON tracks(artist COLLATE NOCASE) WHERE is_deleted = 0`
+- **Result:**
+  - `scanner_lookup (content_hash)` at 50,000 tracks dropped from **5.22 ms** to **0.06 ms** (**98.8% faster**).
+  - `scanner_lookup (file_uri)` at 50,000 tracks dropped from **9.56 ms** to **0.04 ms** (**99.6% faster**).
+  - Folder import duplicate check time for 2,000 tracks against a 50k library dropped from **~29.5 seconds to 0.20 seconds** (**147× speedup**).
+  - `EXPLAIN QUERY PLAN` confirms SQLite now executes `SEARCH tracks USING INDEX` rather than full table scans.
+
+### 2. Frontend Playback Position Render Decoupling
+- **Bottleneck Identified:** Rust emits `playback:position` IPC updates every ~250ms during playback. Storing `positionMs` in `playback` inside `App.tsx` triggered root `App` re-renders 4 times every second, causing complete virtual DOM diffing of large track lists and search results. Furthermore, unstable view handler functions and `new Set(likedTracks.map(...))` in `SearchView` defeated shallow prop comparison.
+- **Optimization:**
+  - Implemented `src/lib/usePlaybackPosition.ts` backed by an in-memory pub-sub store (`subscribePlaybackPosition` / `notifyPlaybackPosition`) in `src/lib/playback.ts`.
+  - Updated `PlayerDock`, `ExpandedPlayer`, and `LyricsDrawer` to subscribe directly to `usePlaybackPosition`.
+  - `App.tsx` routes `playback:position` events to `notifyPlaybackPosition` without triggering `setPlayback`.
+  - Wrapped all 8 top-level view components (`TracksView`, `AlbumsView`, `ArtistsView`, `PlaylistsView`, `LikedTracksView`, `SearchView`, `SettingsView`, `LibraryView`) in `React.memo`.
+  - Wrapped all view event handlers in `useCallback` and memoized `likedTrackIds` with `useMemo`.
+- **Result:** During active audio playback, steady-state root `App` re-renders dropped from **4 per second to 0**, isolating DOM updates exclusively to the player scrubber thumb and timecode text.
+
+### 3. Native Binary Footprint & Release Compiler Optimizations
+- **Optimization:** Configured aggressive release profile in `src-tauri/Cargo.toml`:
+  ```toml
+  [profile.release]
+  opt-level = 3
+  lto = "thin"
+  codegen-units = 1
+  panic = "abort"
+  strip = true
+  ```
+- **Result:**
+  - Native binary `cavia-music.exe` shrank from **34.72 MB** to **13.00 MB** (**62.6% reduction**).
+  - Frontend production bundle built with Vite: **395.80 kB JS** (110.01 kB gzip) and **73.16 kB CSS** (13.02 kB gzip).
+
+### 4. Empirical Benchmark Baseline Summary
+
+| Operation / Query | Scale | Pre-Optimization Median | Post-Optimization Median | P95 Latency | Improvement |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`scanner_lookup (file_uri)`** | N=10,000 | 2.70 ms | **0.03 ms** | 0.08 ms | **98.9% faster** |
+| **`scanner_lookup (content_hash)`** | N=10,000 | 0.40 ms | **0.05 ms** | 0.09 ms | **87.5% faster** |
+| **`scanner_lookup (file_uri)`** | N=50,000 | 9.56 ms | **0.04 ms** | 0.10 ms | **99.6% faster** |
+| **`scanner_lookup (content_hash)`** | N=50,000 | 5.22 ms | **0.06 ms** | 0.15 ms | **98.8% faster** |
+| **`get_all_tracks`** | N=10,000 | 85.35 ms | **71.24 ms** | 85.56 ms | **16.5% faster** |
+| **`get_albums`** | N=10,000 | 35.01 ms | **28.80 ms** | 40.40 ms | **17.7% faster** |
+| **`search_fts5 (Tokyo)`** | N=10,000 | 6.97 ms | **8.27 ms** | 9.51 ms | Consistent |
+| **`search_short_like (To)`** | N=10,000 | 14.30 ms | **11.79 ms** | 14.24 ms | **17.5% faster** |
+| **`parse_lrc (60 lines)`** | Standard | 0.03 ms | **0.04 ms** | 0.04 ms | Instantaneous |
+| **`parse_lrc (500 lines)`** | Large | 0.22 ms | **0.22 ms** | 0.37 ms | Instantaneous |
+| **`parse_lrc (2,000 lines)`** | Extreme | 0.88 ms | **0.87 ms** | 1.39 ms | Sub-millisecond |
+
+### 5. Runtime Lifecycle, Startup & Memory Profile
+- **Cold Startup Total:** 1,316.25 ms (Time to CDP / initial paint: 650.03 ms)
+- **Warm Startup Median:** 1,165.10 ms (Min: 1,144.06 ms, Max: 1,183.67 ms)
+- **Rust Core Process (`cavia-music.exe`):** **58.39 MB Working Set**
+- **Total Process Tree (including WebView2 GPU & Renderer):** **518.75 MB Working Set** across 7 processes
+
+### 6. Verification Suite
+- **Native Rust Unit & Integration Tests:** 197 passed, 5 ignored (physical audio device), 0 failed (`cargo test --manifest-path src-tauri/Cargo.toml`).
+- **Smoke Integration Test:** 1 passed (`tests/smoke.rs`).
+- **Node.js Contract Tests:** 39 passed, 0 failed (`test/*.test.mjs`).
+- **Rust Static Checks & Formatting:** `cargo check` and `cargo fmt --check` clean with 0 warnings.
+- **Frontend Production Build:** `npm run build` completed cleanly in 359ms.
+- **Baseline Report:** Full methodology, query plans, and regression budgets documented in `docs/performance/M5.4-performance-baseline.md`.
+
+### 7. Deferred Platform Behavior
+- Measurements were empirically gathered on Windows 11 host desktop. Physical mobile hardware profiling (Android & iOS) and macOS Apple Silicon verification remain deferred to native device release passes.
+

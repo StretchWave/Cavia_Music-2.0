@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { usePlaybackPosition } from '../../lib/usePlaybackPosition';
 import {
   AlertCircle,
   Check,
@@ -63,7 +64,10 @@ export function ExpandedPlayer({
   onCycleSpeed,
   onToggleLike,
 }: ExpandedPlayerProps) {
-  const { currentTrack, status, positionMs, durationMs, volume, isMuted, repeatMode, isShuffle, playbackSpeed } = playback;
+  const { currentTrack, status, volume, isMuted, repeatMode, isShuffle, playbackSpeed } = playback;
+  const livePos = usePlaybackPosition(playback.positionMs, playback.durationMs);
+  const positionMs = livePos.positionMs || playback.positionMs;
+  const durationMs = livePos.durationMs || playback.durationMs;
   const isPlaying = status === 'playing';
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
 
