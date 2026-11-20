@@ -36,6 +36,7 @@ import {
   type ArtworkCleanupResult,
   type ArtworkRecoveryResult,
 } from '../../lib/artwork';
+import { isNativeApp } from '../../lib/library';
 import {
   getSyncStatus,
   syncSignup,
@@ -129,6 +130,14 @@ export const SettingsView = memo(function SettingsView({
 
   useEffect(() => {
     let active = true;
+
+    // Cache and sync diagnostics are native-only. The browser design preview
+    // has no Tauri backend, so querying it would only throw.
+    if (!isNativeApp()) {
+      return () => {
+        active = false;
+      };
+    }
 
     getArtworkCacheSummary()
       .then((summary) => {

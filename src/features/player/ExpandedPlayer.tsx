@@ -68,6 +68,9 @@ export function ExpandedPlayer({
   const positionMs = livePos.positionMs ?? playback.positionMs;
   const durationMs = livePos.durationMs ?? playback.durationMs;
   const isPlaying = status === 'playing';
+  // Streamed provider tracks are not persisted in the library, so a like has
+  // nowhere honest to go. Disable it instead of failing silently.
+  const canLikeTrack = currentTrack?.sourceKind !== 'provider';
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
   const [volumeDraft, setVolumeDraft] = useState<number | null>(null);
   const [copiedShare, setCopiedShare] = useState(false);
@@ -235,11 +238,19 @@ export function ExpandedPlayer({
             <button
               type="button"
               className={`expanded-heart-btn ${currentTrack?.isLiked ? 'active' : ''}`}
-              disabled={!currentTrack || !isBackendReady}
+              disabled={!currentTrack || !isBackendReady || !canLikeTrack}
               onClick={() => {
                 if (currentTrack) onToggleLike?.(currentTrack.id);
               }}
-              title={!currentTrack ? 'No track playing' : currentTrack.isLiked ? 'Remove from Liked' : 'Add to Liked'}
+              title={
+                !currentTrack
+                  ? 'No track playing'
+                  : !canLikeTrack
+                    ? 'Likes are stored in your library; streamed tracks are not saved'
+                    : currentTrack.isLiked
+                      ? 'Remove from Liked'
+                      : 'Add to Liked'
+              }
               aria-label={currentTrack?.isLiked ? 'Remove from Liked' : 'Save to Liked'}
               aria-pressed={currentTrack?.isLiked ? 'true' : 'false'}
             >

@@ -485,6 +485,51 @@ body {
 }
 
 /* --------------------------------------------------------------------------
+   Overlay layering
+   The floating rail (z 120) and the mobile tab pill (z 130) are fixed chrome.
+   The full player used to sit at z 110, so the rail covered its collapse
+   chevron and the player could not be dismissed. Keep every playback overlay
+   above the chrome but below the modal tiers (200+).
+   -------------------------------------------------------------------------- */
+
+.cavia-expanded-player-overlay {
+  z-index: 150;
+  overscroll-behavior: contain;
+}
+
+/* Online results (YouTube Music) reuse the playlist row pattern. */
+.yt-result-art {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-radius: 8px;
+}
+
+.yt-result-duration {
+  margin-left: auto;
+  color: var(--bone-400);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.yt-result-note {
+  margin: 0 0 10px;
+  color: var(--bone-400);
+  font-size: 12px;
+}
+
+.yt-result-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  color: var(--status-error);
+  font-size: 13px;
+}
+
+/* --------------------------------------------------------------------------
    Motion modes
    -------------------------------------------------------------------------- */
 

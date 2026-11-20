@@ -8,3 +8,4 @@ pub mod queue;
 pub mod scanner;
 pub mod search;
 pub mod sync;
+pub mod ytmusic;

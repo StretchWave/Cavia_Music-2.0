@@ -16,6 +16,13 @@ import { TrackList } from '../../components/TrackList';
 import { AlbumCard, ArtistCard } from '../../components/MediaCards';
 import { PlaylistDetailModal } from '../library/PlaylistDetailModal';
 import { formatArtworkUri, searchLibrary } from '../../lib/library';
+import {
+  formatOnlineDuration,
+  isOnlineSearchAvailable,
+  playYouTubeMusic,
+  searchYouTubeMusic,
+  type YtMusicTrack,
+} from '../../lib/ytmusic';
 import type { Album, Artist, Playlist, SearchCategory, SearchResultsDTO, Track } from '../../lib/types';
 
 export interface SearchViewProps {
@@ -61,6 +68,15 @@ export function SearchView({
   const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<Artist | null>(null);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
+
+  // YouTube Music catalogue results. These are online, never persisted into the
+  // local library, and only shown for All/Tracks where they make sense.
+  const [onlineResults, setOnlineResults] = useState<YtMusicTrack[]>([]);
+  const [onlineLoading, setOnlineLoading] = useState(false);
+  const [onlineError, setOnlineError] = useState<string | null>(null);
+  const [onlineRetryToken, setOnlineRetryToken] = useState(0);
+  const [playingOnlineId, setPlayingOnlineId] = useState<string | null>(null);
+  const onlineAvailable = isOnlineSearchAvailable();
 
   const requestIdRef = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -111,6 +127,50 @@ export function SearchView({
     setSelectedAlbum(null);
     setSelectedArtist(null);
   }, [debouncedQuery, category]);
+
+  useEffect(() => {
+    const trimmed = debouncedQuery.trim();
+    if (!trimmed || !onlineAvailable) {
+      setOnlineResults([]);
+      setOnlineLoading(false);
+      setOnlineError(null);
+      return;
+    }
+
+    let active = true;
+    setOnlineLoading(true);
+    setOnlineError(null);
+
+    searchYouTubeMusic(trimmed)
+      .then((items) => {
+        if (!active) return;
+        setOnlineResults(items);
+        setOnlineLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (!active) return;
+        setOnlineResults([]);
+        setOnlineError(err instanceof Error ? err.message : String(err));
+        setOnlineLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [debouncedQuery, onlineRetryToken, onlineAvailable]);
+
+  const handlePlayOnline = async (track: YtMusicTrack) => {
+    if (playingOnlineId) return;
+    setPlayingOnlineId(track.videoId);
+    setOnlineError(null);
+    try {
+      await playYouTubeMusic(track);
+    } catch (err) {
+      setOnlineError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPlayingOnlineId(null);
+    }
+  };
 
   const albumTracks = useMemo(() => {
     if (!selectedAlbum) return [];
@@ -358,11 +418,88 @@ export function SearchView({
         </div>
       )}
 
-      {isQueryActive && !isLoading && results && results.totalCount === 0 && (
-        <div className="search-empty">
-          <h2>Nothing found for &ldquo;{debouncedQuery || query}&rdquo;</h2>
-          <p>Try a different spelling.</p>
-        </div>
+      {isQueryActive &&
+        !isLoading &&
+        results &&
+        results.totalCount === 0 &&
+        !onlineLoading &&
+        onlineResults.length === 0 &&
+        !onlineError && (
+          <div className="search-empty">
+            <h2>Nothing found for &ldquo;{debouncedQuery || query}&rdquo;</h2>
+            <p>Try a different spelling.</p>
+          </div>
+        )}
+
+      {isQueryActive && onlineAvailable && (category === 'all' || category === 'tracks') && (
+        <section className="search-section" aria-label="YouTube Music results">
+          <div className="section-title-row">
+            <h2>YouTube Music</h2>
+            {onlineResults.length > 0 && <span className="result-count">{onlineResults.length}</span>}
+          </div>
+          <p className="yt-result-note">
+            Streamed from YouTube Music. Nothing is added to your library; played audio is cached locally for seeking.
+          </p>
+
+          {onlineLoading && (
+            <div className="search-loading-line">
+              <Loader2 size={16} className="search-loading-spinner" />
+              <span>Searching YouTube Music…</span>
+            </div>
+          )}
+
+          {!onlineLoading && onlineError && (
+            <div className="yt-result-error" role="alert">
+              <XCircle size={16} />
+              <span>{onlineError}</span>
+              <Button variant="outline" size="sm" onClick={() => setOnlineRetryToken((value) => value + 1)}>
+                Retry
+              </Button>
+            </div>
+          )}
+
+          {!onlineLoading && !onlineError && onlineResults.length === 0 && (
+            <p className="library-muted-note">No YouTube Music match for this search.</p>
+          )}
+
+          {!onlineLoading && onlineResults.length > 0 && (
+            <div className="playlist-rows">
+              {onlineResults.map((track) => {
+                const isResolving = playingOnlineId === track.videoId;
+                return (
+                  <button
+                    key={track.videoId}
+                    type="button"
+                    className="playlist-row"
+                    onClick={() => void handlePlayOnline(track)}
+                    disabled={playingOnlineId !== null}
+                    aria-label={`Play ${track.title} by ${track.artist} from YouTube Music`}
+                  >
+                    <ArtworkImage
+                      src={track.artworkUrl}
+                      alt=""
+                      className="yt-result-art"
+                      fallbackIcon={<Music2 size={16} />}
+                    />
+                    <span className="playlist-row-copy">
+                      <strong>{track.title}</strong>
+                      <span>
+                        {track.artist || 'Unknown artist'}
+                        {track.album ? ` · ${track.album}` : ''}
+                      </span>
+                    </span>
+                    {isResolving ? (
+                      <Loader2 size={16} className="search-loading-spinner" aria-hidden="true" />
+                    ) : (
+                      <Play size={15} aria-hidden="true" />
+                    )}
+                    <span className="yt-result-duration">{formatOnlineDuration(track.durationMs)}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
       )}
 
       {isQueryActive && hasResults && results && (

@@ -1,4 +1,10 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, isTauri } from '@tauri-apps/api/core';
+
+const requireNative = () => {
+  if (!isTauri()) {
+    throw new Error('Artwork cache tools are available in the Cavia desktop app only.');
+  }
+};
 
 export interface ArtworkCacheSummary {
   totalBytes: number;
@@ -40,18 +46,22 @@ export interface TrackRecoveryOutcome {
 }
 
 export async function getArtworkCacheSummary(): Promise<ArtworkCacheSummary> {
+  requireNative();
   return invoke<ArtworkCacheSummary>('get_artwork_cache_summary');
 }
 
 export async function cleanOrphanedArtwork(): Promise<ArtworkCleanupResult> {
+  requireNative();
   return invoke<ArtworkCleanupResult>('clean_orphaned_artwork');
 }
 
 export async function recoverMissingArtwork(): Promise<ArtworkRecoveryResult> {
+  requireNative();
   return invoke<ArtworkRecoveryResult>('recover_missing_artwork');
 }
 
 export async function recoverTrackArtwork(trackId: string): Promise<TrackRecoveryOutcome> {
+  requireNative();
   return invoke<TrackRecoveryOutcome>('recover_track_artwork', { trackId });
 }
 

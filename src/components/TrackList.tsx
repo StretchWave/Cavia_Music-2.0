@@ -215,7 +215,12 @@ export function TrackList({
                     type="button"
                     role="menuitem"
                     className="track-menu-item"
-                    disabled={!onToggleLike}
+                    disabled={!onToggleLike || track.sourceKind === 'provider'}
+                    title={
+                      track.sourceKind === 'provider'
+                        ? 'Streamed tracks are not stored in your library'
+                        : undefined
+                    }
                     onClick={() => {
                       onToggleLike?.(track.id);
                       closeMenu(true);
@@ -226,14 +231,25 @@ export function TrackList({
                       fill={isLiked ? 'var(--accent-vermilion)' : 'none'}
                       color={isLiked ? 'var(--accent-vermilion)' : 'currentColor'}
                     />
-                    <span>{isLiked ? 'Remove from Liked' : 'Like'}</span>
+                    <span>
+                      {track.sourceKind === 'provider'
+                        ? 'Like (library only)'
+                        : isLiked
+                          ? 'Remove from Liked'
+                          : 'Like'}
+                    </span>
                   </button>
 
                   <button
                     type="button"
                     role="menuitem"
                     className="track-menu-item"
-                    disabled={!onAddToPlaylist}
+                    disabled={!onAddToPlaylist || track.sourceKind === 'provider'}
+                    title={
+                      track.sourceKind === 'provider'
+                        ? 'Streamed tracks are not stored in your library'
+                        : undefined
+                    }
                     onClick={() => {
                       onAddToPlaylist?.(track);
                       closeMenu(true);

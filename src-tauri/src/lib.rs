@@ -167,6 +167,9 @@ pub fn run() {
                 credentials.clone(),
             ));
 
+            let ytmusic = services::ytmusic::YtMusicService::new(app_data_dir.join("stream-cache"))
+                .map_err(io::Error::other)?;
+
             app.manage(AppState::new(
                 pool,
                 artworks_dir,
@@ -175,6 +178,7 @@ pub fn run() {
                 artwork,
                 credentials,
                 sync,
+                ytmusic,
             ));
             Ok(())
         })
@@ -186,6 +190,8 @@ pub fn run() {
             commands::artwork::recover_track_artwork,
             commands::lyrics::get_track_lyrics,
             commands::lyrics::refresh_track_lyrics,
+            commands::ytmusic::ytmusic_search,
+            commands::ytmusic::ytmusic_play,
             commands::library::library_summary,
             commands::library::get_tracks,
             commands::library::get_albums,

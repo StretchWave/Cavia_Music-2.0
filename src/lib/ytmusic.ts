@@ -1,0 +1,38 @@
+import { invoke, isTauri } from '@tauri-apps/api/core';
+
+export interface YtMusicTrack {
+  videoId: string;
+  title: string;
+  artist: string;
+  album: string;
+  durationMs: number;
+  artworkUrl?: string;
+}
+
+export const isOnlineSearchAvailable = (): boolean => isTauri();
+
+export async function searchYouTubeMusic(query: string): Promise<YtMusicTrack[]> {
+  if (!isTauri()) return [];
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+  return invoke<YtMusicTrack[]>('ytmusic_search', { query: trimmed });
+}
+
+export async function playYouTubeMusic(track: YtMusicTrack): Promise<void> {
+  return invoke<void>('ytmusic_play', {
+    videoId: track.videoId,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    durationMs: track.durationMs,
+    artworkUrl: track.artworkUrl ?? null,
+  });
+}
+
+export function formatOnlineDuration(durationMs: number): string {
+  if (!durationMs || durationMs <= 0) return '--:--';
+  const totalSeconds = Math.floor(durationMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
