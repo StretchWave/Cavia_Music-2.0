@@ -64,16 +64,9 @@
   --transition-slow: 360ms cubic-bezier(0.16, 1, 0.3, 1);
 
   /* Layout Dimensions */
-  --sidebar-width: 256px;
-  --topbar-height: 64px;
-  --player-dock-height: 88px;
-  --mobile-nav-height: 64px;
-}
-
-.density-compact {
-  --topbar-height: 56px;
+  --sidebar-width: 220px;
+  --topbar-height: 52px;
   --player-dock-height: 76px;
-  --radius-md: 8px;
-  --radius-lg: 10px;
+  --mobile-nav-height: 64px;
 }
 

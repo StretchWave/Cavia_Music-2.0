@@ -100,6 +100,49 @@ impl QueueManager {
         }
     }
 
+    /// Insert a track directly after the current track. When the queue is
+    /// empty the inserted track becomes current. Shuffle history is preserved
+    /// by inserting the new entry immediately after the current position.
+    pub fn insert_next(&mut self, track: Track) -> usize {
+        let insert_pos = match self.current_index {
+            Some(idx) => (idx + 1).min(self.tracks.len()),
+            None => 0,
+        };
+
+        self.tracks.insert(insert_pos, track);
+
+        if self.current_index.is_none() {
+            self.current_index = Some(insert_pos);
+        }
+
+        if self.shuffle_enabled {
+            if self.shuffle_order.is_empty() {
+                self.rebuild_shuffle(self.current_index);
+            } else {
+                for index in &mut self.shuffle_order {
+                    if *index >= insert_pos {
+                        *index += 1;
+                    }
+                }
+
+                let insert_order_pos = self
+                    .current_index
+                    .and_then(|curr| self.shuffle_order.iter().position(|&i| i == curr))
+                    .map(|pos| pos + 1)
+                    .unwrap_or(0);
+                self.shuffle_order.insert(insert_order_pos, insert_pos);
+
+                if let Some(curr) = self.current_index {
+                    if let Some(pos) = self.shuffle_order.iter().position(|&i| i == curr) {
+                        self.shuffle_pos = pos;
+                    }
+                }
+            }
+        }
+
+        insert_pos
+    }
+
     pub fn remove_at(&mut self, pos: usize) -> Option<Track> {
         if pos >= self.tracks.len() {
             return None;
@@ -659,6 +702,33 @@ mod tests {
             .collect();
         assert_eq!(order_after_remove, expected);
         assert_eq!(q.current_track().unwrap().id, current_id);
+    }
+
+    #[test]
+    fn test_queue_insert_next_after_current() {
+        let mut q = QueueManager::new();
+        q.set_queue(
+            vec![
+                dummy_track("1", "Track 1"),
+                dummy_track("2", "Track 2"),
+                dummy_track("3", "Track 3"),
+            ],
+            Some("2"),
+        );
+
+        let pos = q.insert_next(dummy_track("4", "Track 4"));
+        assert_eq!(pos, 2);
+        assert_eq!(q.tracks()[2].id, "4");
+        assert_eq!(q.current_track().unwrap().id, "2");
+        assert_eq!(q.next().unwrap().id, "4");
+    }
+
+    #[test]
+    fn test_queue_insert_next_empty_becomes_current() {
+        let mut q = QueueManager::new();
+        let pos = q.insert_next(dummy_track("1", "Track 1"));
+        assert_eq!(pos, 0);
+        assert_eq!(q.current_track().unwrap().id, "1");
     }
 
     #[test]

@@ -228,6 +228,7 @@ pub fn run() {
             commands::playback::previous_track,
             commands::playback::set_queue,
             commands::playback::add_to_queue,
+            commands::playback::play_next,
             commands::playback::remove_from_queue,
             commands::playback::remove_from_queue_by_index,
             commands::playback::reorder_queue,

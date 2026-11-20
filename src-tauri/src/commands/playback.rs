@@ -129,6 +129,17 @@ pub async fn add_to_queue(state: State<'_, AppState>, track_id: String) -> Resul
 }
 
 #[tauri::command]
+pub async fn play_next(state: State<'_, AppState>, track_id: String) -> Result<(), String> {
+    let all_tracks = get_all_tracks(&state.database).await?;
+    let track = all_tracks
+        .into_iter()
+        .find(|t| t.id == track_id)
+        .ok_or_else(|| format!("Track not found in database: {track_id}"))?;
+
+    state.playback.play_next(track).await
+}
+
+#[tauri::command]
 pub async fn remove_from_queue(state: State<'_, AppState>, track_id: String) -> Result<(), String> {
     state.playback.remove_from_queue(&track_id).await
 }

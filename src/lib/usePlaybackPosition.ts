@@ -20,8 +20,8 @@ export function usePlaybackPosition(
   const [position, setPosition] = useState<PositionUpdatePayload>(() => {
     const current = getCurrentPlaybackPosition();
     return {
-      positionMs: current.positionMs || fallbackPositionMs,
-      durationMs: current.durationMs || fallbackDurationMs,
+      positionMs: current.positionMs ?? fallbackPositionMs,
+      durationMs: current.durationMs ?? fallbackDurationMs,
       trackId: current.trackId,
       generation: current.generation,
     };

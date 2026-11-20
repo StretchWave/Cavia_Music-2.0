@@ -141,7 +141,6 @@ export function QueueDrawer({
         {/* Header */}
         <div className="drawer-header">
           <div>
-            <div className="drawer-eyebrow">PLAYLIST ORDER & BUFFER</div>
             <div className="drawer-title-row">
               <h2 className="drawer-title">Play Queue</h2>
               <Badge variant="neutral" size="sm">

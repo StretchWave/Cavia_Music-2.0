@@ -20,7 +20,6 @@ import {
 } from 'lucide-react';
 import { IconButton } from '../../components/IconButton';
 import { Slider } from '../../components/Slider';
-import { Badge } from '../../components/Badge';
 import { ArtworkImage } from '../../components/ArtworkImage';
 import { formatArtworkUri } from '../../lib/library';
 import type { PlaybackState } from '../../lib/types';
@@ -66,14 +65,16 @@ export function ExpandedPlayer({
 }: ExpandedPlayerProps) {
   const { currentTrack, status, volume, isMuted, repeatMode, isShuffle, playbackSpeed } = playback;
   const livePos = usePlaybackPosition(playback.positionMs, playback.durationMs);
-  const positionMs = livePos.positionMs || playback.positionMs;
-  const durationMs = livePos.durationMs || playback.durationMs;
+  const positionMs = livePos.positionMs ?? playback.positionMs;
+  const durationMs = livePos.durationMs ?? playback.durationMs;
   const isPlaying = status === 'playing';
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
+  const [volumeDraft, setVolumeDraft] = useState<number | null>(null);
+  const [copiedShare, setCopiedShare] = useState(false);
 
   const activePosition = scrubPosition !== null ? scrubPosition : positionMs;
   const displayDuration = playback.status === 'error' || !currentTrack ? 0 : durationMs;
-  const [copiedShare, setCopiedShare] = useState(false);
+
   const overlayRef = useRef<HTMLDivElement>(null);
   const previousActiveElementRef = useRef<HTMLElement | null>(null);
 
@@ -83,7 +84,6 @@ export function ExpandedPlayer({
     previousActiveElementRef.current = document.activeElement as HTMLElement | null;
     document.body.style.overflow = 'hidden';
 
-    // Focus close button initially
     const timer = setTimeout(() => {
       if (overlayRef.current) {
         const firstFocusable = overlayRef.current.querySelector<HTMLElement>(
@@ -100,7 +100,6 @@ export function ExpandedPlayer({
         return;
       }
 
-      // Trap focus
       if (e.key === 'Tab' && overlayRef.current) {
         const focusables = Array.from(
           overlayRef.current.querySelectorAll<HTMLElement>(
@@ -143,7 +142,7 @@ export function ExpandedPlayer({
       setCopiedShare(true);
       setTimeout(() => setCopiedShare(false), 2500);
     } catch {
-      // Ignore clipboard write failures
+      // Clipboard access is optional; ignore failures.
     }
   };
 
@@ -165,8 +164,6 @@ export function ExpandedPlayer({
       aria-modal="true"
       aria-label="Expanded player"
     >
-      <div className="expanded-background-ambient" aria-hidden="true" />
-
       <div className="expanded-header">
         <IconButton
           label="Collapse full player"
@@ -177,77 +174,46 @@ export function ExpandedPlayer({
         />
 
         <div className="expanded-header-meta">
-          <span className="expanded-eyebrow">
-            {currentTrack?.trackNumber ? `TRACK ${currentTrack.trackNumber}` : 'NOW LISTENING'}
-          </span>
           <strong className="expanded-header-title">
             {currentTrack?.album || currentTrack?.artist || 'Cavia Music'}
           </strong>
         </div>
 
-        <div className="expanded-header-actions">
-          {audioBackendStatus && audioBackendStatus !== 'ready' && (
-            <Badge variant="warn" size="sm">
-              {audioBackendStatus === 'device_unavailable'
-                ? 'AUDIO DEVICE UNAVAILABLE'
-                : audioBackendStatus === 'error'
-                ? 'ENGINE ERROR'
-                : audioBackendStatus === 'initializing'
-                ? 'INITIALIZING'
-                : 'STANDBY'}
-            </Badge>
-          )}
-          <IconButton
-            label={copiedShare ? 'Copied track metadata' : 'Share track'}
-            icon={copiedShare ? <Check size={18} className="text-ready" /> : <Share2 size={18} />}
-            variant="ghost"
-            disabled={!currentTrack}
-            onClick={handleShareTrack}
-            title={!currentTrack ? 'No track playing' : (copiedShare ? 'Copied to clipboard' : 'Copy track info to clipboard')}
-          />
-        </div>
+        <IconButton
+          label={copiedShare ? 'Copied track metadata' : 'Share track'}
+          icon={copiedShare ? <Check size={18} className="text-ready" /> : <Share2 size={18} />}
+          variant="ghost"
+          disabled={!currentTrack}
+          onClick={handleShareTrack}
+          title={!currentTrack ? 'No track playing' : copiedShare ? 'Copied to clipboard' : 'Copy track info'}
+        />
       </div>
 
       <div className="expanded-body">
-        {/* Left Column: Tactical Artwork & Vinyl Assembly */}
         <div className="expanded-sleeve-stage">
-          <div className="expanded-sleeve-assembly">
-            <div className={`vinyl-disc ${isPlaying ? 'spinning' : ''}`} aria-hidden="true">
-              <span className="groove-a" />
-              <span className="groove-b" />
-              <span className="groove-c" />
-              <div className="vinyl-center-label">
-                <span className="vinyl-label-text">藏</span>
-                <span className="vinyl-spindle" />
-              </div>
-            </div>
-
-            <div className="sleeve-card">
-              <ArtworkImage
-                src={currentTrack?.artworkUri ? formatArtworkUri(currentTrack.artworkUri) : undefined}
-                alt={currentTrack ? currentTrack.title : 'Album artwork'}
-                className="sleeve-art-img"
-                kanji="音"
-                fallbackText={currentTrack?.title || 'CAVIA ARCHIVE'}
-              />
-              <div className="sleeve-sheen" aria-hidden="true" />
-            </div>
+          <div className="sleeve-card">
+            <ArtworkImage
+              src={currentTrack?.artworkUri ? formatArtworkUri(currentTrack.artworkUri) : undefined}
+              alt={currentTrack ? currentTrack.title : 'Album artwork'}
+              className="sleeve-art-img"
+              kanji="音"
+              fallbackText={currentTrack?.title || 'CAVIA ARCHIVE'}
+            />
           </div>
         </div>
 
-        {/* Right Column: Editorial Metadata & Physical Transports */}
         <div className="expanded-info-column">
           <div className="expanded-metadata-header">
             <div className="expanded-title-group">
               <h1 className="expanded-track-title">
-                {currentTrack?.title ?? (playback.errorMessage ? 'Playback Halted' : 'No audio loaded')}
+                {currentTrack?.title ?? (playback.errorMessage ? 'Playback halted' : 'No audio loaded')}
               </h1>
               <p className="expanded-track-artist">
                 {currentTrack
-                  ? (currentTrack.artist && currentTrack.album
-                      ? `${currentTrack.artist} — ${currentTrack.album}`
-                      : currentTrack.artist || currentTrack.album || 'Unknown Artist')
-                  : (playback.errorMessage ? playback.errorMessage : 'Select a recording to listen')}
+                  ? currentTrack.artist && currentTrack.album
+                    ? `${currentTrack.artist} — ${currentTrack.album}`
+                    : currentTrack.artist || currentTrack.album || 'Unknown artist'
+                  : playback.errorMessage || 'Select a recording to listen'}
               </p>
               {playback.errorMessage && (
                 <div className="expanded-error-banner" role="alert">
@@ -264,7 +230,7 @@ export function ExpandedPlayer({
               onClick={() => {
                 if (currentTrack) onToggleLike?.(currentTrack.id);
               }}
-              title={!currentTrack ? 'No track playing' : (currentTrack.isLiked ? 'Remove from Liked' : 'Add to Liked')}
+              title={!currentTrack ? 'No track playing' : currentTrack.isLiked ? 'Remove from Liked' : 'Add to Liked'}
               aria-label={currentTrack?.isLiked ? 'Remove from Liked' : 'Save to Liked'}
               aria-pressed={currentTrack?.isLiked ? 'true' : 'false'}
             >
@@ -276,37 +242,11 @@ export function ExpandedPlayer({
             </button>
           </div>
 
-          {/* Useful Controls: Speed and Format only if relevant */}
-          <div className="expanded-format-badges">
-            {currentTrack && (
-              <>
-                {currentTrack.genre && (
-                  <Badge variant="neutral" size="sm">
-                    {currentTrack.genre}
-                  </Badge>
-                )}
-                <button
-                  type="button"
-                  className="badge-speed-btn"
-                  disabled={!isBackendReady}
-                  onClick={onCycleSpeed}
-                  title={!isBackendReady ? 'Playback engine unavailable' : 'Click to change playback speed'}
-                  aria-label={`Playback speed: ${playbackSpeed}x. Click to change.`}
-                >
-                  <Badge variant="outline" size="sm">
-                    {playbackSpeed}x
-                  </Badge>
-                </button>
-              </>
-            )}
-          </div>
-
-          {/* Scrubber */}
           <div className="expanded-scrubber-box">
             <Slider
               value={activePosition}
               max={displayDuration || 100}
-              onChange={(newPos) => setScrubPosition(newPos)}
+              onChange={setScrubPosition}
               onCommit={(newPos) => {
                 setScrubPosition(null);
                 onSeek?.(newPos);
@@ -322,11 +262,10 @@ export function ExpandedPlayer({
             </div>
           </div>
 
-          {/* Transport Controls */}
           <div className="expanded-transport-row">
             <IconButton
               label={`Shuffle: ${isShuffle ? 'On' : 'Off'}`}
-              icon={<Shuffle size={20} />}
+              icon={<Shuffle size={22} />}
               disabled={!isBackendReady}
               active={isShuffle}
               onClick={onToggleShuffle}
@@ -336,7 +275,7 @@ export function ExpandedPlayer({
 
             <IconButton
               label="Previous track"
-              icon={<Rewind size={24} />}
+              icon={<Rewind size={22} />}
               disabled={!isBackendReady}
               onClick={onPrevious}
               title="Previous track"
@@ -351,12 +290,12 @@ export function ExpandedPlayer({
               title={isPlaying ? 'Pause' : 'Play'}
               aria-label={isPlaying ? 'Pause' : 'Play'}
             >
-              {isPlaying ? <Pause size={28} /> : <Play size={28} className="play-triangle-lg" />}
+              {isPlaying ? <Pause size={24} /> : <Play size={24} className="play-triangle-lg" />}
             </button>
 
             <IconButton
               label="Next track"
-              icon={<FastForward size={24} />}
+              icon={<FastForward size={22} />}
               disabled={!isBackendReady}
               onClick={onNext}
               title="Next track"
@@ -365,7 +304,7 @@ export function ExpandedPlayer({
 
             <IconButton
               label={`Repeat: ${repeatMode}`}
-              icon={repeatMode === 'one' ? <Repeat1 size={20} /> : <Repeat size={20} />}
+              icon={repeatMode === 'one' ? <Repeat1 size={22} /> : <Repeat size={22} />}
               disabled={!isBackendReady}
               active={repeatMode !== 'off'}
               onClick={onCycleRepeat}
@@ -374,26 +313,26 @@ export function ExpandedPlayer({
             />
           </div>
 
-          {/* Quick Sub-Actions */}
           <div className="expanded-subactions-row">
-            <button
-              type="button"
-              className="expanded-chip-btn"
-              onClick={onOpenLyrics}
-              aria-label="Open lyrics drawer"
-            >
-              <Mic2 size={16} />
+            <button type="button" className="expanded-chip-btn" onClick={onOpenLyrics} aria-label="Open lyrics drawer">
+              <Mic2 size={17} />
               <span>Lyrics</span>
+            </button>
+
+            <button type="button" className="expanded-chip-btn" onClick={onOpenQueue} aria-label="Open queue drawer">
+              <ListMusic size={17} />
+              <span>Queue</span>
             </button>
 
             <button
               type="button"
-              className="expanded-chip-btn"
-              onClick={onOpenQueue}
-              aria-label="Open queue drawer"
+              className="expanded-speed-pill"
+              disabled={!isBackendReady}
+              onClick={onCycleSpeed}
+              title={!isBackendReady ? 'Playback engine unavailable' : 'Change playback rate'}
+              aria-label={`Playback speed: ${playbackSpeed}x`}
             >
-              <ListMusic size={16} />
-              <span>Queue</span>
+              {playbackSpeed}x
             </button>
 
             <div className="expanded-volume-control">
@@ -407,9 +346,13 @@ export function ExpandedPlayer({
               />
               <div className="expanded-vol-slider-wrap">
                 <Slider
-                  value={isMuted ? 0 : volume}
+                  value={isMuted ? 0 : volumeDraft ?? volume}
                   max={100}
-                  onCommit={(newVol) => onVolumeChange?.(newVol)}
+                  onChange={setVolumeDraft}
+                  onCommit={(newVol) => {
+                    setVolumeDraft(null);
+                    onVolumeChange?.(newVol);
+                  }}
                   disabled={!isBackendReady}
                   label="Volume"
                   ariaValueText={isMuted ? 'Muted' : `${volume}%`}
@@ -428,8 +371,8 @@ export function ExpandedPlayer({
               {audioBackendStatus === 'device_unavailable'
                 ? 'Audio output device unavailable. Connect speakers or headphones to resume.'
                 : audioBackendStatus === 'error'
-                ? 'Audio engine encountered an initialization error.'
-                : 'Audio engine standby.'}
+                  ? 'Audio engine encountered an initialization error.'
+                  : 'Audio engine standby.'}
             </span>
           </div>
         </div>

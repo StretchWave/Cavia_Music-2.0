@@ -6,7 +6,6 @@ interface ModalProps {
   isOpen: boolean;
   onClose: () => void;
   title: string;
-  eyebrow?: string;
   children: ReactNode;
   footer?: ReactNode;
   size?: 'sm' | 'md' | 'lg' | 'xl';
@@ -17,7 +16,6 @@ export function Modal({
   isOpen,
   onClose,
   title,
-  eyebrow,
   children,
   footer,
   size = 'md',
@@ -113,12 +111,9 @@ export function Modal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="modal-header">
-          <div>
-            {eyebrow && <div className="modal-eyebrow">{eyebrow}</div>}
-            <h2 id={titleId} className="modal-title">
-              {title}
-            </h2>
-          </div>
+          <h2 id={titleId} className="modal-title">
+            {title}
+          </h2>
           <IconButton
             label="Close dialog"
             icon={<X size={18} />}

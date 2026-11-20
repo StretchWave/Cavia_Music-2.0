@@ -1,4 +1,4 @@
-import { type ChangeEvent, useState, useEffect } from 'react';
+import { type ChangeEvent, type CSSProperties, useState, useEffect } from 'react';
 
 interface SliderProps {
   value: number;
@@ -90,7 +90,11 @@ export function Slider({
   };
 
   return (
-    <div className={`cavia-slider-wrap ${disabled ? 'disabled' : ''} ${className}`}>
+    <div
+      className={`cavia-slider-wrap ${disabled ? 'disabled' : ''} ${className}`}
+      style={{ '--slider-fill': `${percentage}%` } as CSSProperties}
+    >
+      {showFill && <span className="cavia-slider-fill" aria-hidden="true" />}
       <input
         type="range"
         min={min}
@@ -110,13 +114,6 @@ export function Slider({
         aria-valuetext={ariaValueText}
         aria-disabled={disabled}
         className="cavia-range-input"
-        style={{
-          background: showFill
-            ? disabled
-              ? `linear-gradient(to right, rgba(255, 255, 255, 0.15) ${percentage}%, var(--bg-hover) ${percentage}%)`
-              : `linear-gradient(to right, var(--accent-vermilion) ${percentage}%, var(--bg-hover) ${percentage}%)`
-            : undefined,
-        }}
       />
     </div>
   );

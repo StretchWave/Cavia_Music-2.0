@@ -282,6 +282,10 @@ pub enum PlaybackCommand {
         track: Track,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    PlayNext {
+        track: Track,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     RemoveFromQueue {
         track_id: String,
         reply: oneshot::Sender<Result<(), String>>,
@@ -832,6 +836,15 @@ impl PlaybackCore {
 
     pub fn add_to_queue(&mut self, track: Track) -> Result<(), String> {
         self.queue.add_track(track);
+        self.generation += 1;
+        let _ = self.persist_state();
+        self.update_snapshot_cache();
+        self.emit_state();
+        Ok(())
+    }
+
+    pub fn play_next(&mut self, track: Track) -> Result<(), String> {
+        self.queue.insert_next(track);
         self.generation += 1;
         let _ = self.persist_state();
         self.update_snapshot_cache();
@@ -1623,6 +1636,9 @@ impl PlaybackService {
                             PlaybackCommand::AddToQueue { track, reply } => {
                                 let _ = reply.send(core.add_to_queue(track));
                             }
+                            PlaybackCommand::PlayNext { track, reply } => {
+                                let _ = reply.send(core.play_next(track));
+                            }
                             PlaybackCommand::RemoveFromQueue { track_id, reply } => {
                                 let _ = reply.send(core.remove_from_queue(&track_id));
                             }
@@ -1873,6 +1889,12 @@ impl PlaybackService {
 
     pub async fn add_to_queue(&self, track: Track) -> Result<(), String> {
         let rx = self.send_command(|reply| PlaybackCommand::AddToQueue { track, reply })?;
+        rx.await
+            .map_err(|_| "Audio worker thread terminated unexpectedly".to_string())?
+    }
+
+    pub async fn play_next(&self, track: Track) -> Result<(), String> {
+        let rx = self.send_command(|reply| PlaybackCommand::PlayNext { track, reply })?;
         rx.await
             .map_err(|_| "Audio worker thread terminated unexpectedly".to_string())?
     }

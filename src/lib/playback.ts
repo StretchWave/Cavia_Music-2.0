@@ -115,6 +115,11 @@ export async function addToQueue(trackId: string): Promise<void> {
   return invoke('add_to_queue', { trackId });
 }
 
+export async function playNext(trackId: string): Promise<void> {
+  if (!isNativeApp()) return;
+  return invoke('play_next', { trackId });
+}
+
 export async function removeFromQueue(trackId: string): Promise<void> {
   if (!isNativeApp()) return;
   return invoke('remove_from_queue', { trackId });

@@ -6,7 +6,6 @@ import {
   LocateFixed,
   Mic2,
   RefreshCw,
-  Sparkles,
   X,
 } from 'lucide-react';
 import { IconButton } from '../../components/IconButton';
@@ -309,19 +308,15 @@ export function LyricsDrawer({
         {/* Header */}
         <div className="drawer-header">
           <div>
-            <div className="drawer-eyebrow">
-              <Sparkles size={12} />
-              <span>LYRICS ARCHIVE</span>
+            <div className="drawer-title-row">
+              <h2 className="drawer-title">
+                {currentTrack ? currentTrack.title : 'Lyrics View'}
+              </h2>
               {lyrics?.source && (
                 <Badge variant="outline" size="sm" className="lyrics-source-badge">
                   {lyrics.source === 'embedded' ? 'EMBEDDED' : 'LRCLIB'}
                 </Badge>
               )}
-            </div>
-            <div className="drawer-title-row">
-              <h2 className="drawer-title">
-                {currentTrack ? currentTrack.title : 'Lyrics View'}
-              </h2>
             </div>
             <span className="lyrics-track-artist">
               {currentTrack?.artist

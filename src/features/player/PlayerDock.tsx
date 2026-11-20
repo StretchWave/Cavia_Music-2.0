@@ -1,11 +1,9 @@
 import { useState } from 'react';
 import { usePlaybackPosition } from '../../lib/usePlaybackPosition';
 import {
-  ChevronUp,
   Disc3,
   FastForward,
   Headphones,
-  Heart,
   ListMusic,
   Maximize2,
   Mic2,
@@ -16,6 +14,7 @@ import {
   Repeat1,
   Rewind,
   Shuffle,
+  SkipForward,
   Volume2,
   VolumeX,
 } from 'lucide-react';
@@ -42,7 +41,6 @@ interface PlayerDockProps {
   onToggleShuffle?: () => void;
   onCycleRepeat?: () => void;
   onCycleSpeed?: () => void;
-  onToggleLike?: (trackId: string) => void;
 }
 
 export function PlayerDock({
@@ -62,14 +60,14 @@ export function PlayerDock({
   onToggleShuffle,
   onCycleRepeat,
   onCycleSpeed,
-  onToggleLike,
 }: PlayerDockProps) {
   const { currentTrack, status, volume, isMuted, repeatMode, isShuffle, playbackSpeed } = playback;
   const livePos = usePlaybackPosition(playback.positionMs, playback.durationMs);
-  const positionMs = livePos.positionMs || playback.positionMs;
-  const durationMs = livePos.durationMs || playback.durationMs;
+  const positionMs = livePos.positionMs ?? playback.positionMs;
+  const durationMs = livePos.durationMs ?? playback.durationMs;
   const isPlaying = status === 'playing';
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
+  const [volumeDraft, setVolumeDraft] = useState<number | null>(null);
 
   const activePosition = scrubPosition !== null ? scrubPosition : positionMs;
   const displayDuration = playback.status === 'error' || !currentTrack ? 0 : durationMs;
@@ -98,7 +96,6 @@ export function PlayerDock({
 
   return (
     <footer className="cavia-player-dock" aria-label="Audio player">
-      {/* Track Information */}
       <div className="dock-track-section">
         <button
           type="button"
@@ -106,50 +103,32 @@ export function PlayerDock({
           onClick={onOpenExpanded}
           title="Open expanded player"
         >
-          <div className="dock-art-container">
-            <div className="dock-art-frame">
-              <ArtworkImage
-                src={currentTrack?.artworkUri ? formatArtworkUri(currentTrack.artworkUri) : undefined}
-                alt=""
-                className="dock-artwork-img"
-                fallbackIcon={<Disc3 size={20} className={isPlaying ? 'spinning' : ''} aria-hidden="true" />}
-              />
-            </div>
-            <span className="dock-vinyl-peeking" aria-hidden="true" />
+          <div className="dock-art-frame">
+            <ArtworkImage
+              src={currentTrack?.artworkUri ? formatArtworkUri(currentTrack.artworkUri) : undefined}
+              alt=""
+              className="dock-artwork-img"
+              fallbackIcon={<Disc3 size={18} aria-hidden="true" />}
+            />
           </div>
 
           <div className="dock-track-info">
             <strong className="dock-track-title">
-              {currentTrack?.title ?? (playback.errorMessage ? 'Playback Halted' : 'No audio loaded')}
+              {currentTrack?.title ?? (playback.errorMessage ? 'Playback halted' : 'No audio loaded')}
             </strong>
             <span className={`dock-track-artist ${playback.errorMessage ? 'dock-error-text' : ''}`}>
               {playback.errorMessage
                 ? playback.errorMessage
                 : currentTrack
-                ? (currentTrack.artist && currentTrack.album
+                  ? currentTrack.artist && currentTrack.album
                     ? `${currentTrack.artist} — ${currentTrack.album}`
-                    : currentTrack.artist || currentTrack.album || 'Unknown Artist')
-                : 'Select a track to start playback'}
+                    : currentTrack.artist || currentTrack.album || 'Unknown artist'
+                  : 'Select a track to start playback'}
             </span>
           </div>
         </button>
-
-        <button
-          type="button"
-          className={`dock-like-btn ${currentTrack?.isLiked ? 'active' : ''}`}
-          disabled={!currentTrack || !isBackendReady}
-          title={!currentTrack ? 'No active track to like' : (currentTrack.isLiked ? 'Remove from Liked' : 'Save to Liked')}
-          aria-label={currentTrack?.isLiked ? 'Remove from Liked' : 'Save to Liked'}
-          aria-pressed={currentTrack?.isLiked ? 'true' : 'false'}
-          onClick={() => {
-            if (currentTrack) onToggleLike?.(currentTrack.id);
-          }}
-        >
-          <Heart size={15} fill={currentTrack?.isLiked ? 'var(--accent-vermilion)' : 'none'} />
-        </button>
       </div>
 
-      {/* Main Transport & Scrubber */}
       <div className="dock-center-controls">
         <div className="dock-transport-buttons">
           <IconButton
@@ -176,10 +155,10 @@ export function PlayerDock({
             className="dock-play-btn"
             disabled={!isBackendReady}
             onClick={onTogglePlay}
-            title={!isBackendReady ? engineTooltip : (isPlaying ? 'Pause' : 'Play')}
+            title={!isBackendReady ? engineTooltip : isPlaying ? 'Pause' : 'Play'}
             aria-label={isPlaying ? 'Pause' : 'Play'}
           >
-            {isPlaying ? <Pause size={17} /> : <Play size={17} className="play-triangle" />}
+            {isPlaying ? <Pause size={18} /> : <Play size={18} className="play-triangle" />}
           </button>
 
           <IconButton
@@ -208,7 +187,7 @@ export function PlayerDock({
             <Slider
               value={activePosition}
               max={durationMs || 100}
-              onChange={(newPos) => setScrubPosition(newPos)}
+              onChange={setScrubPosition}
               onCommit={(newPos) => {
                 setScrubPosition(null);
                 onSeek?.(newPos);
@@ -223,56 +202,7 @@ export function PlayerDock({
         </div>
       </div>
 
-      {/* Auxiliary Controls */}
       <div className="dock-aux-controls">
-        <div
-          className="dock-engine-status"
-          title={
-            playback.errorMessage
-              ? `Playback error: ${playback.errorMessage}`
-              : isBackendReady
-              ? 'Active audio backend: Native Rodio (WASAPI / CoreAudio via Symphonia)'
-              : audioBackendStatus === 'device_unavailable'
-              ? 'No audio output device found on system'
-              : audioBackendStatus === 'not_integrated'
-              ? 'Audio backend not integrated for this platform'
-              : audioBackendStatus === 'error'
-              ? 'Audio engine initialization error'
-              : audioBackendStatus === 'unsupported'
-              ? 'Audio backend unsupported'
-              : audioBackendStatus === 'initializing'
-              ? 'Audio engine is initializing'
-              : 'Audio engine standby'
-          }
-        >
-          <span
-            className={`status-indicator-dot ${
-              playback.errorMessage || audioBackendStatus === 'error'
-                ? 'error'
-                : isBackendReady
-                ? 'ready'
-                : 'muted'
-            }`}
-          />
-          <span className="engine-status-text">
-            {playback.errorMessage
-              ? 'PLAYBACK ERROR'
-              : isBackendReady
-              ? 'ENGINE READY'
-              : audioBackendStatus === 'device_unavailable'
-              ? 'DEVICE UNAVAILABLE'
-              : audioBackendStatus === 'not_integrated'
-              ? 'BACKEND NOT INTEGRATED'
-              : audioBackendStatus === 'error'
-              ? 'ENGINE ERROR'
-              : audioBackendStatus === 'unsupported'
-              ? 'UNSUPPORTED'
-              : audioBackendStatus === 'initializing'
-              ? 'ENGINE INITIALIZING'
-              : 'ENGINE STANDBY'}
-          </span>
-        </div>
-
         {!isBackendReady && audioBackendStatus === 'device_unavailable' && onRetryDevice && (
           <IconButton
             label="Retry audio device"
@@ -282,17 +212,6 @@ export function PlayerDock({
             size="sm"
           />
         )}
-
-        <button
-          type="button"
-          className="dock-speed-pill"
-          disabled={!isBackendReady}
-          title={!isBackendReady ? 'Playback engine unavailable' : 'Click to cycle playback rate'}
-          aria-label={`Playback speed: ${playbackSpeed}x`}
-          onClick={onCycleSpeed}
-        >
-          <span>{playbackSpeed}x</span>
-        </button>
 
         <IconButton
           label="Synchronized lyrics"
@@ -310,6 +229,17 @@ export function PlayerDock({
           size="sm"
         />
 
+        <button
+          type="button"
+          className="dock-speed-pill"
+          disabled={!isBackendReady}
+          title={!isBackendReady ? 'Playback engine unavailable' : 'Change playback rate'}
+          aria-label={`Playback speed: ${playbackSpeed}x`}
+          onClick={onCycleSpeed}
+        >
+          {playbackSpeed}x
+        </button>
+
         <div className="dock-volume-group">
           <IconButton
             label={isMuted ? 'Unmute' : 'Mute'}
@@ -321,9 +251,16 @@ export function PlayerDock({
           />
           <div className="dock-volume-slider">
             <Slider
-              value={isMuted ? 0 : volume}
+              value={isMuted ? 0 : volumeDraft ?? volume}
               max={100}
-              onCommit={(newVol) => onVolumeChange?.(newVol)}
+              onChange={(newVol) => {
+                setVolumeDraft(newVol);
+                onVolumeChange?.(newVol);
+              }}
+              onCommit={(newVol) => {
+                setVolumeDraft(null);
+                onVolumeChange?.(newVol);
+              }}
               disabled={!isBackendReady}
               label="Adjust volume"
               ariaValueText={isMuted ? 'Muted' : `${volume}%`}
@@ -340,7 +277,6 @@ export function PlayerDock({
         />
       </div>
 
-      {/* Mobile Mini-Player View */}
       <div className="dock-mobile-touch-bar">
         <button
           type="button"
@@ -360,9 +296,9 @@ export function PlayerDock({
             <strong>{currentTrack?.title ?? 'No audio loaded'}</strong>
             <span>
               {currentTrack
-                ? (currentTrack.artist && currentTrack.album
-                    ? `${currentTrack.artist} — ${currentTrack.album}`
-                    : currentTrack.artist || currentTrack.album || 'Unknown Artist')
+                ? currentTrack.artist && currentTrack.album
+                  ? `${currentTrack.artist} — ${currentTrack.album}`
+                  : currentTrack.artist || currentTrack.album || 'Unknown artist'
                 : 'Select a track to play'}
             </span>
           </div>
@@ -376,15 +312,17 @@ export function PlayerDock({
             title={isPlaying ? 'Pause' : 'Play'}
             aria-label={isPlaying ? 'Pause' : 'Play'}
           >
-            {isPlaying ? <Pause size={15} /> : <Play size={15} />}
+            {isPlaying ? <Pause size={16} /> : <Play size={16} />}
           </button>
           <button
             type="button"
-            className="mobile-mini-expand"
-            onClick={onOpenExpanded}
-            aria-label="Expand player"
+            className="mobile-mini-next"
+            disabled={!isBackendReady}
+            onClick={onNext}
+            aria-label="Next track"
+            title="Next track"
           >
-            <ChevronUp size={18} />
+            <SkipForward size={18} />
           </button>
         </div>
       </div>

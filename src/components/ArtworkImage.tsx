@@ -1,4 +1,4 @@
-import { useState, useEffect, type ReactNode } from 'react';
+import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { Disc3 } from 'lucide-react';
 
 interface ArtworkImageProps {
@@ -21,8 +21,10 @@ export function ArtworkImage({
   showPlaceholderSpin = false,
 }: ArtworkImageProps) {
   const [hasError, setHasError] = useState(false);
+  const currentSrcRef = useRef<string | undefined>(src);
 
   useEffect(() => {
+    currentSrcRef.current = src;
     setHasError(false);
   }, [src]);
 
@@ -49,10 +51,16 @@ export function ArtworkImage({
 
   return (
     <img
+      key={src}
       src={src}
       alt={alt}
       className={className}
-      onError={() => setHasError(true)}
+      onError={() => {
+        // Ignore late errors from a previous src that has already been replaced.
+        if (currentSrcRef.current === src) {
+          setHasError(true);
+        }
+      }}
       loading="lazy"
       decoding="async"
     />

@@ -1,12 +1,4 @@
-export type Page =
-  | 'library'
-  | 'tracks'
-  | 'playlists'
-  | 'albums'
-  | 'artists'
-  | 'liked'
-  | 'search'
-  | 'settings';
+export type Page = 'library' | 'search' | 'settings';
 
 export type RepeatMode = 'off' | 'all' | 'one';
 

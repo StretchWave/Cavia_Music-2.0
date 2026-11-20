@@ -164,7 +164,6 @@ export function PlaylistDetailModal({
       <Modal
         isOpen={isOpen}
         onClose={onClose}
-        eyebrow="PLAYLIST ARCHIVE"
         title={currentPlaylist.name}
         size="lg"
         footer={
@@ -415,7 +414,6 @@ export function PlaylistDetailModal({
           isOpen={showDeleteConfirm}
           onClose={() => setShowDeleteConfirm(false)}
           title={`Delete "${currentPlaylist.name}"?`}
-          eyebrow="CONFIRM DELETION"
           size="sm"
           role="alertdialog"
           footer={
@@ -450,7 +448,6 @@ export function PlaylistDetailModal({
         <Modal
           isOpen={isEditModalOpen}
           onClose={() => setIsEditModalOpen(false)}
-          eyebrow="METADATA EDIT"
           title="Edit Playlist Details"
           size="sm"
           footer={

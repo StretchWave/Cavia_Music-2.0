@@ -1,28 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
-  Album as AlbumIcon,
   AudioWaveform,
-  CheckCircle2,
-  ChevronDown,
-  CircleHelp,
-  Disc3,
-  Heart,
-  Home,
+  FolderPlus,
   Library,
-  ListMusic,
   Loader2,
   Search,
   Settings2,
-  ShieldCheck,
   X,
-  XCircle,
 } from 'lucide-react';
 import {
-  getLibrarySummary,
   getPlatformHealth,
   isNativeApp,
-  type LibrarySummary,
   type PlatformHealth,
 } from '../lib/platform';
 import {
@@ -46,6 +35,7 @@ import {
   listenPlaybackState,
   nextTrack,
   notifyPlaybackPosition,
+  playNext,
   playPause,
   playTrack,
   previousTrack,
@@ -69,11 +59,6 @@ import { IconButton } from '../components/IconButton';
 import { Button } from '../components/Button';
 import { Modal } from '../components/Modal';
 import { LibraryView } from '../features/library/LibraryView';
-import { TracksView } from '../features/library/TracksView';
-import { PlaylistsView } from '../features/library/PlaylistsView';
-import { AlbumsView } from '../features/library/AlbumsView';
-import { ArtistsView } from '../features/library/ArtistsView';
-import { LikedTracksView } from '../features/library/LikedTracksView';
 import { SearchView } from '../features/search/SearchView';
 import { SettingsView } from '../features/settings/SettingsView';
 import { PlayerDock } from '../features/player/PlayerDock';
@@ -83,33 +68,46 @@ import { LyricsDrawer } from '../features/player/LyricsDrawer';
 import { AddToPlaylistModal } from '../features/library/AddToPlaylistModal';
 
 const pageLabels: Record<Page, string> = {
-  library: 'Personal Archive',
-  tracks: 'Tracks',
-  playlists: 'Playlists',
-  albums: 'Albums',
-  artists: 'Artists',
-  liked: 'Liked Songs',
-  search: 'Search & Discovery',
-  settings: 'Settings & System',
+  library: 'Library',
+  search: 'Search',
+  settings: 'Settings',
 };
 
+type ToastKind = 'success' | 'error' | 'info';
+
+interface ToastItem {
+  id: number;
+  kind: ToastKind;
+  message: string;
+}
+
+function normalizePage(value: string | null): Page | null {
+  switch (value) {
+    case 'library':
+    case 'search':
+    case 'settings':
+      return value;
+    case 'tracks':
+    case 'playlists':
+    case 'albums':
+    case 'artists':
+    case 'liked':
+      return 'library';
+    default:
+      return null;
+  }
+}
+
 const getInitialPage = (): Page => {
-  const hash = window.location.hash.replace('#', '') as Page;
-  if (['library', 'tracks', 'playlists', 'albums', 'artists', 'liked', 'search', 'settings'].includes(hash)) {
-    return hash;
-  }
+  const fromHash = normalizePage(window.location.hash.replace('#', ''));
+  if (fromHash) return fromHash;
   const params = new URLSearchParams(window.location.search);
-  const v = params.get('view') as Page;
-  if (['library', 'tracks', 'playlists', 'albums', 'artists', 'liked', 'search', 'settings'].includes(v)) {
-    return v;
-  }
-  return 'library';
+  return normalizePage(params.get('view')) ?? 'library';
 };
 
 export function App() {
   const [page, setPage] = useState<Page>(getInitialPage);
   const [health, setHealth] = useState<PlatformHealth | null>(null);
-  const [summary, setSummary] = useState<LibrarySummary | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
   // Real library domain state (owned by Rust SQLite)
@@ -119,18 +117,20 @@ export function App() {
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [likedTracks, setLikedTracks] = useState<Track[]>([]);
 
+  const tracksRef = useRef<Track[]>(tracks);
+  const likedTracksRef = useRef<Track[]>(likedTracks);
+
+  useEffect(() => {
+    tracksRef.current = tracks;
+  }, [tracks]);
+
+  useEffect(() => {
+    likedTracksRef.current = likedTracks;
+  }, [likedTracks]);
+
   // Scan & Import State
   const [isScanning, setIsScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState<ScanProgressEvent | null>(null);
-  const [scanNotification, setScanNotification] = useState<string | null>(null);
-  const [scanError, setScanError] = useState<string | null>(null);
-  const [playbackError, setPlaybackError] = useState<string | null>(null);
-
-  const showPlaybackError = useCallback((message: string) => {
-    setPlaybackError(message);
-    setPlayback((prev) => ({ ...prev, errorMessage: message }));
-    setTimeout(() => setPlaybackError(null), 6000);
-  }, []);
 
   // UI Drawer & Modal States
   const urlParams = useMemo(() => new URLSearchParams(window.location.search), []);
@@ -153,7 +153,7 @@ export function App() {
   // Appearance preferences
   const [density, setDensity] = useState<'standard' | 'compact'>('standard');
 
-  // Playback state (honest initial state: audio backend is standby for Milestone 3)
+  // Playback state (honest initial state: audio backend is standby until native initialization)
   const [playback, setPlayback] = useState<PlaybackState>({
     status: 'idle',
     currentTrack: null,
@@ -167,20 +167,43 @@ export function App() {
     queue: [],
   });
 
+  // Transient notifications
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const toastIdRef = useRef(0);
+
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((toast) => toast.id !== id));
+  }, []);
+
+  const pushToast = useCallback(
+    (kind: ToastKind, message: string) => {
+      const id = ++toastIdRef.current;
+      setToasts((prev) => [...prev, { id, kind, message }]);
+      setTimeout(() => dismissToast(id), 4000);
+    },
+    [dismissToast]
+  );
+
+  const showPlaybackError = useCallback(
+    (message: string) => {
+      pushToast('error', message);
+      setPlayback((prev) => ({ ...prev, errorMessage: message }));
+    },
+    [pushToast]
+  );
+
   // Reusable loader for library collections from Rust SQLite
   const refreshLibrary = useCallback(async () => {
     if (!isNativeApp()) return;
     try {
-      const [nextSummary, nextTracks, nextAlbums, nextArtists, nextPlaylists, nextLiked] =
+      const [nextTracks, nextAlbums, nextArtists, nextPlaylists, nextLiked] =
         await Promise.all([
-          getLibrarySummary(),
           getTracks(),
           getAlbums(),
           getArtists(),
           getPlaylists(),
           getLikedTracks(),
         ]);
-      setSummary(nextSummary);
       setTracks(nextTracks);
       setAlbums(nextAlbums);
       setArtists(nextArtists);
@@ -237,6 +260,7 @@ export function App() {
     if (!isNativeApp()) return;
     let unlistenState: (() => void) | undefined;
     let unlistenPos: (() => void) | undefined;
+    let unlistenShutdown: (() => void) | undefined;
 
     getPlaybackState()
       .then((state) => {
@@ -305,7 +329,6 @@ export function App() {
       unlistenPos = fn;
     });
 
-    let unlistenShutdown: (() => void) | undefined;
     listen<ShutdownErrorPayload>('app:shutdown-error', (event) => {
       setShutdownError(event.payload.error);
     }).then((fn) => {
@@ -341,7 +364,6 @@ export function App() {
 
   const handleImportFolder = useCallback(async () => {
     try {
-      setScanError(null);
       const selected = await pickMusicFolder();
       if (!selected) return;
 
@@ -361,19 +383,18 @@ export function App() {
       setIsScanning(false);
 
       if (result.cancelled) {
-        setScanNotification(`Import cancelled. Added ${result.newTracks} tracks.`);
+        pushToast('info', `Import cancelled. Added ${result.newTracks} tracks.`);
       } else {
-        setScanNotification(
+        pushToast(
+          'success',
           `Scan complete: ${result.newTracks} new recordings indexed (${result.duplicates} existing/duplicates skipped).`
         );
       }
-      setTimeout(() => setScanNotification(null), 6000);
     } catch (err) {
       setIsScanning(false);
-      setScanError(err instanceof Error ? err.message : String(err));
-      setTimeout(() => setScanError(null), 8000);
+      pushToast('error', err instanceof Error ? err.message : String(err));
     }
-  }, [refreshLibrary]);
+  }, [pushToast, refreshLibrary]);
 
   const handleCancelScan = useCallback(async () => {
     try {
@@ -383,37 +404,76 @@ export function App() {
     }
   }, []);
 
-  const handleToggleLike = useCallback(async (trackId: string) => {
-    try {
-      const isLiked = await toggleLikedTrack(trackId);
-      setTracks((prev) =>
-        prev.map((t) => (t.id === trackId ? { ...t, isLiked } : t))
-      );
-      await refreshLibrary();
-    } catch (err) {
-      console.error('Error toggling like:', err);
-    }
-  }, [refreshLibrary]);
+  const applyLikeState = useCallback((trackId: string, isLiked: boolean) => {
+    setTracks((prev) => prev.map((track) => (track.id === trackId ? { ...track, isLiked } : track)));
+    setPlayback((prev) =>
+      prev.currentTrack?.id === trackId
+        ? { ...prev, currentTrack: { ...prev.currentTrack, isLiked } }
+        : prev
+    );
+    setLikedTracks((prev) => {
+      if (!isLiked) {
+        return prev.filter((track) => track.id !== trackId);
+      }
+      if (prev.some((track) => track.id === trackId)) {
+        return prev.map((track) => (track.id === trackId ? { ...track, isLiked: true } : track));
+      }
+      const source = tracksRef.current.find((track) => track.id === trackId);
+      return source ? [{ ...source, isLiked: true }, ...prev] : prev;
+    });
+  }, []);
 
-  const handleCreatePlaylist = useCallback(async (name: string, description: string) => {
-    try {
-      const created = await createPlaylist(name, description);
-      setPlaylists((prev) => [created, ...prev]);
-      await refreshLibrary();
-    } catch (err) {
-      console.error('Error creating playlist in SQLite:', err);
-    }
-  }, [refreshLibrary]);
+  const handleToggleLike = useCallback(
+    async (trackId: string) => {
+      const source =
+        tracksRef.current.find((track) => track.id === trackId) ??
+        likedTracksRef.current.find((track) => track.id === trackId);
+      const wasLiked =
+        likedTracksRef.current.some((track) => track.id === trackId) || Boolean(source?.isLiked);
+      const nextLiked = !wasLiked;
 
-  const handleDeletePlaylist = useCallback(async (playlistId: string) => {
-    try {
-      await deletePlaylist(playlistId);
-      setPlaylists((prev) => prev.filter((p) => p.id !== playlistId));
-      await refreshLibrary();
-    } catch (err) {
-      console.error('Error deleting playlist from SQLite:', err);
-    }
-  }, [refreshLibrary]);
+      applyLikeState(trackId, nextLiked);
+
+      try {
+        const persistedLiked = await toggleLikedTrack(trackId);
+        if (persistedLiked !== nextLiked) {
+          applyLikeState(trackId, persistedLiked);
+        }
+      } catch (err) {
+        applyLikeState(trackId, wasLiked);
+        pushToast('error', err instanceof Error ? err.message : String(err));
+      }
+    },
+    [applyLikeState, pushToast]
+  );
+
+  const handleCreatePlaylist = useCallback(
+    async (name: string, description: string) => {
+      try {
+        const created = await createPlaylist(name, description);
+        setPlaylists((prev) => [created, ...prev]);
+        await refreshLibrary();
+      } catch (err) {
+        console.error('Error creating playlist in SQLite:', err);
+        pushToast('error', 'Could not create playlist.');
+      }
+    },
+    [pushToast, refreshLibrary]
+  );
+
+  const handleDeletePlaylist = useCallback(
+    async (playlistId: string) => {
+      try {
+        await deletePlaylist(playlistId);
+        setPlaylists((prev) => prev.filter((playlist) => playlist.id !== playlistId));
+        await refreshLibrary();
+      } catch (err) {
+        console.error('Error deleting playlist from SQLite:', err);
+        pushToast('error', 'Could not delete playlist.');
+      }
+    },
+    [pushToast, refreshLibrary]
+  );
 
   const handleOpenAddToPlaylist = useCallback((track: Track) => {
     setAddToPlaylistData({
@@ -426,14 +486,14 @@ export function App() {
   const handleOpenAddAlbumToPlaylist = useCallback(
     (album: Album) => {
       const albumTracks = tracks.filter(
-        (t) =>
-          t.album.toLowerCase() === album.title.toLowerCase() &&
-          (t.albumArtist?.toLowerCase() === album.artist.toLowerCase() ||
-            t.artist.toLowerCase() === album.artist.toLowerCase())
+        (track) =>
+          track.album.toLowerCase() === album.title.toLowerCase() &&
+          (track.albumArtist?.toLowerCase() === album.artist.toLowerCase() ||
+            track.artist.toLowerCase() === album.artist.toLowerCase())
       );
       setAddToPlaylistData({
         isOpen: true,
-        tracks: albumTracks.length > 0 ? albumTracks : [],
+        tracks: albumTracks,
         contextLabel: `Album: ${album.title}`,
       });
     },
@@ -463,117 +523,108 @@ export function App() {
     }
   }, [showPlaybackError]);
 
-  const handlePlayTrack = useCallback(async (trackId: string) => {
-    try {
-      await setQueue(tracks.map((t) => t.id), trackId);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('Play track failed:', msg);
-      showPlaybackError(`Playback failed: ${msg}`);
-    }
-  }, [showPlaybackError, tracks]);
-
-  const handlePlayAll = useCallback(async () => {
-    try {
-      if (tracks.length > 0) {
-        await setQueue(tracks.map((t) => t.id));
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('Play all failed:', msg);
-      showPlaybackError(`Playback failed: ${msg}`);
-    }
-  }, [showPlaybackError, tracks]);
-
-  const handleShuffleAll = useCallback(async () => {
-    try {
-      if (tracks.length > 0) {
-        await setShuffle(true);
-        await setQueue(tracks.map((t) => t.id));
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('Shuffle all failed:', msg);
-      showPlaybackError(`Shuffle all failed: ${msg}`);
-    }
-  }, [showPlaybackError, tracks]);
-
-  const handlePlayLikedTrack = useCallback(async (trackId: string) => {
-    try {
-      await setQueue(likedTracks.map((t) => t.id), trackId);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('Play liked track failed:', msg);
-      showPlaybackError(`Playback failed: ${msg}`);
-    }
-  }, [likedTracks, showPlaybackError]);
-
-  const handlePlayAllLiked = useCallback(async () => {
-    try {
-      if (likedTracks.length > 0) {
-        await setQueue(likedTracks.map((t) => t.id));
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('Play all liked failed:', msg);
-      showPlaybackError(`Playback failed: ${msg}`);
-    }
-  }, [likedTracks, showPlaybackError]);
-
-  const handleShuffleAllLiked = useCallback(async () => {
-    try {
-      if (likedTracks.length > 0) {
-        await setShuffle(true);
-        await setQueue(likedTracks.map((t) => t.id));
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('Shuffle all liked failed:', msg);
-      showPlaybackError(`Shuffle all liked failed: ${msg}`);
-    }
-  }, [likedTracks, showPlaybackError]);
-
-  const handlePlayPlaylistTracks = useCallback(async (playlistTracks: Track[], startIndex = 0, shuffle = false) => {
-    try {
-      if (playlistTracks.length > 0) {
-        if (shuffle) await setShuffle(true);
-        const startId = playlistTracks[startIndex]?.id;
-        await setQueue(playlistTracks.map((t) => t.id), startId);
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('Play playlist tracks failed:', msg);
-      showPlaybackError(`Playback failed: ${msg}`);
-    }
-  }, [showPlaybackError]);
-
-  const handlePlayAlbum = useCallback(
-    async (album: Album) => {
-      const albumTracks = tracks.filter(
-        (t) =>
-          t.album.toLowerCase() === album.title.toLowerCase() &&
-          (t.albumArtist?.toLowerCase() === album.artist.toLowerCase() ||
-            t.artist.toLowerCase() === album.artist.toLowerCase())
-      );
-      if (albumTracks.length > 0) {
-        await handlePlayPlaylistTracks(albumTracks, 0, false);
+  const handlePlayTrack = useCallback(
+    async (trackId: string) => {
+      try {
+        const ids = tracksRef.current.map((track) => track.id);
+        if (!ids.includes(trackId)) return;
+        await setQueue(ids, trackId);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('Play track failed:', msg);
+        showPlaybackError(`Playback failed: ${msg}`);
       }
     },
-    [handlePlayPlaylistTracks, tracks]
+    [showPlaybackError]
+  );
+
+  const handlePlayTracks = useCallback(
+    async (tracksToPlay: Track[], startIndex = 0, shuffle = false) => {
+      try {
+        if (tracksToPlay.length === 0) return;
+        if (shuffle) await setShuffle(true);
+        const startId = tracksToPlay[startIndex]?.id;
+        await setQueue(
+          tracksToPlay.map((track) => track.id),
+          startId
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('Play collection failed:', msg);
+        showPlaybackError(`Playback failed: ${msg}`);
+      }
+    },
+    [showPlaybackError]
+  );
+
+  const handlePlayAll = useCallback(() => {
+    void handlePlayTracks(tracksRef.current, 0, false);
+  }, [handlePlayTracks]);
+
+  const handleShuffleAll = useCallback(() => {
+    void handlePlayTracks(tracksRef.current, 0, true);
+  }, [handlePlayTracks]);
+
+  const handlePlayLikedTrack = useCallback(
+    (trackId: string) => {
+      const list = likedTracksRef.current;
+      const index = list.findIndex((track) => track.id === trackId);
+      void handlePlayTracks(list, index >= 0 ? index : 0, false);
+    },
+    [handlePlayTracks]
+  );
+
+  const handlePlayAllLiked = useCallback(() => {
+    void handlePlayTracks(likedTracksRef.current, 0, false);
+  }, [handlePlayTracks]);
+
+  const handleShuffleAllLiked = useCallback(() => {
+    void handlePlayTracks(likedTracksRef.current, 0, true);
+  }, [handlePlayTracks]);
+
+  const handlePlayPlaylistTracks = useCallback(
+    (playlistTracks: Track[], startIndex = 0, shuffle = false) => {
+      void handlePlayTracks(playlistTracks, startIndex, shuffle);
+    },
+    [handlePlayTracks]
+  );
+
+  const handlePlayAlbum = useCallback(
+    (album: Album) => {
+      const albumTracks = tracksRef.current.filter(
+        (track) =>
+          track.album.toLowerCase() === album.title.toLowerCase() &&
+          (track.albumArtist?.toLowerCase() === album.artist.toLowerCase() ||
+            track.artist.toLowerCase() === album.artist.toLowerCase())
+      );
+      void handlePlayTracks(albumTracks, 0, false);
+    },
+    [handlePlayTracks]
   );
 
   const handlePlayArtist = useCallback(
-    async (artist: Artist) => {
-      const artistTracks = tracks.filter(
-        (t) =>
-          t.artist.toLowerCase() === artist.name.toLowerCase() ||
-          t.albumArtist?.toLowerCase() === artist.name.toLowerCase()
+    (artist: Artist) => {
+      const artistTracks = tracksRef.current.filter(
+        (track) =>
+          track.artist.toLowerCase() === artist.name.toLowerCase() ||
+          track.albumArtist?.toLowerCase() === artist.name.toLowerCase()
       );
-      if (artistTracks.length > 0) {
-        await handlePlayPlaylistTracks(artistTracks, 0, false);
+      void handlePlayTracks(artistTracks, 0, false);
+    },
+    [handlePlayTracks]
+  );
+
+  const handlePlayNext = useCallback(
+    async (trackId: string) => {
+      try {
+        await playNext(trackId);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('Play next failed:', msg);
+        showPlaybackError(`Play next failed: ${msg}`);
       }
     },
-    [handlePlayPlaylistTracks, tracks]
+    [showPlaybackError]
   );
 
   const [routeAnnouncement, setRouteAnnouncement] = useState('');
@@ -662,15 +713,18 @@ export function App() {
     [playback.currentTrack?.id, playback.durationMs, playback.generation, showPlaybackError]
   );
 
-  const handleVolume = useCallback(async (vol: number) => {
-    try {
-      await setVolume(vol);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('Set volume failed:', msg);
-      showPlaybackError(`Volume change failed: ${msg}`);
-    }
-  }, [showPlaybackError]);
+  const handleVolume = useCallback(
+    async (vol: number) => {
+      try {
+        await setVolume(vol);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('Set volume failed:', msg);
+        showPlaybackError(`Volume change failed: ${msg}`);
+      }
+    },
+    [showPlaybackError]
+  );
 
   const handleToggleMute = useCallback(async () => {
     try {
@@ -726,237 +780,152 @@ export function App() {
     }
   }, [showPlaybackError]);
 
-  const handleRemoveQueueTrack = useCallback(async (trackId: string, index?: number) => {
-    try {
-      if (typeof index === 'number') {
-        await removeFromQueueByIndex(index);
-      } else {
-        await removeFromQueue(trackId);
+  const handleRemoveQueueTrack = useCallback(
+    async (trackId: string, index?: number) => {
+      try {
+        if (typeof index === 'number') {
+          await removeFromQueueByIndex(index);
+        } else {
+          await removeFromQueue(trackId);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('Remove from queue failed:', msg);
+        showPlaybackError(`Remove track failed: ${msg}`);
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('Remove from queue failed:', msg);
-      showPlaybackError(`Remove track failed: ${msg}`);
-    }
-  }, [showPlaybackError]);
+    },
+    [showPlaybackError]
+  );
 
-  const handleReorderQueue = useCallback(async (fromIndex: number, toIndex: number) => {
-    try {
-      await reorderQueue(fromIndex, toIndex);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('Reorder queue failed:', msg);
-      showPlaybackError(`Reorder queue failed: ${msg}`);
-    }
-  }, [showPlaybackError]);
+  const handleReorderQueue = useCallback(
+    async (fromIndex: number, toIndex: number) => {
+      try {
+        await reorderQueue(fromIndex, toIndex);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('Reorder queue failed:', msg);
+        showPlaybackError(`Reorder queue failed: ${msg}`);
+      }
+    },
+    [showPlaybackError]
+  );
 
-  const handleSelectQueueTrack = useCallback(async (trackId: string) => {
-    try {
-      await playTrack(trackId);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('Select queue track failed:', msg);
-      showPlaybackError(`Playback failed: ${msg}`);
-    }
-  }, [showPlaybackError]);
+  const handleSelectQueueTrack = useCallback(
+    async (trackId: string) => {
+      try {
+        await playTrack(trackId);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('Select queue track failed:', msg);
+        showPlaybackError(`Playback failed: ${msg}`);
+      }
+    },
+    [showPlaybackError]
+  );
 
   const isBackendReady = health?.audio_backend === 'ready';
 
   const statusLabel = useMemo(() => {
-    if (!isNativeApp()) return 'DESIGN PREVIEW';
-    if (connectionError) return 'CORE UNAVAILABLE';
-    if (!health) return 'CONNECTING';
-    if (!health.database_connected) return 'DATABASE OFFLINE';
-    if (health.audio_backend === 'device_unavailable') return 'NO AUDIO DEVICE';
-    if (health.audio_backend === 'not_integrated') return 'BACKEND NOT INTEGRATED';
-    if (health.audio_backend === 'error') return 'AUDIO ERROR';
-    if (health.audio_backend === 'unsupported') return 'UNSUPPORTED PLATFORM';
-    return 'LOCAL CORE READY';
+    if (!isNativeApp()) return 'Design preview';
+    if (connectionError) return 'Core unavailable';
+    if (!health) return 'Connecting';
+    if (!health.database_connected) return 'Database offline';
+    if (health.audio_backend === 'device_unavailable') return 'No audio device';
+    if (health.audio_backend === 'not_integrated') return 'Backend not integrated';
+    if (health.audio_backend === 'error') return 'Audio error';
+    if (health.audio_backend === 'unsupported') return 'Unsupported platform';
+    return 'Local core ready';
   }, [connectionError, health]);
 
-  const nav = [
-    { label: 'Archive', page: 'library' as const, icon: Library },
+  const statusTone = connectionError
+    ? 'error'
+    : health?.database_connected && health?.audio_backend === 'ready'
+      ? 'ready'
+      : 'muted';
+
+  const navItems = [
+    { label: 'Library', page: 'library' as const, icon: Library },
     { label: 'Search', page: 'search' as const, icon: Search },
+    { label: 'Settings', page: 'settings' as const, icon: Settings2 },
   ];
-
-  const collections = [
-    { label: 'Tracks', page: 'tracks' as const, icon: Disc3, count: summary?.tracks ?? tracks.length },
-    { label: 'Playlists', page: 'playlists' as const, icon: ListMusic, count: playlists.length },
-    { label: 'Albums', page: 'albums' as const, icon: AlbumIcon, count: albums.length },
-    { label: 'Artists', page: 'artists' as const, icon: AudioWaveform, count: artists.length },
-    { label: 'Liked Tracks', page: 'liked' as const, icon: Heart, count: summary?.liked_tracks ?? likedTracks.length },
-  ];
-
-  const likedTrackIds = useMemo(
-    () => new Set(likedTracks.map((t) => t.id)),
-    [likedTracks]
-  );
 
   return (
-    <div className={`cavia-app-frame ${density === 'compact' ? 'density-compact' : ''} show-kanji`}>
-      {/* Skip to Main Content Link for Keyboard / Screen Readers */}
+    <div className={`cavia-app-frame ${density === 'compact' ? 'density-compact' : ''}`}>
       <a href="#main-content" className="skip-link">
         Skip to main content
       </a>
 
-      {/* Screen reader live announcement region for route changes */}
       <div className="sr-only" role="status" aria-live="polite">
         {routeAnnouncement}
       </div>
 
-      {/* Desktop Sidebar Navigation */}
-      <aside className="cavia-sidebar" aria-label="Main Navigation">
+      <aside className="cavia-sidebar" aria-label="Main navigation">
         <div className="brand-lockup">
           <div className="brand-mark" aria-hidden="true">
-            <AudioWaveform size={22} strokeWidth={1.8} />
+            <AudioWaveform size={20} strokeWidth={1.8} />
           </div>
-          <div className="brand-copy">
-            <span className="brand-name">
-              cavia<span>.</span>
-            </span>
-            <span className="brand-edition">MUSIC / 02</span>
-          </div>
+          <span className="brand-name">
+            cavia<span>.</span>
+          </span>
         </div>
 
-        <div className="sidebar-scrollable-content">
-          <div className="nav-group">
-            <div className="nav-caption">WORKSPACE</div>
-            {nav.map((item) => {
-              const Icon = item.icon;
-              const isActive = page === item.page;
-              return (
-                <button
-                  key={item.page}
-                  type="button"
-                  className={`nav-item ${isActive ? 'active' : ''}`}
-                  aria-current={isActive ? 'page' : undefined}
-                  onClick={() => setPage(item.page)}
-                >
-                  <Icon size={17} strokeWidth={1.8} />
-                  <span>{item.label}</span>
-                  {isActive && <span className="active-marker" />}
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="nav-group collection-group">
-            <div className="nav-caption nav-caption-row">
-              <span>YOUR COLLECTION</span>
-              <span className="nav-count">{summary?.tracks ?? tracks.length}</span>
-            </div>
-            {collections.map((item) => {
-              const Icon = item.icon;
-              const isActive = page === item.page;
-              return (
-                <button
-                  key={item.page}
-                  type="button"
-                  className={`nav-item ${isActive ? 'active' : ''}`}
-                  aria-current={isActive ? 'page' : undefined}
-                  onClick={() => setPage(item.page)}
-                >
-                  <Icon size={17} strokeWidth={1.8} />
-                  <span>{item.label}</span>
-                  {item.count !== undefined && item.count > 0 && (
-                    <span className="nav-badge-count">{item.count}</span>
-                  )}
-                  {isActive && <span className="active-marker" />}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="sidebar-bottom-tray">
-          <div className="integrity-card">
-            <div className="integrity-icon" aria-hidden="true">
-              <ShieldCheck size={16} />
-            </div>
-            <div className="integrity-copy">
-              <strong>Local-first by design</strong>
-              <span>Your library stays yours.</span>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            className={`nav-item ${page === 'settings' ? 'active' : ''}`}
-            aria-current={page === 'settings' ? 'page' : undefined}
-            onClick={() => setPage('settings')}
-          >
-            <Settings2 size={17} strokeWidth={1.8} />
-            <span>Settings</span>
-            {page === 'settings' && <span className="active-marker" />}
-          </button>
-
-          <div className="sidebar-version-tag">
-            CAVIA MUSIC <span>2.0.0 FOUNDATION</span>
-          </div>
-        </div>
+        <nav className="sidebar-nav">
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            const isActive = page === item.page;
+            return (
+              <button
+                key={item.page}
+                type="button"
+                className={`nav-item ${isActive ? 'active' : ''}`}
+                aria-current={isActive ? 'page' : undefined}
+                onClick={() => setPage(item.page)}
+              >
+                <Icon size={17} strokeWidth={1.8} />
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
       </aside>
 
-      {/* Main Content Shell */}
       <main id="main-content" className="cavia-main-shell">
         <header className="cavia-topbar">
-          <div className="breadcrumbs">
-            <span className="crumb-brand">CAVIA</span>
-            <span className="crumb-slash">/</span>
-            <strong className="crumb-current">{pageLabels[page].toUpperCase()}</strong>
-          </div>
+          <span className="topbar-page-title">{pageLabels[page]}</span>
 
           <div className="topbar-actions">
-            <div
-              className={`core-status-pill ${connectionError ? 'status-error' : ''}`}
-              title="Native SQLite Core Connection State"
-            >
-              <span className="status-dot-pulse" />
-              <span>{statusLabel}</span>
-            </div>
-
-            <span className="topbar-divider" />
-
-            <IconButton
-              label="Help and project status"
-              icon={<CircleHelp size={17} />}
-              disabled
-              title="Documentation is in docs/architecture.md"
+            <span
+              className={`core-status-dot status-${statusTone}`}
+              title={statusLabel}
+              aria-label={statusLabel}
+              role="img"
             />
-
-            <button
-              type="button"
-              className="profile-button"
-              title="Local session · No account required"
-            >
-              <span className="profile-avatar" aria-hidden="true">C</span>
-              <span className="profile-name">LOCAL</span>
-              <ChevronDown size={13} aria-hidden="true" />
-            </button>
+            <IconButton
+              label="Import music folder"
+              icon={<FolderPlus size={17} />}
+              onClick={handleImportFolder}
+              disabled={isScanning}
+              title={isScanning ? 'Import already running' : 'Import music folder'}
+            />
           </div>
         </header>
 
-        {/* Global Scan Progress Banner (when scanner is active) */}
         {isScanning && scanProgress && (
           <div className="cavia-scan-banner" role="status" aria-live="polite">
             <div className="scan-banner-header">
               <div className="scan-banner-info">
-                <Loader2 size={16} className="spin-accent text-vermilion" />
+                <Loader2 size={15} className="spin-accent text-vermilion" />
                 <strong className="scan-title">
                   {scanProgress.phase === 'discovering'
-                    ? 'Discovering audio files...'
+                    ? 'Discovering audio files…'
                     : `Indexing collection (${scanProgress.processedCount} / ${scanProgress.discoveredCount})`}
                 </strong>
                 <span className="scan-meta-pill">
                   {scanProgress.newTracksCount} new · {scanProgress.duplicatesCount} skipped
                 </span>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleCancelScan}
-                className="scan-cancel-btn"
-              >
-                Cancel Scan
+              <Button variant="outline" size="sm" onClick={handleCancelScan} className="scan-cancel-btn">
+                Cancel
               </Button>
             </div>
 
@@ -982,156 +951,85 @@ export function App() {
           </div>
         )}
 
-        {/* Scan Success Toast */}
-        {scanNotification && (
-          <div className="cavia-toast toast-success" role="alert">
-            <CheckCircle2 size={16} className="text-ready" />
-            <span>{scanNotification}</span>
-            <button
-              type="button"
-              className="toast-close"
-              onClick={() => setScanNotification(null)}
-              aria-label="Dismiss notification"
+        <div className="cavia-toast-stack" aria-live="polite">
+          {toasts.map((toast) => (
+            <div
+              key={toast.id}
+              className={`cavia-toast toast-${toast.kind}`}
+              role={toast.kind === 'error' ? 'alert' : 'status'}
             >
-              <X size={14} />
-            </button>
-          </div>
-        )}
+              <span className="toast-dot" aria-hidden="true" />
+              <span className="toast-message">{toast.message}</span>
+              <button
+                type="button"
+                className="toast-close"
+                onClick={() => dismissToast(toast.id)}
+                aria-label="Dismiss notification"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
 
-        {/* Scan Error Toast */}
-        {scanError && (
-          <div className="cavia-toast toast-error" role="alert">
-            <XCircle size={16} className="text-danger" />
-            <span>{scanError}</span>
-            <button
-              type="button"
-              className="toast-close"
-              onClick={() => setScanError(null)}
-              aria-label="Dismiss error"
-            >
-              <X size={14} />
-            </button>
-          </div>
-        )}
-
-        {/* Playback Error Toast */}
-        {playbackError && (
-          <div className="cavia-toast toast-error" role="alert">
-            <XCircle size={16} className="text-danger" />
-            <span>{playbackError}</span>
-            <button
-              type="button"
-              className="toast-close"
-              onClick={() => setPlaybackError(null)}
-              aria-label="Dismiss error"
-            >
-              <X size={14} />
-            </button>
-          </div>
-        )}
-
-        {/* Dynamic Page Scroll Area */}
         <div className="cavia-page-scroll" key={page} tabIndex={-1}>
           {page === 'library' && (
             <LibraryView
-              summary={summary}
-              health={health}
               connectionError={connectionError}
-              playlists={playlists}
-              onNavigate={setPage}
-              onOpenCreatePlaylist={() => setPage('playlists')}
-              onImportFolder={handleImportFolder}
-              isScanning={isScanning}
-            />
-          )}
-
-          {page === 'tracks' && (
-            <TracksView
               tracks={tracks}
+              albums={albums}
+              artists={artists}
+              playlists={playlists}
+              likedTracks={likedTracks}
+              density={density}
               isBackendReady={isBackendReady}
-              onToggleLike={handleToggleLike}
-              onImportFolder={handleImportFolder}
-              isScanning={isScanning}
-              onPlayTrack={handlePlayTrack}
-              onPlayAll={handlePlayAll}
-              onShuffleAll={handleShuffleAll}
               currentTrackId={playback.currentTrack?.id}
               isPlaying={playback.status === 'playing'}
-              onAddToPlaylist={handleOpenAddToPlaylist}
-            />
-          )}
-
-          {page === 'playlists' && (
-            <PlaylistsView
-              playlists={playlists}
+              onImportFolder={handleImportFolder}
+              isScanning={isScanning}
               onCreatePlaylist={handleCreatePlaylist}
               onDeletePlaylist={handleDeletePlaylist}
-              isBackendReady={isBackendReady}
-              onPlayTracks={handlePlayPlaylistTracks}
               onPlaylistUpdated={refreshLibrary}
-            />
-          )}
-
-          {page === 'albums' && (
-            <AlbumsView
-              albums={albums}
-              onImportFolder={handleImportFolder}
-              isScanning={isScanning}
-              onAddAlbumToPlaylist={handleOpenAddAlbumToPlaylist}
-              onPlayAlbum={handlePlayAlbum}
-            />
-          )}
-
-          {page === 'artists' && (
-            <ArtistsView
-              artists={artists}
-              onImportFolder={handleImportFolder}
-              isScanning={isScanning}
-              onPlayArtist={handlePlayArtist}
-            />
-          )}
-
-          {page === 'liked' && (
-            <LikedTracksView
-              tracks={likedTracks}
-              isBackendReady={isBackendReady}
               onToggleLike={handleToggleLike}
-              onPlayTrack={handlePlayLikedTrack}
-              onPlayAll={handlePlayAllLiked}
-              onShuffleAll={handleShuffleAllLiked}
-              currentTrackId={playback.currentTrack?.id}
-              isPlaying={playback.status === 'playing'}
+              onPlayTrack={handlePlayTrack}
+              onPlayTracks={handlePlayPlaylistTracks}
+              onPlayAll={handlePlayAll}
+              onShuffleAll={handleShuffleAll}
+              onPlayLikedTrack={handlePlayLikedTrack}
+              onPlayAllLiked={handlePlayAllLiked}
+              onShuffleAllLiked={handleShuffleAllLiked}
+              onPlayAlbum={handlePlayAlbum}
+              onPlayArtist={handlePlayArtist}
               onAddToPlaylist={handleOpenAddToPlaylist}
+              onAddAlbumToPlaylist={handleOpenAddAlbumToPlaylist}
+              onPlayNext={handlePlayNext}
             />
           )}
 
           {page === 'search' && (
             <SearchView
               isBackendReady={isBackendReady}
-              onPlayTrack={handlePlayTrack}
+              density={density}
               onPlayTracks={handlePlayPlaylistTracks}
               onToggleLike={handleToggleLike}
               onAddToPlaylist={handleOpenAddToPlaylist}
               onAddAlbumToPlaylist={handleOpenAddAlbumToPlaylist}
               onPlaylistUpdated={refreshLibrary}
               onDeletePlaylist={handleDeletePlaylist}
+              onPlayAlbum={handlePlayAlbum}
+              onPlayArtist={handlePlayArtist}
+              onPlayNext={handlePlayNext}
               allTracks={tracks}
-              likedTrackIds={likedTrackIds}
               currentTrackId={playback.currentTrack?.id}
               isPlaying={playback.status === 'playing'}
             />
           )}
 
           {page === 'settings' && (
-            <SettingsView
-              health={health}
-              density={density}
-              onDensityChange={setDensity}
-            />
+            <SettingsView health={health} density={density} onDensityChange={setDensity} />
           )}
         </div>
 
-        {/* Persistent Bottom Player Dock */}
         <PlayerDock
           playback={playback}
           isBackendReady={isBackendReady}
@@ -1149,11 +1047,9 @@ export function App() {
           onToggleShuffle={handleToggleShuffle}
           onCycleRepeat={handleCycleRepeat}
           onCycleSpeed={handleCycleSpeed}
-          onToggleLike={handleToggleLike}
         />
       </main>
 
-      {/* Expanded Full-Screen Player Modal */}
       <ExpandedPlayer
         isOpen={isExpandedPlayerOpen}
         onClose={() => setIsExpandedPlayerOpen(false)}
@@ -1180,7 +1076,6 @@ export function App() {
         onToggleLike={handleToggleLike}
       />
 
-      {/* Slide-over Queue Drawer */}
       <QueueDrawer
         isOpen={isQueueOpen}
         onClose={() => setIsQueueOpen(false)}
@@ -1196,7 +1091,6 @@ export function App() {
         onReorderQueue={handleReorderQueue}
       />
 
-      {/* Slide-over Lyrics Drawer */}
       <LyricsDrawer
         isOpen={isLyricsOpen}
         onClose={() => setIsLyricsOpen(false)}
@@ -1206,27 +1100,17 @@ export function App() {
         onSeek={handleSeek}
       />
 
-      {/* Add Track to Playlist Modal */}
       <AddToPlaylistModal
         isOpen={addToPlaylistData.isOpen}
-        onClose={() =>
-          setAddToPlaylistData((prev) => ({ ...prev, isOpen: false }))
-        }
+        onClose={() => setAddToPlaylistData((prev) => ({ ...prev, isOpen: false }))}
         tracksToAdd={addToPlaylistData.tracks}
         contextLabel={addToPlaylistData.contextLabel}
         playlists={playlists}
         onPlaylistUpdated={refreshLibrary}
       />
 
-      {/* Mobile Bottom Navigation Bar */}
-      <nav className="cavia-mobile-nav" aria-label="Mobile Navigation">
-        {[
-          { page: 'library' as const, icon: Home, label: 'Archive' },
-          { page: 'search' as const, icon: Search, label: 'Search' },
-          { page: 'playlists' as const, icon: ListMusic, label: 'Playlists' },
-          { page: 'liked' as const, icon: Heart, label: 'Liked' },
-          { page: 'settings' as const, icon: Settings2, label: 'Settings' },
-        ].map((item) => {
+      <nav className="cavia-mobile-nav" aria-label="Mobile navigation">
+        {navItems.map((item) => {
           const Icon = item.icon;
           const isActive = page === item.page;
           return (
@@ -1246,41 +1130,24 @@ export function App() {
 
       {shutdownError && (
         <Modal
-          isOpen={true}
+          isOpen
           onClose={() => setShutdownError(null)}
-          title="Shutdown Persistence Alert"
+          title="Shutdown persistence alert"
         >
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            <p style={{ color: 'var(--cavia-ivory-dim)', fontSize: '14px', lineHeight: '1.5' }}>
+          <div className="modal-stack">
+            <p className="modal-text">
               Cavia encountered an error flushing your playback state to disk before exiting:
             </p>
-            <div
-              style={{
-                padding: '12px',
-                borderRadius: '6px',
-                backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                border: '1px solid rgba(239, 68, 68, 0.25)',
-                color: '#ef4444',
-                fontSize: '13px',
-                fontFamily: 'monospace',
-                wordBreak: 'break-all',
-              }}
-            >
-              {shutdownError}
-            </div>
-            <p style={{ color: 'var(--cavia-ivory-muted)', fontSize: '12px' }}>
-              You may retry persistence now to preserve your session, or force exit immediately.
+            <div className="modal-error-box">{shutdownError}</div>
+            <p className="modal-text modal-text-muted">
+              Retry persistence to preserve your session, or exit without saving.
             </p>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '8px' }}>
+            <div className="modal-actions-right">
               <Button variant="vermilion-subtle" onClick={handleForceExit}>
-                Force Exit
+                Force exit
               </Button>
-              <Button
-                variant="primary"
-                onClick={handleRetryShutdown}
-                disabled={isRetryingShutdown}
-              >
-                {isRetryingShutdown ? 'Retrying...' : 'Retry Shutdown'}
+              <Button variant="primary" onClick={handleRetryShutdown} disabled={isRetryingShutdown}>
+                {isRetryingShutdown ? 'Retrying…' : 'Retry shutdown'}
               </Button>
             </div>
           </div>

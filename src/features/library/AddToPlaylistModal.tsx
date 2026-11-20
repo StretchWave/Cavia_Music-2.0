@@ -91,7 +91,6 @@ export function AddToPlaylistModal({
         setIsCreatingInline(false);
         setErrorMessage(null);
       }}
-      eyebrow="PLAYLIST ARCHIVE"
       title={isMulti ? `Add ${tracksToAdd.length} Tracks to Playlist` : 'Add Track to Playlist'}
       size="md"
       footer={

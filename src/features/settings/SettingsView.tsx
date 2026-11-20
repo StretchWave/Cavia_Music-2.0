@@ -1,4 +1,4 @@
-import { memo, useState, useEffect } from 'react';
+import { memo, useEffect, useState } from 'react';
 import {
   AlertTriangle,
   AudioWaveform,
@@ -12,12 +12,9 @@ import {
   LogOut,
   Music2,
   Palette,
-  Radio,
-  RadioTower,
   RefreshCw,
   ShieldCheck,
   Sliders,
-  Sparkles,
   Trash2,
   User,
   Volume2,
@@ -28,7 +25,7 @@ import { Badge } from '../../components/Badge';
 import { Button } from '../../components/Button';
 import { Modal } from '../../components/Modal';
 import type { PlatformHealth } from '../../lib/platform';
-import type { ProviderInfo, SyncAccountStatus, SyncConfigDTO } from '../../lib/types';
+import type { SyncAccountStatus, SyncConfigDTO } from '../../lib/types';
 import {
   getArtworkCacheSummary,
   cleanOrphanedArtwork,
@@ -56,17 +53,24 @@ interface SettingsViewProps {
   onDensityChange: (density: 'standard' | 'compact') => void;
 }
 
-type SettingsSection = 'appearance' | 'audio' | 'library' | 'providers' | 'account' | 'about';
+type SettingsSection = 'appearance' | 'audio' | 'library' | 'account' | 'about';
+
+const SECTIONS: Array<{ id: SettingsSection; label: string; icon: typeof Palette }> = [
+  { id: 'appearance', label: 'Appearance', icon: Palette },
+  { id: 'audio', label: 'Audio', icon: Volume2 },
+  { id: 'library', label: 'Library', icon: Database },
+  { id: 'account', label: 'Account', icon: Cloud },
+  { id: 'about', label: 'About', icon: Info },
+];
 
 export const SettingsView = memo(function SettingsView({
   health,
   density,
   onDensityChange,
 }: SettingsViewProps) {
-  const [activeTab, setActiveTab] = useState<SettingsSection>('appearance');
-  const [selectedProvider, setSelectedProvider] = useState<ProviderInfo | null>(null);
+  const [activeSection, setActiveSection] = useState<SettingsSection>('appearance');
 
-  // Artwork Cache Management state
+  // Artwork cache management
   const [artworkSummary, setArtworkSummary] = useState<ArtworkCacheSummary | null>(null);
   const [artworkLoading, setArtworkLoading] = useState(false);
   const [artworkError, setArtworkError] = useState<string | null>(null);
@@ -75,6 +79,21 @@ export const SettingsView = memo(function SettingsView({
   const [showCleanupModal, setShowCleanupModal] = useState(false);
   const [cleanupResult, setCleanupResult] = useState<ArtworkCleanupResult | null>(null);
   const [recoveryResult, setRecoveryResult] = useState<ArtworkRecoveryResult | null>(null);
+
+  // Cloud sync
+  const [syncStatus, setSyncStatus] = useState<SyncAccountStatus | null>(null);
+  const [, setSyncConfigState] = useState<SyncConfigDTO | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [showDeleteCloudModal, setShowDeleteCloudModal] = useState(false);
+  const [isDeletingCloud, setIsDeletingCloud] = useState(false);
+  const [configUrlInput, setConfigUrlInput] = useState('');
+  const [configKeyInput, setConfigKeyInput] = useState('');
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
 
   const fetchArtworkSummary = async () => {
     setArtworkLoading(true);
@@ -88,21 +107,6 @@ export const SettingsView = memo(function SettingsView({
       setArtworkLoading(false);
     }
   };
-
-  // Cloud Sync state
-  const [syncStatus, setSyncStatus] = useState<SyncAccountStatus | null>(null);
-  const [_syncConfig, setSyncConfigState] = useState<SyncConfigDTO | null>(null);
-  const [syncError, setSyncError] = useState<string | null>(null);
-  const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [authEmail, setAuthEmail] = useState('');
-  const [authPassword, setAuthPassword] = useState('');
-  const [isAuthenticating, setIsAuthenticating] = useState(false);
-  const [showDeleteCloudModal, setShowDeleteCloudModal] = useState(false);
-  const [isDeletingCloud, setIsDeletingCloud] = useState(false);
-  const [configUrlInput, setConfigUrlInput] = useState('');
-  const [configKeyInput, setConfigKeyInput] = useState('');
-  const [isSavingConfig, setIsSavingConfig] = useState(false);
 
   const fetchSyncInfo = async () => {
     try {
@@ -119,12 +123,32 @@ export const SettingsView = memo(function SettingsView({
   };
 
   useEffect(() => {
-    if (activeTab === 'library') {
-      fetchArtworkSummary();
-    } else if (activeTab === 'account' || activeTab === 'providers') {
-      fetchSyncInfo();
-    }
-  }, [activeTab]);
+    let active = true;
+
+    getArtworkCacheSummary()
+      .then((summary) => {
+        if (active) setArtworkSummary(summary);
+      })
+      .catch((err) => {
+        if (active) setArtworkError(err instanceof Error ? err.message : String(err));
+      });
+
+    Promise.all([getSyncStatus(), getSyncConfig()])
+      .then(([status, cfg]) => {
+        if (!active) return;
+        setSyncStatus(status);
+        setSyncConfigState(cfg);
+        if (cfg) {
+          setConfigUrlInput(cfg.supabaseUrl);
+          setConfigKeyInput(cfg.supabaseAnonKey);
+        }
+      })
+      .catch((e) => console.error('Failed to load sync info:', e));
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -135,7 +159,7 @@ export const SettingsView = memo(function SettingsView({
       const status = await syncLogin(authEmail.trim(), authPassword);
       setSyncStatus(status);
       setAuthPassword('');
-      setSyncSuccessMsg('Signed in successfully');
+      setSyncSuccessMsg('Signed in');
       setTimeout(() => setSyncSuccessMsg(null), 3000);
     } catch (err) {
       setSyncError(err instanceof Error ? err.message : String(err));
@@ -152,7 +176,7 @@ export const SettingsView = memo(function SettingsView({
       const status = await syncSignup(authEmail.trim(), authPassword);
       setSyncStatus(status);
       setAuthPassword('');
-      setSyncSuccessMsg('Account created successfully');
+      setSyncSuccessMsg('Account created');
       setTimeout(() => setSyncSuccessMsg(null), 3000);
     } catch (err) {
       setSyncError(err instanceof Error ? err.message : String(err));
@@ -204,7 +228,7 @@ export const SettingsView = memo(function SettingsView({
     try {
       await deleteCloudData();
       setShowDeleteCloudModal(false);
-      setSyncSuccessMsg('Cloud data deleted successfully. Local library remains intact.');
+      setSyncSuccessMsg('Cloud data deleted. Local library remains intact.');
       setTimeout(() => setSyncSuccessMsg(null), 4000);
       await fetchSyncInfo();
     } catch (err) {
@@ -258,686 +282,411 @@ export const SettingsView = memo(function SettingsView({
     }
   };
 
-  const providers: ProviderInfo[] = [
-    {
-      id: 'local_storage',
-      name: 'Local Audio Engine',
-      category: 'local',
-      description: 'Reads local audio files (FLAC, MP3, WAV, AAC) directly from your device storage with zero network traffic.',
-      status: 'operational',
-      capabilities: {
-        catalogueSearch: true,
-        metadataLookup: true,
-        playback: true,
-        caching: true,
-        lyrics: true,
-      },
-      notes: 'Active by default. Staged safely through platform-native file dialogs.',
-    },
-    {
-      id: 'lrclib',
-      name: 'LRCLIB Lyrics Database',
-      category: 'lyrics',
-      description: 'Open-source community-driven synchronized lyrics service. Non-commercial and legally authorized.',
-      status: 'planned',
-      capabilities: {
-        catalogueSearch: false,
-        metadataLookup: false,
-        playback: false,
-        caching: true,
-        lyrics: true,
-      },
-      notes: 'Planned for Milestone 4. No account or API secret required.',
-    },
-    {
-      id: 'cavia_cloud_sync',
-      name: 'Cavia Cloud Sync (Supabase)',
-      category: 'streaming',
-      description: 'Optional cross-device synchronization for playlists and favorites. RLS protected with zero audio upload.',
-      status: syncStatus?.authenticated ? 'operational' : 'unconfigured',
-      capabilities: {
-        catalogueSearch: false,
-        metadataLookup: true,
-        playback: false,
-        caching: true,
-        lyrics: false,
-      },
-      notes: syncStatus?.authenticated
-        ? `Connected as ${syncStatus.accountEmail || syncStatus.accountId}. Refresh token protected in OS secure storage.`
-        : 'Optional. Operates 100% offline when unconfigured.',
-    },
-    {
-      id: 'spotify',
-      name: 'Spotify PKCE',
-      category: 'metadata',
-      description: 'Authorized OAuth 2.0 PKCE integration for playlist import and catalogue metadata lookups.',
-      status: 'unconfigured',
-      capabilities: {
-        catalogueSearch: true,
-        metadataLookup: true,
-        playback: false,
-        caching: false,
-        lyrics: false,
-      },
-      notes: 'Metadata only. Does not scrape or bypass DRM. Credentials stored in platform secure storage.',
-    },
-    {
-      id: 'musicbrainz',
-      name: 'MusicBrainz',
-      category: 'metadata',
-      description: 'Open music encyclopedia for enriched discography and release credit resolution.',
-      status: 'planned',
-      capabilities: {
-        catalogueSearch: true,
-        metadataLookup: true,
-        playback: false,
-        caching: true,
-        lyrics: false,
-      },
-      notes: 'Community-maintained open database integration.',
-    },
-  ];
-
   return (
     <section className="cavia-subpage settings-page">
-      <div className="subpage-header">
-        <div>
-          <div className="cavia-eyebrow">
-            <span className="eyebrow-accent-line" />
-            <span>CONFIGURATION & ARCHITECTURE</span>
-          </div>
-          <h1 className="subpage-title">
-            Settings &<br />
-            <em>system.</em>
-          </h1>
-          <p className="subpage-subtitle">
-            Configure UI nuance, inspect audio boundaries, and audit local storage status.
-          </p>
-        </div>
-      </div>
+      <header className="settings-header">
+        <h1 className="library-title">
+          Settings<span>.</span>
+        </h1>
+      </header>
 
-      {/* Tabs */}
-      <div className="settings-tabs-wrap">
-        <Tabs
-          items={[
-            { id: 'appearance', label: 'Appearance', icon: <Palette size={14} /> },
-            { id: 'audio', label: 'Audio Engine', icon: <Volume2 size={14} /> },
-            { id: 'library', label: 'Library & SQLite', icon: <Database size={14} /> },
-            { id: 'providers', label: 'Providers', icon: <Radio size={14} /> },
-            { id: 'account', label: 'Account & Sync', icon: <Cloud size={14} /> },
-            { id: 'about', label: 'About & Policy', icon: <Info size={14} /> },
-          ]}
-          activeId={activeTab}
-          onChange={setActiveTab}
-          variant="segmented"
-        />
-      </div>
+      <div className="settings-layout">
+        <nav className="settings-nav" aria-label="Settings sections">
+          {SECTIONS.map((section) => {
+            const Icon = section.icon;
+            const isActive = activeSection === section.id;
+            return (
+              <button
+                key={section.id}
+                type="button"
+                className={`settings-nav-item ${isActive ? 'active' : ''}`}
+                aria-current={isActive ? 'page' : undefined}
+                onClick={() => setActiveSection(section.id)}
+              >
+                <Icon size={16} />
+                <span>{section.label}</span>
+              </button>
+            );
+          })}
+        </nav>
 
-      {/* Tab: Appearance */}
-      {activeTab === 'appearance' && (
-        <div className="settings-content-pane">
-          <div className="settings-card">
-            <div className="card-head">
-              <Layers size={18} className="card-icon" />
-              <div>
-                <h3>Interface Density</h3>
-                <p>Adjust padding, row heights, and player dock sizing for high-res displays.</p>
-              </div>
-            </div>
-            <div className="setting-control-row">
-              <Tabs
-                items={[
-                  { id: 'standard', label: 'Standard (Relaxed)' },
-                  { id: 'compact', label: 'Compact (Studio)' },
-                ]}
-                activeId={density}
-                onChange={onDensityChange}
-                variant="pill"
-              />
-            </div>
-          </div>
+        <div className="settings-content">
+          <section
+            className={`settings-section ${activeSection === 'appearance' ? 'is-active' : ''}`}
+            aria-labelledby="settings-appearance"
+          >
+            <h2 id="settings-appearance" className="settings-section-title">Appearance</h2>
 
-          <div className="settings-card">
-            <div className="card-head">
-              <Palette size={18} className="card-icon text-vermilion" />
-              <div>
-                <h3>Brand Identity & Color Tokens</h3>
-                <p>Cavia operates strictly on its established obsidian, aged ivory, and restrained vermilion palette.</p>
-              </div>
-            </div>
-            <div className="palette-spec-grid">
-              <div className="palette-spec-item">
-                <span className="palette-color-swatch" style={{ background: '#090a0d', border: '1px solid rgba(255,255,255,0.15)' }} />
-                <div className="palette-spec-meta">
-                  <strong>Canvas</strong>
-                  <code>#090a0d</code>
-                </div>
-              </div>
-              <div className="palette-spec-item">
-                <span className="palette-color-swatch" style={{ background: '#12141a', border: '1px solid rgba(255,255,255,0.15)' }} />
-                <div className="palette-spec-meta">
-                  <strong>Surface</strong>
-                  <code>#12141a</code>
-                </div>
-              </div>
-              <div className="palette-spec-item">
-                <span className="palette-color-swatch" style={{ background: '#f5f2eb' }} />
-                <div className="palette-spec-meta">
-                  <strong>Aged Ivory</strong>
-                  <code>#f5f2eb</code>
-                </div>
-              </div>
-              <div className="palette-spec-item">
-                <span className="palette-color-swatch" style={{ background: '#d64732' }} />
-                <div className="palette-spec-meta">
-                  <strong>Restrained Vermilion</strong>
-                  <code>#d64732</code>
-                </div>
-              </div>
-            </div>
-            <p className="palette-policy-footnote">
-              Vermilion is the fixed, non-negotiable brand accent. Status colors are strictly semantic (ready / warning / error) and never used as decorative alternatives.
-            </p>
-          </div>
-
-          <div className="settings-card">
-            <div className="card-head">
-              <Sparkles size={18} className="card-icon" />
-              <div>
-                <h3>Editorial Details & Visual Watermarks</h3>
-                <p>Authentic archival cues, physical record details, and calligraphy.</p>
-              </div>
-            </div>
-            <div className="kanji-meaning-grid">
-              <div className="kanji-meaning-chip">
-                <span className="kanji-symbol">藏</span>
-                <div className="kanji-text">
-                  <strong>Archive</strong>
-                  <span>Library & Storage</span>
-                </div>
-              </div>
-              <div className="kanji-meaning-chip">
-                <span className="kanji-symbol">音</span>
-                <div className="kanji-text">
-                  <strong>Sound</strong>
-                  <span>Acoustic Playback</span>
-                </div>
-              </div>
-              <div className="kanji-meaning-chip">
-                <span className="kanji-symbol">盤</span>
-                <div className="kanji-text">
-                  <strong>Record</strong>
-                  <span>Albums & Vinyl</span>
-                </div>
-              </div>
-              <div className="kanji-meaning-chip">
-                <span className="kanji-symbol">選</span>
-                <div className="kanji-text">
-                  <strong>Curation</strong>
-                  <span>Playlists</span>
-                </div>
-              </div>
-              <div className="kanji-meaning-chip">
-                <span className="kanji-symbol">尋</span>
-                <div className="kanji-text">
-                  <strong>Search</strong>
-                  <span>Discovery</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Tab: Audio Engine */}
-      {activeTab === 'audio' && (
-        <div className="settings-content-pane">
-          <div className="cavia-banner banner-info">
-            <Music2 size={18} className="banner-icon-accent" />
-            <div className="banner-content">
-              <strong>Playback Engine Boundary Architecture</strong>
-              <p>
-                All platforms share a common Cavia audio contract. Windows utilizes native Rodio (CPAL WASAPI + Symphonia); macOS utilizes Rodio (CPAL CoreAudio); Android and iOS native playback engines are unintegrated in this desktop build. Controls remain safely disabled until concrete backend initialization occurs.
-              </p>
-            </div>
-            <Badge variant="warn" size="sm">
-              MILESTONE 3
-            </Badge>
-          </div>
-
-          <div className="settings-grid-two">
             <div className="settings-card">
               <div className="card-head">
-                <Sliders size={18} className="card-icon" />
+                <Layers size={18} className="card-icon" />
                 <div>
-                  <h3>Audio Backend Status</h3>
-                  <p>Target: {health?.platform ?? 'Windows x86_64'} · Backend: <code>{health?.backend_name ?? 'rodio_native'}</code></p>
+                  <h3>Interface density</h3>
+                  <p>Adjust track row heights.</p>
                 </div>
               </div>
-              <div className="setting-status-line">
-                <Badge
-                  variant={
-                    health?.audio_backend === 'ready'
-                      ? 'ready'
-                      : health?.audio_backend === 'error'
-                        ? 'warn'
-                        : 'outline'
-                  }
-                  size="md"
-                >
-                  {health?.audio_backend === 'ready'
-                    ? 'INTEGRATED'
-                    : health?.audio_backend === 'device_unavailable'
-                      ? 'NO AUDIO DEVICE'
-                      : health?.audio_backend === 'not_integrated'
-                        ? 'BACKEND NOT INTEGRATED'
+              <div className="setting-control-row">
+                <Tabs
+                  items={[
+                    { id: 'standard', label: 'Standard' },
+                    { id: 'compact', label: 'Compact' },
+                  ]}
+                  activeId={density}
+                  onChange={onDensityChange}
+                  variant="pill"
+                />
+              </div>
+            </div>
+
+            <div className="settings-card">
+              <div className="card-head">
+                <Palette size={18} className="card-icon" />
+                <div>
+                  <h3>Palette</h3>
+                  <p>Obsidian, aged ivory, and restrained vermilion.</p>
+                </div>
+              </div>
+              <div className="palette-strip">
+                <span className="palette-swatch" style={{ background: '#090a0d' }} title="Canvas #090a0d" />
+                <span className="palette-swatch" style={{ background: '#12141a' }} title="Surface #12141a" />
+                <span className="palette-swatch" style={{ background: '#f5f2eb' }} title="Aged ivory #f5f2eb" />
+                <span className="palette-swatch" style={{ background: '#d64732' }} title="Vermilion #d64732" />
+              </div>
+            </div>
+          </section>
+
+          <section
+            className={`settings-section ${activeSection === 'audio' ? 'is-active' : ''}`}
+            aria-labelledby="settings-audio"
+          >
+            <h2 id="settings-audio" className="settings-section-title">Audio</h2>
+
+            <div className="cavia-banner banner-info">
+              <Music2 size={17} className="banner-icon-accent" />
+              <div className="banner-content">
+                <strong>Playback engine</strong>
+                <p>
+                  Controls stay disabled until a real audio backend initializes. Windows and macOS use the
+                  native Rodio path; mobile engines are not integrated in this build.
+                </p>
+              </div>
+            </div>
+
+            <div className="settings-grid-two">
+              <div className="settings-card">
+                <div className="card-head">
+                  <Sliders size={18} className="card-icon" />
+                  <div>
+                    <h3>Backend status</h3>
+                    <p>{health?.platform ?? 'Unknown platform'} · {health?.backend_name ?? 'rodio_native'}</p>
+                  </div>
+                </div>
+                <div className="setting-status-line">
+                  <Badge
+                    variant={
+                      health?.audio_backend === 'ready'
+                        ? 'ready'
                         : health?.audio_backend === 'error'
-                          ? 'INITIALIZATION ERROR'
-                          : health?.audio_backend === 'unsupported'
-                            ? 'UNSUPPORTED'
-                            : health?.audio_backend === 'initializing'
-                              ? 'INITIALIZING'
-                              : 'STANDBY'}
-                </Badge>
-                <span className="text-muted-xs">
-                  {health?.smtc_status === 'ready'
-                    ? 'SMTC ACTIVE'
-                    : health?.smtc_status === 'error'
-                      ? `SMTC ERROR: ${health.smtc_error || 'Runtime fault'}`
-                      : health?.smtc_status === 'unavailable'
-                        ? health?.smtc_error
-                          ? `SMTC UNAVAILABLE: ${health.smtc_error}`
-                          : 'SMTC UNAVAILABLE (No active window handle)'
-                        : health?.smtc_status === 'unsupported'
-                          ? health?.smtc_error
-                            ? `SMTC UNSUPPORTED: ${health.smtc_error}`
-                            : 'SMTC UNSUPPORTED'
-                          : health?.system_media_controls
-                            ? 'SMTC ACTIVE'
-                            : 'SMTC UNAVAILABLE'} · No mock audio
-                </span>
-              </div>
-            </div>
-
-            <div className="settings-card">
-              <div className="card-head">
-                <Volume2 size={18} className="card-icon" />
-                <div>
-                  <h3>Output Resampling</h3>
-                  <p>High-resolution bit-perfect streaming</p>
+                          ? 'warn'
+                          : 'outline'
+                    }
+                    size="md"
+                  >
+                    {health?.audio_backend === 'ready'
+                      ? 'INTEGRATED'
+                      : health?.audio_backend === 'device_unavailable'
+                        ? 'NO AUDIO DEVICE'
+                        : health?.audio_backend === 'not_integrated'
+                          ? 'NOT INTEGRATED'
+                          : health?.audio_backend === 'error'
+                            ? 'INITIALIZATION ERROR'
+                            : health?.audio_backend === 'unsupported'
+                              ? 'UNSUPPORTED'
+                              : health?.audio_backend === 'initializing'
+                                ? 'INITIALIZING'
+                                : 'STANDBY'}
+                  </Badge>
+                  <span className="text-muted-xs">
+                    {health?.smtc_status === 'ready' ? 'Media controls active' : 'Media controls unavailable'}
+                  </span>
                 </div>
               </div>
-              <div className="setting-status-line">
-                <span className="text-dim-sm">Direct WASAPI / CoreAudio (Milestone 3)</span>
-                <Badge variant="neutral" size="sm">
-                  STANDBY
-                </Badge>
+
+              <div className="settings-card">
+                <div className="card-head">
+                  <Volume2 size={18} className="card-icon" />
+                  <div>
+                    <h3>Output</h3>
+                    <p>Direct WASAPI / CoreAudio path.</p>
+                  </div>
+                </div>
+                <div className="setting-status-line">
+                  <span className="text-dim-sm">Resampling is not enabled.</span>
+                  <Badge variant="neutral" size="sm">STANDBY</Badge>
+                </div>
+              </div>
+
+              <div className="settings-card">
+                <div className="card-head">
+                  <Database size={18} className="card-icon" />
+                  <div>
+                    <h3>Session persistence</h3>
+                    <p>Playback state is written to SQLite off the UI thread.</p>
+                  </div>
+                </div>
+                <div className="setting-status-line">
+                  <Badge
+                    variant={
+                      health?.persistence_status === 'healthy'
+                        ? 'ready'
+                        : health?.persistence_status === 'write_failed' ||
+                            health?.persistence_status === 'worker_unavailable'
+                          ? 'vermilion'
+                          : 'warn'
+                    }
+                    size="md"
+                  >
+                    {health?.persistence_status === 'healthy'
+                      ? 'PERSISTENCE READY'
+                      : health?.persistence_status === 'write_pending'
+                        ? 'SAVING'
+                        : health?.persistence_status === 'write_failed'
+                          ? 'SAVE FAILED'
+                          : health?.persistence_status === 'worker_unavailable'
+                            ? 'UNAVAILABLE'
+                            : health?.persistence_status === 'shutting_down'
+                              ? 'SAVING BEFORE EXIT'
+                              : 'PERSISTENCE READY'}
+                  </Badge>
+                  <span className="text-muted-xs">
+                    {health?.persistence_error ? health.persistence_error : 'Non-blocking WAL writes'}
+                  </span>
+                </div>
               </div>
             </div>
+          </section>
+
+          <section
+            className={`settings-section ${activeSection === 'library' ? 'is-active' : ''}`}
+            aria-labelledby="settings-library"
+          >
+            <h2 id="settings-library" className="settings-section-title">Library</h2>
 
             <div className="settings-card">
               <div className="card-head">
                 <Database size={18} className="card-icon" />
                 <div>
-                  <h3>State Persistence Engine</h3>
-                  <p>Dedicated background thread writing playback session to SQLite</p>
+                  <h3>SQLite database</h3>
+                  <p>Rust-owned connection with forward-only migrations.</p>
                 </div>
               </div>
-              <div className="setting-status-line">
-                <Badge
-                  variant={
-                    health?.persistence_status === 'healthy'
-                      ? 'ready'
-                      : health?.persistence_status === 'write_failed' ||
-                        health?.persistence_status === 'worker_unavailable'
-                        ? 'vermilion'
-                        : 'warn'
-                  }
-                  size="md"
+              <div className="sqlite-stats-grid">
+                <div className="sqlite-stat-box">
+                  <span className="box-label">CONNECTION</span>
+                  <strong className="box-val text-ready">
+                    {health?.database_connected ? 'CONNECTED' : 'DISCONNECTED'}
+                  </strong>
+                </div>
+                <div className="sqlite-stat-box">
+                  <span className="box-label">MIGRATION</span>
+                  <strong className="box-val">{health?.active_migration ?? '—'}</strong>
+                </div>
+                <div className="sqlite-stat-box">
+                  <span className="box-label">JOURNAL</span>
+                  <strong className="box-val">WAL</strong>
+                </div>
+              </div>
+            </div>
+
+            <div className="settings-card">
+              <div className="card-head">
+                <HardDrive size={18} className="card-icon" />
+                <div>
+                  <h3>Artwork cache</h3>
+                  <p>Managed local artwork with SHA-256 deduplication.</p>
+                </div>
+              </div>
+
+              {artworkSummary && !artworkSummary.cacheDirExists && (
+                <div className="cavia-banner banner-warn settings-inline-banner">
+                  <AlertTriangle size={16} className="text-warn" />
+                  <div className="banner-content">
+                    <strong>Cache directory inaccessible</strong>
+                    <p><code>{artworkSummary.cacheDirPath}</code></p>
+                  </div>
+                </div>
+              )}
+
+              {artworkError && (
+                <div className="cavia-banner banner-error settings-inline-banner">
+                  <AlertTriangle size={16} className="text-error" />
+                  <div className="banner-content">
+                    <strong>Operation error</strong>
+                    <p>{artworkError}</p>
+                  </div>
+                </div>
+              )}
+
+              {cleanupResult && (
+                <div className="cavia-banner banner-info settings-inline-banner">
+                  <CheckCircle2 size={16} className="text-ready" />
+                  <div className="banner-content">
+                    <strong>Cleanup complete</strong>
+                    <p>
+                      Reclaimed {formatBytes(cleanupResult.reclaimedBytes)} by removing{' '}
+                      {cleanupResult.deletedFiles} orphaned files.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {recoveryResult && (
+                <div className="cavia-banner banner-info settings-inline-banner">
+                  <CheckCircle2 size={16} className="text-ready" />
+                  <div className="banner-content">
+                    <strong>Recovery complete</strong>
+                    <p>
+                      {recoveryResult.recoveredTracks} restored, {recoveryResult.alreadyValidTracks} already
+                      valid, {recoveryResult.noEmbeddedArtwork} without embedded artwork.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              <div className="sqlite-stats-grid">
+                <div className="sqlite-stat-box">
+                  <span className="box-label">CACHE USAGE</span>
+                  <strong className="box-val">
+                    {artworkLoading ? 'Scanning…' : formatBytes(artworkSummary?.totalBytes ?? 0)}
+                  </strong>
+                  <span className="box-subval">{artworkSummary?.totalFiles ?? 0} files</span>
+                </div>
+                <div className="sqlite-stat-box">
+                  <span className="box-label">REFERENCED</span>
+                  <strong className="box-val text-ready">
+                    {artworkLoading ? '…' : `${artworkSummary?.referencedFiles ?? 0} active`}
+                  </strong>
+                </div>
+                <div className="sqlite-stat-box">
+                  <span className="box-label">ORPHANED</span>
+                  <strong className={`box-val ${(artworkSummary?.orphanedFiles ?? 0) > 0 ? 'text-warn' : 'text-ready'}`}>
+                    {artworkLoading ? '…' : `${artworkSummary?.orphanedFiles ?? 0} files`}
+                  </strong>
+                  <span className="box-subval">{formatBytes(artworkSummary?.reclaimableBytes ?? 0)} reclaimable</span>
+                </div>
+                <div className="sqlite-stat-box">
+                  <span className="box-label">MISSING</span>
+                  <strong className={`box-val ${(artworkSummary?.missingReferencedFiles ?? 0) > 0 ? 'text-error' : 'text-ready'}`}>
+                    {artworkLoading ? '…' : `${artworkSummary?.missingReferencedFiles ?? 0} tracks`}
+                  </strong>
+                  <span className="box-subval">Repairable from audio</span>
+                </div>
+              </div>
+
+              <div className="settings-button-row">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  icon={<RefreshCw size={13} className={artworkLoading ? 'cavia-spin' : undefined} />}
+                  onClick={fetchArtworkSummary}
+                  disabled={artworkLoading || isCleaning || isRepairing}
                 >
-                  {health?.persistence_status === 'healthy'
-                    ? 'PERSISTENCE READY'
-                    : health?.persistence_status === 'write_pending'
-                      ? 'SAVING PLAYBACK STATE'
-                      : health?.persistence_status === 'write_failed'
-                        ? 'SAVE FAILED'
-                        : health?.persistence_status === 'worker_unavailable'
-                          ? 'PERSISTENCE UNAVAILABLE'
-                          : health?.persistence_status === 'shutting_down'
-                            ? 'SAVING BEFORE EXIT'
-                            : 'PERSISTENCE READY'}
-                </Badge>
-                <span className="text-muted-xs">
-                  {health?.persistence_error
-                    ? `Error: ${health.persistence_error}`
-                    : health?.persistence_status === 'write_pending'
-                      ? 'Debouncing state flush to disk'
-                      : 'Non-blocking WAL mode writes'}
-                </span>
+                  {artworkLoading ? 'Inspecting…' : 'Refresh'}
+                </Button>
+                <Button
+                  variant={(artworkSummary?.orphanedFiles ?? 0) > 0 ? 'primary' : 'outline'}
+                  size="sm"
+                  icon={<Trash2 size={13} />}
+                  onClick={() => setShowCleanupModal(true)}
+                  disabled={artworkLoading || isCleaning || isRepairing || (artworkSummary?.orphanedFiles ?? 0) === 0}
+                >
+                  Clean orphaned
+                </Button>
+                <Button
+                  variant={(artworkSummary?.missingReferencedFiles ?? 0) > 0 ? 'primary' : 'outline'}
+                  size="sm"
+                  icon={<Wrench size={13} />}
+                  onClick={handleRepairMissing}
+                  disabled={
+                    artworkLoading ||
+                    isCleaning ||
+                    isRepairing ||
+                    (artworkSummary?.missingReferencedFiles ?? 0) === 0
+                  }
+                >
+                  {isRepairing ? 'Repairing…' : 'Repair missing'}
+                </Button>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+          </section>
 
-      {/* Tab: Library & SQLite */}
-      {activeTab === 'library' && (
-        <div className="settings-content-pane">
-          <div className="settings-card">
-            <div className="card-head">
-              <Database size={18} className="card-icon" />
-              <div>
-                <h3>SQLite Database Engine</h3>
-                <p>Rust-owned SQLite connection managed with compile-time SQLx migrations.</p>
-              </div>
-            </div>
-            <div className="sqlite-stats-grid">
-              <div className="sqlite-stat-box">
-                <span className="box-label">CONNECTION STATUS</span>
-                <strong className="box-val text-ready">
-                  {health?.database_connected ? 'CONNECTED & HEALTHY' : 'DISCONNECTED'}
-                </strong>
-              </div>
-              <div className="sqlite-stat-box">
-                <span className="box-label">SCHEMA MIGRATION</span>
-                <strong className="box-val">{health?.active_migration ?? '0002_playback_state_volume.sql (Active)'}</strong>
-              </div>
-              <div className="sqlite-stat-box">
-                <span className="box-label">SQLITE JOURNAL</span>
-                <strong className="box-val">WAL Mode (Configured)</strong>
-              </div>
-            </div>
-          </div>
+          <section
+            className={`settings-section ${activeSection === 'account' ? 'is-active' : ''}`}
+            aria-labelledby="settings-account"
+          >
+            <h2 id="settings-account" className="settings-section-title">Account</h2>
 
-          <div className="settings-card">
-            <div className="card-head">
-              <HardDrive size={18} className="card-icon" />
-              <div>
-                <h3>Artwork Cache & Storage Management</h3>
-                <p>Managed local artwork cache, SHA-256 deduplication, and file recovery.</p>
+            <div className="cavia-banner banner-info">
+              <Cloud size={16} className="banner-icon text-ready" />
+              <div className="banner-content">
+                <strong>Optional cloud sync</strong>
+                <p>Playlists and likes can sync. Audio files and local paths never leave this device.</p>
               </div>
             </div>
 
-            {artworkSummary && !artworkSummary.cacheDirExists && (
-              <div className="cavia-banner banner-warn" style={{ marginTop: '12px' }}>
-                <AlertTriangle size={16} className="text-warn" />
-                <div className="banner-content">
-                  <strong>Cache Directory Inaccessible</strong>
-                  <p>The artwork cache folder at <code>{artworkSummary.cacheDirPath}</code> could not be reached.</p>
-                </div>
+            {syncSuccessMsg && (
+              <div className="sync-alert sync-alert-success">
+                <CheckCircle2 size={15} />
+                <span>{syncSuccessMsg}</span>
               </div>
             )}
 
-            {artworkError && (
-              <div className="cavia-banner banner-error" style={{ marginTop: '12px' }}>
-                <AlertTriangle size={16} className="text-error" />
-                <div className="banner-content">
-                  <strong>Operation Error</strong>
-                  <p>{artworkError}</p>
-                </div>
+            {syncError && (
+              <div className="sync-alert sync-alert-error">
+                <AlertTriangle size={15} />
+                <span>{syncError}</span>
               </div>
             )}
 
-            {cleanupResult && (
-              <div className="cavia-banner banner-info" style={{ marginTop: '12px' }}>
-                <CheckCircle2 size={16} className="text-ready" />
-                <div className="banner-content">
-                  <strong>Orphan Cleanup Completed</strong>
-                  <p>
-                    Reclaimed {formatBytes(cleanupResult.reclaimedBytes)} by safely removing {cleanupResult.deletedFiles} orphaned files.
-                    {cleanupResult.skippedFiles > 0 ? ` ${cleanupResult.skippedFiles} files skipped due to active references.` : ''}
-                    {cleanupResult.failures.length > 0 ? ` ${cleanupResult.failures.length} deletion errors encountered.` : ''}
-                  </p>
+            <div className="settings-card">
+              <div className="card-head">
+                <User size={18} className="card-icon text-vermilion" />
+                <div>
+                  <h3>Cavia account</h3>
+                  <p>Sign in to synchronize your library metadata.</p>
                 </div>
               </div>
-            )}
 
-            {recoveryResult && (
-              <div className="cavia-banner banner-info" style={{ marginTop: '12px' }}>
-                <CheckCircle2 size={16} className="text-ready" />
-                <div className="banner-content">
-                  <strong>Artwork Recovery Completed</strong>
-                  <p>
-                    Checked {recoveryResult.totalChecked} tracks: {recoveryResult.recoveredTracks} restored ({formatBytes(recoveryResult.reclaimedOrWrittenBytes)}), {recoveryResult.alreadyValidTracks} already valid, {recoveryResult.noEmbeddedArtwork} with no embedded tags, {recoveryResult.missingAudioFiles} audio files missing.
-                  </p>
-                </div>
-              </div>
-            )}
-
-            <div className="sqlite-stats-grid" style={{ marginTop: '14px' }}>
-              <div className="sqlite-stat-box">
-                <span className="box-label">CACHE USAGE</span>
-                <strong className="box-val">
-                  {artworkLoading ? 'Scanning...' : formatBytes(artworkSummary?.totalBytes ?? 0)}
-                </strong>
-                <span className="box-subval text-dim-xs">
-                  {artworkSummary?.totalFiles ?? 0} total artwork files
-                </span>
-              </div>
-              <div className="sqlite-stat-box">
-                <span className="box-label">LIBRARY REFERENCES</span>
-                <strong className="box-val text-ready">
-                  {artworkLoading ? '...' : `${artworkSummary?.referencedFiles ?? 0} ACTIVE`}
-                </strong>
-                <span className="box-subval text-dim-xs">Referenced in database</span>
-              </div>
-              <div className="sqlite-stat-box">
-                <span className="box-label">ORPHANED ARTWORK</span>
-                <strong className={`box-val ${(artworkSummary?.orphanedFiles ?? 0) > 0 ? 'text-warn' : 'text-ready'}`}>
-                  {artworkLoading ? '...' : `${artworkSummary?.orphanedFiles ?? 0} ORPHANS`}
-                </strong>
-                <span className="box-subval text-dim-xs">
-                  {formatBytes(artworkSummary?.reclaimableBytes ?? 0)} reclaimable
-                </span>
-              </div>
-              <div className="sqlite-stat-box">
-                <span className="box-label">MISSING ON DISK</span>
-                <strong className={`box-val ${(artworkSummary?.missingReferencedFiles ?? 0) > 0 ? 'text-error' : 'text-ready'}`}>
-                  {artworkLoading ? '...' : `${artworkSummary?.missingReferencedFiles ?? 0} TRACKS`}
-                </strong>
-                <span className="box-subval text-dim-xs">
-                  {(artworkSummary?.missingReferencedFiles ?? 0) > 0 ? 'Repairable from audio' : 'All artwork verified'}
-                </span>
-              </div>
-            </div>
-
-            <div className="setting-control-row" style={{ marginTop: '16px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-              <Button
-                variant="outline"
-                size="sm"
-                icon={<RefreshCw size={13} className={artworkLoading ? 'cavia-spin' : undefined} />}
-                onClick={fetchArtworkSummary}
-                disabled={artworkLoading || isCleaning || isRepairing}
-              >
-                {artworkLoading ? 'Inspecting...' : 'Refresh Cache Stats'}
-              </Button>
-              <Button
-                variant={(artworkSummary?.orphanedFiles ?? 0) > 0 ? 'primary' : 'outline'}
-                size="sm"
-                icon={<Trash2 size={13} />}
-                onClick={() => setShowCleanupModal(true)}
-                disabled={artworkLoading || isCleaning || isRepairing || (artworkSummary?.orphanedFiles ?? 0) === 0}
-              >
-                Clean Orphaned Artwork
-              </Button>
-              <Button
-                variant={(artworkSummary?.missingReferencedFiles ?? 0) > 0 ? 'primary' : 'outline'}
-                size="sm"
-                icon={<Wrench size={13} />}
-                onClick={handleRepairMissing}
-                disabled={artworkLoading || isCleaning || isRepairing || (artworkSummary?.missingReferencedFiles ?? 0) === 0}
-              >
-                {isRepairing ? 'Repairing...' : 'Repair Missing Artwork'}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Tab: Providers */}
-      {activeTab === 'providers' && (
-        <div className="settings-content-pane">
-          <div className="cavia-banner banner-info">
-            <RadioTower size={18} className="banner-icon-accent" />
-            <div className="banner-content">
-              <strong>Legal Compliance & Authorized Streaming</strong>
-              <p>
-                Cavia does not scrape undocumented endpoints or bypass DRM or paywalls. Provider integrations strictly distinguish catalogue search, metadata resolution, playback permissions, and caching rights.
-              </p>
-            </div>
-          </div>
-
-          <div className="providers-grid">
-            {providers.map((p) => (
-              <div
-                key={p.id}
-                className="provider-card"
-                onClick={() => setSelectedProvider(p)}
-                tabIndex={0}
-                role="button"
-              >
-                <div className="provider-header-row">
-                  <div className="provider-name-group">
-                    <strong className="provider-name">{p.name}</strong>
-                    <span className="provider-cat">{p.category.toUpperCase()}</span>
+              {syncStatus?.authenticated ? (
+                <div className="settings-stack">
+                  <div className="setting-status-line">
+                    <Badge variant="ready" size="sm">AUTHENTICATED</Badge>
+                    <span className="text-muted-xs font-mono">
+                      {syncStatus.accountEmail || syncStatus.accountId}
+                    </span>
                   </div>
-                  <Badge
-                    variant={
-                      p.status === 'operational'
-                        ? 'ready'
-                        : p.status === 'unconfigured'
-                        ? 'neutral'
-                        : 'outline'
-                    }
-                    size="sm"
-                  >
-                    {p.status.toUpperCase()}
-                  </Badge>
-                </div>
 
-                <p className="provider-desc">{p.description}</p>
-
-                <div className="provider-caps-list">
-                  <span className={`cap-chip ${p.capabilities.catalogueSearch ? 'active' : ''}`}>
-                    Search
-                  </span>
-                  <span className={`cap-chip ${p.capabilities.metadataLookup ? 'active' : ''}`}>
-                    Metadata
-                  </span>
-                  <span className={`cap-chip ${p.capabilities.playback ? 'active' : ''}`}>
-                    Playback
-                  </span>
-                  <span className={`cap-chip ${p.capabilities.caching ? 'active' : ''}`}>
-                    Caching
-                  </span>
-                  <span className={`cap-chip ${p.capabilities.lyrics ? 'active' : ''}`}>
-                    Lyrics
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Tab: Account & Cloud Sync */}
-      {activeTab === 'account' && (
-        <div className="settings-content-pane">
-          {/* Architecture Banner */}
-          <div className="cavia-banner banner-info">
-            <Cloud size={16} className="banner-icon text-ready" />
-            <div>
-              <strong>Local-First, Cloud-Assisted Architecture</strong>
-              <p>
-                Cavia accounts and cloud synchronization are completely optional. Your local music library,
-                playlists, and settings operate 100% offline. Audio files and local paths are never uploaded.
-              </p>
-            </div>
-          </div>
-
-          {syncSuccessMsg && (
-            <div className="sync-alert sync-alert-success">
-              <CheckCircle2 size={15} />
-              <span>{syncSuccessMsg}</span>
-            </div>
-          )}
-
-          {syncError && (
-            <div className="sync-alert sync-alert-error">
-              <AlertTriangle size={15} />
-              <span>{syncError}</span>
-            </div>
-          )}
-
-          {/* Account Status Card */}
-          <div className="settings-card">
-            <div className="card-head">
-              <User size={18} className="card-icon text-vermilion" />
-              <div>
-                <h3>Cavia Account</h3>
-                <p>Manage your account identity and authentication session</p>
-              </div>
-            </div>
-
-            {syncStatus?.authenticated ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <div className="setting-status-line">
-                  <Badge variant="ready" size="sm">
-                    AUTHENTICATED
-                  </Badge>
-                  <span className="text-muted-xs font-mono">
-                    {syncStatus.accountEmail || syncStatus.accountId}
-                  </span>
-                </div>
-
-                <div className="sync-diagnostic-grid">
-                  <div className="sync-diag-item">
-                    <span className="sync-diag-label">ACCOUNT EMAIL</span>
-                    <strong className="sync-diag-value">{syncStatus.accountEmail || 'User'}</strong>
+                  <div className="sync-diagnostic-grid">
+                    <div className="sync-diag-item">
+                      <span className="sync-diag-label">DEVICE</span>
+                      <strong className="sync-diag-value">{syncStatus.deviceId}</strong>
+                    </div>
+                    <div className="sync-diag-item">
+                      <span className="sync-diag-label">TOKEN STORAGE</span>
+                      <strong className="sync-diag-value text-ready">OS credential manager</strong>
+                    </div>
                   </div>
-                  <div className="sync-diag-item">
-                    <span className="sync-diag-label">ACCOUNT ID</span>
-                    <strong className="sync-diag-value" title={syncStatus.accountId || ''}>
-                      {syncStatus.accountId || '—'}
-                    </strong>
-                  </div>
-                  <div className="sync-diag-item">
-                    <span className="sync-diag-label">DEVICE IDENTIFIER</span>
-                    <strong className="sync-diag-value">{syncStatus.deviceId}</strong>
-                  </div>
-                  <div className="sync-diag-item">
-                    <span className="sync-diag-label">REFRESH TOKEN STORAGE</span>
-                    <strong className="sync-diag-value" style={{ color: 'var(--color-ready)' }}>
-                      OS Credential Manager (Encrypted)
-                    </strong>
+
+                  <div>
+                    <Button variant="outline" size="sm" icon={<LogOut size={14} />} onClick={handleLogout}>
+                      Sign out
+                    </Button>
                   </div>
                 </div>
-
-                <div style={{ display: 'flex', gap: '8px', paddingTop: '4px' }}>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    icon={<LogOut size={14} />}
-                    onClick={handleLogout}
-                  >
-                    Sign Out
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <div className="setting-status-line">
-                  <Badge variant="neutral" size="sm">
-                    SIGNED OUT
-                  </Badge>
-                  <span className="text-muted-xs">
-                    No account connected · Working offline
-                  </span>
-                </div>
-
+              ) : (
                 <form onSubmit={handleLogin} className="sync-auth-form">
                   <div className="form-field">
-                    <label htmlFor="sync-email">EMAIL ADDRESS</label>
+                    <label htmlFor="sync-email">Email</label>
                     <input
                       id="sync-email"
                       type="email"
@@ -951,12 +700,12 @@ export const SettingsView = memo(function SettingsView({
                   </div>
 
                   <div className="form-field">
-                    <label htmlFor="sync-password">PASSWORD</label>
+                    <label htmlFor="sync-password">Password</label>
                     <input
                       id="sync-password"
                       type="password"
                       className="cavia-text-input"
-                      placeholder="••••••••••••"
+                      placeholder="••••••••"
                       value={authPassword}
                       onChange={(e) => setAuthPassword(e.target.value)}
                       disabled={isAuthenticating}
@@ -971,7 +720,7 @@ export const SettingsView = memo(function SettingsView({
                       size="sm"
                       disabled={isAuthenticating || !authEmail.trim() || !authPassword}
                     >
-                      {isAuthenticating ? 'Signing in...' : 'Sign In'}
+                      {isAuthenticating ? 'Signing in…' : 'Sign in'}
                     </Button>
                     <Button
                       type="button"
@@ -980,35 +729,30 @@ export const SettingsView = memo(function SettingsView({
                       onClick={handleSignup}
                       disabled={isAuthenticating || !authEmail.trim() || !authPassword}
                     >
-                      Create Account
+                      Create account
                     </Button>
                   </div>
                 </form>
-              </div>
-            )}
-          </div>
-
-          {/* Cloud Sync Controls Card */}
-          <div className="settings-card">
-            <div className="card-head">
-              <Cloud size={18} className="card-icon text-vermilion" />
-              <div>
-                <h3>Cloud Synchronization</h3>
-                <p>Sync playlists and liked tracks across your devices</p>
-              </div>
+              )}
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <div className="setting-row">
-                <div className="setting-info">
-                  <label htmlFor="enable-cloud-sync" className="setting-label" style={{ cursor: 'pointer' }}>
-                    Enable Synchronization
-                  </label>
-                  <span className="setting-desc">
-                    Synchronize playlist structure, track order, and favorites with your cloud account
-                  </span>
+            <div className="settings-card">
+              <div className="card-head">
+                <Cloud size={18} className="card-icon" />
+                <div>
+                  <h3>Synchronization</h3>
+                  <p>Playlist structure and favorites only.</p>
                 </div>
-                <div className="setting-control">
+              </div>
+
+              <div className="settings-stack">
+                <div className="setting-row">
+                  <div className="setting-info">
+                    <label htmlFor="enable-cloud-sync" className="setting-label">
+                      Enable sync
+                    </label>
+                    <span className="setting-desc">Requires a signed-in account.</span>
+                  </div>
                   <input
                     id="enable-cloud-sync"
                     type="checkbox"
@@ -1016,389 +760,256 @@ export const SettingsView = memo(function SettingsView({
                     checked={syncStatus?.syncEnabled ?? false}
                     onChange={(e) => handleToggleSync(e.target.checked)}
                     disabled={!syncStatus?.authenticated}
-                    aria-label="Enable Cloud Synchronization"
+                    aria-label="Enable cloud synchronization"
                   />
                 </div>
+
+                <div className="sync-diagnostic-grid">
+                  <div className="sync-diag-item">
+                    <span className="sync-diag-label">LAST SYNCED</span>
+                    <strong className="sync-diag-value">
+                      {syncStatus?.lastSyncedAt ? new Date(syncStatus.lastSyncedAt).toLocaleString() : 'Never'}
+                    </strong>
+                  </div>
+                  <div className="sync-diag-item">
+                    <span className="sync-diag-label">PENDING</span>
+                    <strong className="sync-diag-value">{syncStatus?.pendingOutboxCount ?? 0} changes</strong>
+                  </div>
+                </div>
+
+                {syncStatus?.lastError && (
+                  <div className="sync-alert sync-alert-error">
+                    <AlertTriangle size={15} />
+                    <span>{syncStatus.lastError}</span>
+                  </div>
+                )}
+
+                <div>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    icon={<RefreshCw size={14} className={isSyncing ? 'animate-spin' : ''} />}
+                    onClick={handleSyncNow}
+                    disabled={isSyncing || !syncStatus?.authenticated || !syncStatus?.syncEnabled}
+                  >
+                    {isSyncing ? 'Synchronizing…' : 'Sync now'}
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            <div className="settings-card">
+              <div className="card-head">
+                <ShieldCheck size={18} className="card-icon text-ready" />
+                <div>
+                  <h3>Data boundary</h3>
+                  <p>Metadata syncs. Audio and local paths stay here.</p>
+                </div>
               </div>
 
-              <div className="sync-diagnostic-grid">
-                <div className="sync-diag-item">
-                  <span className="sync-diag-label">LAST SYNCED</span>
-                  <strong className="sync-diag-value">
-                    {syncStatus?.lastSyncedAt
-                      ? new Date(syncStatus.lastSyncedAt).toLocaleString()
-                      : 'Never'}
+              <div className="sync-boundary-grid">
+                <div className="sync-boundary-box">
+                  <strong className="sync-boundary-title ready">
+                    <CheckCircle2 size={14} /> Synchronized
                   </strong>
+                  <ul className="sync-boundary-list">
+                    <li>Playlist titles, descriptions, and order</li>
+                    <li>Track metadata snapshots</li>
+                    <li>Liked tracks</li>
+                    <li>Device identifier</li>
+                  </ul>
                 </div>
-                <div className="sync-diag-item">
-                  <span className="sync-diag-label">OUTBOX QUEUE</span>
-                  <strong
-                    className="sync-diag-value"
-                    style={{ color: syncStatus?.pendingOutboxCount ? 'var(--color-warn)' : 'var(--color-ready)' }}
-                  >
-                    {syncStatus?.pendingOutboxCount ?? 0} pending changes
+
+                <div className="sync-boundary-box">
+                  <strong className="sync-boundary-title warn">
+                    <Lock size={14} /> Local only
                   </strong>
-                </div>
-                <div className="sync-diag-item">
-                  <span className="sync-diag-label">SYNC STATUS</span>
-                  <strong
-                    className="sync-diag-value"
-                    style={{ color: syncStatus?.syncEnabled ? 'var(--color-ready)' : 'var(--text-muted)' }}
-                  >
-                    {syncStatus?.syncEnabled ? 'Active' : 'Disabled'}
-                  </strong>
+                  <ul className="sync-boundary-list">
+                    <li>Audio files and streams</li>
+                    <li>File paths and drive letters</li>
+                    <li>Artwork cache</li>
+                    <li>Playback queue and volume</li>
+                  </ul>
                 </div>
               </div>
 
-              {syncStatus?.lastError && (
-                <div className="sync-alert sync-alert-error">
-                  <AlertTriangle size={15} />
-                  <span><strong>Last Sync Error:</strong> {syncStatus.lastError}</span>
+              {syncStatus?.authenticated && (
+                <div className="sync-danger-row">
+                  <div className="sync-danger-info">
+                    <strong className="sync-danger-title">Delete cloud data</strong>
+                    <span className="sync-danger-desc">Removes synchronized playlists and likes. Local files stay intact.</span>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowDeleteCloudModal(true)}
+                    style={{ color: 'var(--status-error)', borderColor: 'rgba(223, 88, 73, 0.4)' }}
+                  >
+                    Delete
+                  </Button>
                 </div>
               )}
-
-              <div style={{ paddingTop: '4px', display: 'flex', gap: '8px' }}>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  icon={<RefreshCw size={14} className={isSyncing ? 'animate-spin' : ''} />}
-                  onClick={handleSyncNow}
-                  disabled={isSyncing || !syncStatus?.authenticated || !syncStatus?.syncEnabled}
-                >
-                  {isSyncing ? 'Synchronizing...' : 'Sync Now'}
-                </Button>
-              </div>
-            </div>
-          </div>
-
-          {/* Data Privacy & Sovereignty Card */}
-          <div className="settings-card">
-            <div className="card-head">
-              <ShieldCheck size={18} className="card-icon text-ready" />
-              <div>
-                <h3>Data Privacy & Storage Boundary</h3>
-                <p>Exact breakdown of synchronized metadata versus local-only data</p>
-              </div>
             </div>
 
-            <div className="sync-boundary-grid">
-              <div className="sync-boundary-box">
-                <strong className="sync-boundary-title" style={{ color: 'var(--color-ready)' }}>
-                  <CheckCircle2 size={14} /> Synchronized via Cloud
-                </strong>
-                <ul className="sync-boundary-list">
-                  <li>Playlist titles, descriptions, and IDs</li>
-                  <li>Playlist track order and positions</li>
-                  <li>Track metadata snapshots (title, artist, album, duration)</li>
-                  <li>Track content hashes (SHA-256) for local linking</li>
-                  <li>Liked/favorited tracks list</li>
-                  <li>Device ID and registered platform</li>
-                </ul>
-              </div>
-
-              <div className="sync-boundary-box">
-                <strong className="sync-boundary-title" style={{ color: 'var(--color-warn)' }}>
-                  <Lock size={14} /> Excluded & Strictly Local
-                </strong>
-                <ul className="sync-boundary-list">
-                  <li>Audio files and binary music streams (0 bytes uploaded)</li>
-                  <li>Local file paths and Windows drive letters</li>
-                  <li>Embedded artwork cache files and local image paths</li>
-                  <li>Local SQLite database files</li>
-                  <li>Playback queue, volume, and playback speed</li>
-                  <li>Local search indexes and scan history</li>
-                </ul>
-              </div>
-            </div>
-
-            {syncStatus?.authenticated && (
-              <div className="sync-danger-row">
-                <div className="sync-danger-info">
-                  <strong className="sync-danger-title">Delete Cloud Account Data</strong>
-                  <span className="sync-danger-desc">
-                    Permanently deletes your synchronized playlists and favorites from the cloud. Local files remain untouched.
-                  </span>
+            <div className="settings-card">
+              <div className="card-head">
+                <HardDrive size={18} className="card-icon text-muted" />
+                <div>
+                  <h3>Supabase configuration</h3>
+                  <p>Public endpoint and anonymous key.</p>
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowDeleteCloudModal(true)}
-                  style={{ color: 'var(--color-error)', borderColor: 'rgba(223, 88, 73, 0.4)' }}
-                >
-                  Delete Cloud Data
-                </Button>
               </div>
-            )}
-          </div>
 
-          {/* Backend Configuration Card */}
-          <div className="settings-card">
-            <div className="card-head">
-              <HardDrive size={18} className="card-icon text-muted" />
-              <div>
-                <h3>Supabase Backend Configuration</h3>
-                <p>Public endpoint URL and anonymous key for cloud sync</p>
+              <div className="settings-stack settings-stack-narrow">
+                <div className="form-field">
+                  <label htmlFor="supabase-url">Project URL</label>
+                  <input
+                    id="supabase-url"
+                    type="text"
+                    className="cavia-text-input font-mono"
+                    placeholder="https://your-project.supabase.co"
+                    value={configUrlInput}
+                    onChange={(e) => setConfigUrlInput(e.target.value)}
+                    disabled={isSavingConfig}
+                  />
+                </div>
+
+                <div className="form-field">
+                  <label htmlFor="supabase-key">Anonymous key</label>
+                  <input
+                    id="supabase-key"
+                    type="password"
+                    className="cavia-text-input font-mono"
+                    placeholder="eyJhbGciOi…"
+                    value={configKeyInput}
+                    onChange={(e) => setConfigKeyInput(e.target.value)}
+                    disabled={isSavingConfig}
+                  />
+                  <p className="text-muted-xs">Never use a service-role key here.</p>
+                </div>
+
+                <div>
+                  <Button variant="outline" size="sm" onClick={handleSaveConfig} disabled={isSavingConfig}>
+                    {isSavingConfig ? 'Saving…' : 'Save configuration'}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section
+            className={`settings-section ${activeSection === 'about' ? 'is-active' : ''}`}
+            aria-labelledby="settings-about"
+          >
+            <h2 id="settings-about" className="settings-section-title">About</h2>
+
+            <div className="settings-card about-hero-card">
+              <div className="about-brand-row">
+                <AudioWaveform size={26} className="text-vermilion" />
+                <div>
+                  <h2>cavia music<span>.</span></h2>
+                  <span className="about-edition">VERSION 2.0.0</span>
+                </div>
+              </div>
+
+              <p className="about-text">
+                A local-first music application built with Tauri 2, React 19, TypeScript, and Rust.
+              </p>
+
+              <div className="about-badges">
+                <Badge variant="vermilion" size="sm">TAURI 2</Badge>
+                <Badge variant="neutral" size="sm">SQLITE</Badge>
+                <Badge variant="neutral" size="sm">REACT 19</Badge>
+                <Badge variant="outline" size="sm">NO TELEMETRY</Badge>
               </div>
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', maxWidth: '540px' }}>
-              <div className="form-field">
-                <label htmlFor="supabase-url">SUPABASE PROJECT URL</label>
-                <input
-                  id="supabase-url"
-                  type="text"
-                  className="cavia-text-input"
-                  style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}
-                  placeholder="https://your-project.supabase.co"
-                  value={configUrlInput}
-                  onChange={(e) => setConfigUrlInput(e.target.value)}
-                  disabled={isSavingConfig}
-                />
+            <div className="settings-card">
+              <div className="card-head">
+                <ShieldCheck size={18} className="card-icon text-ready" />
+                <div>
+                  <h3>Principles</h3>
+                  <p>Non-negotiable product integrity rules.</p>
+                </div>
               </div>
-
-              <div className="form-field">
-                <label htmlFor="supabase-key">SUPABASE ANON KEY (PUBLIC ONLY)</label>
-                <input
-                  id="supabase-key"
-                  type="password"
-                  className="cavia-text-input"
-                  style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}
-                  placeholder="eyJhbGciOi..."
-                  value={configKeyInput}
-                  onChange={(e) => setConfigKeyInput(e.target.value)}
-                  disabled={isSavingConfig}
-                />
-                <p className="text-muted-xs" style={{ marginTop: '4px' }}>
-                  Never enter a Supabase service-role key. Cavia uses Postgres Row Level Security (RLS) with the public anon key.
-                </p>
-              </div>
-
-              <div style={{ paddingTop: '4px' }}>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleSaveConfig}
-                  disabled={isSavingConfig}
-                >
-                  {isSavingConfig ? 'Saving...' : 'Save Configuration'}
-                </Button>
-              </div>
+              <ul className="principles-list">
+                <li>
+                  <CheckCircle2 size={14} className="text-ready" />
+                  <span>No fabricated tracks, artwork, or playback progress.</span>
+                </li>
+                <li>
+                  <CheckCircle2 size={14} className="text-ready" />
+                  <span>Provider secrets live in platform secure storage, never SQLite.</span>
+                </li>
+                <li>
+                  <CheckCircle2 size={14} className="text-ready" />
+                  <span>Local audio files remain untouched and offline.</span>
+                </li>
+                <li>
+                  <CheckCircle2 size={14} className="text-ready" />
+                  <span>Controls stay disabled when their backend is absent.</span>
+                </li>
+              </ul>
             </div>
-          </div>
+          </section>
         </div>
-      )}
+      </div>
 
-      {/* Tab: About */}
-      {activeTab === 'about' && (
-        <div className="settings-content-pane">
-          <div className="settings-card about-hero-card">
-            <div className="about-brand-row">
-              <AudioWaveform size={28} className="text-vermilion" />
-              <div>
-                <h2>cavia music<span>.</span></h2>
-                <span className="about-edition">VERSION 2.0.0 · THE ARCHIVE RELEASE</span>
-              </div>
-            </div>
-
-            <p className="about-text">
-              A high-fidelity, local-first music application designed for listeners who value craft, typography, and uncompromised privacy. Built with Tauri 2, React 19, TypeScript, and Rust.
-            </p>
-
-            <div className="about-badges">
-              <Badge variant="vermilion" size="sm">TAURI 2</Badge>
-              <Badge variant="neutral" size="sm">SQLITE / SQLX</Badge>
-              <Badge variant="neutral" size="sm">REACT 19</Badge>
-              <Badge variant="neutral" size="sm">RUST CORE</Badge>
-              <Badge variant="outline" size="sm">NO TELEMETRY</Badge>
-            </div>
-          </div>
-
-          <div className="settings-card">
-            <div className="card-head">
-              <ShieldCheck size={18} className="card-icon text-ready" />
-              <div>
-                <h3>Architectural Principles</h3>
-                <p>Non-negotiable product integrity rules</p>
-              </div>
-            </div>
-            <ul className="principles-list">
-              <li>
-                <CheckCircle2 size={14} className="text-ready" />
-                <span><strong>No fabricated data:</strong> Never show fake tracks, albums, or synthetic playback progress.</span>
-              </li>
-              <li>
-                <CheckCircle2 size={14} className="text-ready" />
-                <span><strong>Platform secure storage:</strong> Secrets and tokens are kept in OS keychains, never plaintext SQLite.</span>
-              </li>
-              <li>
-                <CheckCircle2 size={14} className="text-ready" />
-                <span><strong>Local audio sovereignty:</strong> Your files remain untouched and completely offline.</span>
-              </li>
-              <li>
-                <CheckCircle2 size={14} className="text-ready" />
-                <span><strong>Honest control states:</strong> Controls whose backends are pending display disabled indicators.</span>
-              </li>
-            </ul>
-          </div>
-        </div>
-      )}
-
-      {/* Provider Details Modal */}
-      {selectedProvider && (
-        <Modal
-          isOpen={!!selectedProvider}
-          onClose={() => setSelectedProvider(null)}
-          title={selectedProvider.name}
-          eyebrow="PROVIDER SPECIFICATION"
-          size="md"
-          footer={
-            <Button variant="ghost" size="sm" onClick={() => setSelectedProvider(null)}>
-              Dismiss
-            </Button>
-          }
-        >
-          <div className="provider-modal-body">
-            <div className="provider-modal-badge-row">
-              <Badge
-                variant={selectedProvider.status === 'operational' ? 'ready' : 'outline'}
-                size="md"
-              >
-                STATUS: {selectedProvider.status.toUpperCase()}
-              </Badge>
-              <span className="text-dim-sm">Category: {selectedProvider.category}</span>
-            </div>
-
-            <p className="provider-modal-desc">{selectedProvider.description}</p>
-
-            <div className="provider-caps-table">
-              <h4>Declared Capabilities</h4>
-              <div className="caps-row">
-                <span>Catalogue Search</span>
-                <strong>{selectedProvider.capabilities.catalogueSearch ? 'Permitted' : 'Not Supported'}</strong>
-              </div>
-              <div className="caps-row">
-                <span>Metadata Resolution</span>
-                <strong>{selectedProvider.capabilities.metadataLookup ? 'Permitted' : 'Not Supported'}</strong>
-              </div>
-              <div className="caps-row">
-                <span>Direct Audio Playback</span>
-                <strong>{selectedProvider.capabilities.playback ? 'Permitted' : 'Disabled / Metadata Only'}</strong>
-              </div>
-              <div className="caps-row">
-                <span>Audio Caching</span>
-                <strong>{selectedProvider.capabilities.caching ? 'Permitted' : 'Prohibited by Terms'}</strong>
-              </div>
-              <div className="caps-row">
-                <span>Lyrics Delivery</span>
-                <strong>{selectedProvider.capabilities.lyrics ? 'Permitted' : 'Not Supported'}</strong>
-              </div>
-            </div>
-
-            <div className="provider-notes-box">
-              <Lock size={15} />
-              <span>{selectedProvider.notes}</span>
-            </div>
-          </div>
-        </Modal>
-      )}
-
-      {/* Clean Orphaned Artwork Confirmation Modal */}
       <Modal
         isOpen={showCleanupModal}
         onClose={() => setShowCleanupModal(false)}
-        title="Clean Orphaned Artwork"
-        eyebrow="CACHE INTEGRITY"
-        size="md"
+        title="Clean orphaned artwork"
+        size="sm"
         footer={
-          <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', width: '100%' }}>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setShowCleanupModal(false)}
-              disabled={isCleaning}
-            >
+          <div className="modal-actions-right">
+            <Button variant="ghost" size="sm" onClick={() => setShowCleanupModal(false)} disabled={isCleaning}>
               Cancel
             </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              icon={<Trash2 size={14} />}
-              onClick={handleConfirmClean}
-              disabled={isCleaning}
-            >
-              {isCleaning ? 'Cleaning...' : 'Delete Orphaned Files'}
+            <Button variant="primary" size="sm" icon={<Trash2 size={14} />} onClick={handleConfirmClean} disabled={isCleaning}>
+              {isCleaning ? 'Cleaning…' : 'Delete files'}
             </Button>
           </div>
         }
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-          <p className="text-dim-sm" style={{ lineHeight: '1.5' }}>
-            This will permanently remove cached artwork files that are no longer referenced by any track or playlist in your library.
+        <div className="modal-stack">
+          <p className="modal-text">
+            Cached artwork no longer referenced by any track or playlist will be permanently removed.
           </p>
-
-          <div
-            style={{
-              padding: '12px 14px',
-              borderRadius: 'var(--radius-md)',
-              background: 'var(--bg-surface-elevated)',
-              border: '1px solid var(--border-subtle)',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '6px',
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span className="text-dim-xs">FILES TO REMOVE</span>
-              <strong className="text-warn">{artworkSummary?.orphanedFiles ?? 0} files</strong>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span className="text-dim-xs">RECLAIMABLE SPACE</span>
-              <strong className="text-ready">{formatBytes(artworkSummary?.reclaimableBytes ?? 0)}</strong>
-            </div>
+          <div className="modal-stat-row">
+            <span>Files to remove</span>
+            <strong>{artworkSummary?.orphanedFiles ?? 0}</strong>
           </div>
-
-          <p className="text-dim-xs" style={{ color: 'var(--text-muted)' }}>
-            Referenced album and track artwork will remain completely intact.
-          </p>
+          <div className="modal-stat-row">
+            <span>Reclaimable space</span>
+            <strong className="text-ready">{formatBytes(artworkSummary?.reclaimableBytes ?? 0)}</strong>
+          </div>
+          <p className="modal-text modal-text-muted">Referenced artwork remains intact.</p>
         </div>
       </Modal>
 
-      {/* Delete Cloud Data Confirmation Modal */}
       <Modal
         isOpen={showDeleteCloudModal}
         onClose={() => setShowDeleteCloudModal(false)}
-        title="Delete Cloud Account Data"
-        eyebrow="DESTRUCTIVE ACTION"
+        title="Delete cloud data"
         size="sm"
         footer={
-          <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', width: '100%' }}>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setShowDeleteCloudModal(false)}
-              disabled={isDeletingCloud}
-            >
+          <div className="modal-actions-right">
+            <Button variant="ghost" size="sm" onClick={() => setShowDeleteCloudModal(false)} disabled={isDeletingCloud}>
               Cancel
             </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              icon={<Trash2 size={14} />}
-              onClick={handleConfirmDeleteCloudData}
-              disabled={isDeletingCloud}
-            >
-              {isDeletingCloud ? 'Deleting...' : 'Delete Cloud Data'}
+            <Button variant="primary" size="sm" icon={<Trash2 size={14} />} onClick={handleConfirmDeleteCloudData} disabled={isDeletingCloud}>
+              {isDeletingCloud ? 'Deleting…' : 'Delete cloud data'}
             </Button>
           </div>
         }
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          <p className="text-dim-sm" style={{ lineHeight: '1.5' }}>
-            This will permanently delete all synchronized playlists, tracks, and favorites from your cloud account.
+        <div className="modal-stack">
+          <p className="modal-text">
+            This permanently deletes synchronized playlists, tracks, and favorites from your cloud account.
           </p>
           <div className="sync-info-box">
-            <strong className="sync-info-title">Local Library Sovereignty:</strong>
-            All local audio files, local playlists, and local database entries on this device will remain completely intact.
+            <strong className="sync-info-title">Local library remains intact.</strong>
+            Audio files and local database entries on this device are not affected.
           </div>
         </div>
       </Modal>

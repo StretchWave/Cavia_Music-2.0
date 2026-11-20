@@ -1,58 +1,54 @@
-import { memo, useState, useEffect, useRef, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import {
-  Clock,
+  ArrowLeft,
   Disc3,
-  Heart,
-  ListPlus,
   Loader2,
-  RadioTower,
-  Search,
-  Sparkles,
-  Trash2,
+  Music2,
+  Play,
+  Shuffle,
   XCircle,
 } from 'lucide-react';
 import { SearchInput } from '../../components/SearchInput';
 import { Tabs } from '../../components/Tabs';
-import { Badge } from '../../components/Badge';
 import { Button } from '../../components/Button';
+import { ArtworkImage } from '../../components/ArtworkImage';
+import { TrackList } from '../../components/TrackList';
+import { AlbumCard, ArtistCard } from '../../components/MediaCards';
 import { PlaylistDetailModal } from '../library/PlaylistDetailModal';
 import { formatArtworkUri, searchLibrary } from '../../lib/library';
 import type { Album, Artist, Playlist, SearchCategory, SearchResultsDTO, Track } from '../../lib/types';
 
-function formatDuration(ms: number): string {
-  if (!ms || ms <= 0) return '--:--';
-  const totalSeconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-}
-
 export interface SearchViewProps {
   isBackendReady?: boolean;
-  onPlayTrack?: (trackId: string) => void;
+  density?: 'standard' | 'compact';
   onPlayTracks?: (tracks: Track[], startIndex?: number, shuffle?: boolean) => void;
   onToggleLike?: (trackId: string) => void;
   onAddToPlaylist?: (track: Track) => void;
   onAddAlbumToPlaylist?: (album: Album) => void;
   onPlaylistUpdated?: () => void;
   onDeletePlaylist?: (playlistId: string) => void;
+  onPlayAlbum?: (album: Album) => void;
+  onPlayArtist?: (artist: Artist) => void;
+  onPlayNext?: (trackId: string) => void;
   allTracks?: Track[];
   likedTrackIds?: Set<string>;
   currentTrackId?: string;
   isPlaying?: boolean;
 }
 
-export const SearchView = memo(function SearchView({
-  isBackendReady = true,
-  onPlayTrack,
+export function SearchView({
+  isBackendReady = false,
+  density = 'standard',
   onPlayTracks,
   onToggleLike,
   onAddToPlaylist,
   onAddAlbumToPlaylist,
   onPlaylistUpdated,
   onDeletePlaylist,
+  onPlayAlbum,
+  onPlayArtist,
+  onPlayNext,
   allTracks = [],
-  likedTrackIds = new Set(),
   currentTrackId,
   isPlaying = false,
 }: SearchViewProps) {
@@ -62,665 +58,392 @@ export const SearchView = memo(function SearchView({
   const [results, setResults] = useState<SearchResultsDTO | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
-
-  // Search history state: stored in session to maintain clean state between sessions
-  const [recentSearches, setRecentSearches] = useState<string[]>(() => {
-    try {
-      const stored = sessionStorage.getItem('cavia_recent_searches');
-      return stored ? JSON.parse(stored) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  // Selected playlist for detailed inspection in modal
+  const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null);
+  const [selectedArtist, setSelectedArtist] = useState<Artist | null>(null);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
 
-  // Request sequence tracking to safely ignore stale asynchronous responses
-  const lastRequestIdRef = useRef(0);
-  const lastExecutedQueryRef = useRef<string | null>(null);
-  const lastExecutedCategoryRef = useRef<SearchCategory | null>(null);
+  const requestIdRef = useRef(0);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  // Save recent searches to sessionStorage
-  const saveRecentSearches = (searches: string[]) => {
-    setRecentSearches(searches);
-    try {
-      sessionStorage.setItem('cavia_recent_searches', JSON.stringify(searches));
-    } catch {
-      // sessionStorage unavailable
-    }
-  };
-
-  const handleClearHistory = () => {
-    saveRecentSearches([]);
-  };
-
-  const recordSearchTerm = (term: string) => {
-    const trimmed = term.trim();
-    if (trimmed.length < 2) return;
-    setRecentSearches((prev) => {
-      const filtered = prev.filter((item) => item.toLowerCase() !== trimmed.toLowerCase());
-      const updated = [trimmed, ...filtered].slice(0, 8);
-      try {
-        sessionStorage.setItem('cavia_recent_searches', JSON.stringify(updated));
-      } catch {
-        // ignore
-      }
-      return updated;
-    });
-  };
-
-  // 180ms debounce on controlled input
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedQuery(query);
-    }, 180);
+    inputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(query), 180);
     return () => clearTimeout(timer);
   }, [query]);
 
-  // Execute search when debounced query or category changes
   useEffect(() => {
     const trimmed = debouncedQuery.trim();
 
     if (!trimmed) {
+      requestIdRef.current += 1;
       setResults(null);
       setIsLoading(false);
       setSearchError(null);
-      lastExecutedQueryRef.current = null;
-      lastExecutedCategoryRef.current = null;
       return;
     }
 
-    // Skip duplicate execution for identical query and category
-    if (
-      trimmed === lastExecutedQueryRef.current &&
-      category === lastExecutedCategoryRef.current &&
-      results !== null
-    ) {
-      return;
-    }
-
-    const requestId = ++lastRequestIdRef.current;
+    let active = true;
+    const requestId = ++requestIdRef.current;
     setIsLoading(true);
     setSearchError(null);
 
     searchLibrary(trimmed, category)
       .then((data) => {
-        // Reject stale out-of-order response
-        if (requestId === lastRequestIdRef.current) {
-          setResults(data);
-          setIsLoading(false);
-          lastExecutedQueryRef.current = trimmed;
-          lastExecutedCategoryRef.current = category;
-
-          // Record meaningful queries in recent search history
-          recordSearchTerm(trimmed);
-        }
+        if (!active || requestId !== requestIdRef.current) return;
+        setResults(data);
+        setIsLoading(false);
       })
       .catch((err) => {
-        if (requestId === lastRequestIdRef.current) {
-          const msg = err instanceof Error ? err.message : String(err);
-          setSearchError(msg);
-          setIsLoading(false);
-        }
+        if (!active || requestId !== requestIdRef.current) return;
+        setSearchError(err instanceof Error ? err.message : String(err));
+        setIsLoading(false);
       });
+
+    return () => {
+      active = false;
+    };
   }, [debouncedQuery, category]);
 
-  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      const trimmed = query.trim();
-      if (trimmed) {
-        setDebouncedQuery(trimmed);
-        recordSearchTerm(trimmed);
-      }
-    }
-  };
+  useEffect(() => {
+    setSelectedAlbum(null);
+    setSelectedArtist(null);
+  }, [debouncedQuery, category]);
 
-  // Helper to play album tracks
-  const handlePlayAlbum = (album: Album) => {
-    const albumTracks = allTracks.filter(
-      (t) =>
-        t.album.toLowerCase() === album.title.toLowerCase() &&
-        (t.artist.toLowerCase() === album.artist.toLowerCase() ||
-          t.albumArtist?.toLowerCase() === album.artist.toLowerCase())
+  const albumTracks = useMemo(() => {
+    if (!selectedAlbum) return [];
+    return allTracks.filter(
+      (track) =>
+        track.album.toLowerCase() === selectedAlbum.title.toLowerCase() &&
+        (track.albumArtist?.toLowerCase() === selectedAlbum.artist.toLowerCase() ||
+          track.artist.toLowerCase() === selectedAlbum.artist.toLowerCase())
     );
-    if (albumTracks.length > 0) {
-      onPlayTracks?.(albumTracks, 0, false);
-    }
-  };
+  }, [allTracks, selectedAlbum]);
 
-  // Helper to add album tracks to playlist
-  const handleAddAlbumToPlaylist = (album: Album) => {
-    onAddAlbumToPlaylist?.(album);
-  };
-
-  // Helper to play artist tracks
-  const handlePlayArtist = (artist: Artist) => {
-    const artistTracks = allTracks.filter(
-      (t) =>
-        t.artist.toLowerCase() === artist.name.toLowerCase() ||
-        t.albumArtist?.toLowerCase() === artist.name.toLowerCase()
+  const artistTracks = useMemo(() => {
+    if (!selectedArtist) return [];
+    return allTracks.filter(
+      (track) =>
+        track.artist.toLowerCase() === selectedArtist.name.toLowerCase() ||
+        track.albumArtist?.toLowerCase() === selectedArtist.name.toLowerCase()
     );
-    if (artistTracks.length > 0) {
-      onPlayTracks?.(artistTracks, 0, false);
+  }, [allTracks, selectedArtist]);
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      setDebouncedQuery(query.trim());
     }
   };
 
   const isQueryActive = Boolean(query.trim());
+  const hasResults = Boolean(results && results.totalCount > 0);
+
+  const clearSearch = () => {
+    setQuery('');
+    setDebouncedQuery('');
+    setResults(null);
+    setSelectedAlbum(null);
+    setSelectedArtist(null);
+  };
+
+  const trackListProps = {
+    currentTrackId,
+    isPlaying,
+    isBackendReady,
+    onToggleLike,
+    onAddToPlaylist,
+    onPlayNext,
+  };
+
+  if (selectedAlbum) {
+    return (
+      <section className="cavia-library-page search-page">
+        <button type="button" className="back-link" onClick={() => setSelectedAlbum(null)}>
+          <ArrowLeft size={15} /> Search results
+        </button>
+
+        <div className="collection-detail-header">
+          <ArtworkImage
+            src={formatArtworkUri(selectedAlbum.artworkUri)}
+            alt={selectedAlbum.title}
+            className="collection-detail-art"
+            fallbackIcon={<Disc3 size={28} />}
+          />
+          <div className="collection-detail-copy">
+            <span className="collection-detail-kind">Album</span>
+            <h2>{selectedAlbum.title}</h2>
+            <p>
+              {selectedAlbum.artist}
+              {selectedAlbum.year ? ` · ${selectedAlbum.year}` : ''} · {albumTracks.length}{' '}
+              {albumTracks.length === 1 ? 'track' : 'tracks'}
+            </p>
+            <div className="collection-detail-actions">
+              <Button
+                variant="primary"
+                size="sm"
+                icon={<Play size={14} />}
+                disabled={!isBackendReady || albumTracks.length === 0}
+                onClick={() => onPlayTracks?.(albumTracks, 0, false)}
+              >
+                Play
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                icon={<Shuffle size={14} />}
+                disabled={!isBackendReady || albumTracks.length === 0}
+                onClick={() => onPlayTracks?.(albumTracks, 0, true)}
+              >
+                Shuffle
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!onAddAlbumToPlaylist}
+                onClick={() => onAddAlbumToPlaylist?.(selectedAlbum)}
+              >
+                Add to playlist
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        {albumTracks.length > 0 ? (
+          <TrackList
+            tracks={albumTracks}
+            density={density}
+            onPlayTrack={(trackId) => {
+              const index = albumTracks.findIndex((track) => track.id === trackId);
+              onPlayTracks?.(albumTracks, index >= 0 ? index : 0, false);
+            }}
+            ariaLabel={`Tracks from ${selectedAlbum.title}`}
+            {...trackListProps}
+          />
+        ) : (
+          <p className="library-muted-note">No indexed tracks for this album.</p>
+        )}
+      </section>
+    );
+  }
+
+  if (selectedArtist) {
+    return (
+      <section className="cavia-library-page search-page">
+        <button type="button" className="back-link" onClick={() => setSelectedArtist(null)}>
+          <ArrowLeft size={15} /> Search results
+        </button>
+
+        <div className="collection-detail-header">
+          {selectedArtist.artworkUri ? (
+            <ArtworkImage
+              src={formatArtworkUri(selectedArtist.artworkUri)}
+              alt={selectedArtist.name}
+              className="collection-detail-art"
+            />
+          ) : (
+            <div className="collection-detail-art artist-monogram-large" aria-hidden="true">
+              {selectedArtist.name.slice(0, 2).toUpperCase()}
+            </div>
+          )}
+          <div className="collection-detail-copy">
+            <span className="collection-detail-kind">Artist</span>
+            <h2>{selectedArtist.name}</h2>
+            <p>
+              {selectedArtist.albumCount} {selectedArtist.albumCount === 1 ? 'album' : 'albums'} ·{' '}
+              {artistTracks.length} {artistTracks.length === 1 ? 'track' : 'tracks'}
+            </p>
+            <div className="collection-detail-actions">
+              <Button
+                variant="primary"
+                size="sm"
+                icon={<Play size={14} />}
+                disabled={!isBackendReady || artistTracks.length === 0}
+                onClick={() => onPlayTracks?.(artistTracks, 0, false)}
+              >
+                Play
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                icon={<Shuffle size={14} />}
+                disabled={!isBackendReady || artistTracks.length === 0}
+                onClick={() => onPlayTracks?.(artistTracks, 0, true)}
+              >
+                Shuffle
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        {artistTracks.length > 0 ? (
+          <TrackList
+            tracks={artistTracks}
+            density={density}
+            onPlayTrack={(trackId) => {
+              const index = artistTracks.findIndex((track) => track.id === trackId);
+              onPlayTracks?.(artistTracks, index >= 0 ? index : 0, false);
+            }}
+            ariaLabel={`Tracks by ${selectedArtist.name}`}
+            {...trackListProps}
+          />
+        ) : (
+          <p className="library-muted-note">No indexed tracks for this artist.</p>
+        )}
+      </section>
+    );
+  }
 
   return (
-    <section className="cavia-subpage search-page">
-      <div className="subpage-header">
-        <div>
-          <div className="cavia-eyebrow">
-            <span className="eyebrow-accent-line" />
-            <span>LOCAL LIBRARY & DISCOVERY ENGINE</span>
-          </div>
-          <h1 className="subpage-title">
-            Find your<br />
-            <em>frequency.</em>
+    <section className="cavia-library-page search-page">
+      <header className="library-header search-header">
+        <div className="library-heading">
+          <h1 className="library-title">
+            Search<span>.</span>
           </h1>
-          <p className="subpage-subtitle">
-            Search your indexed local files and curated collections instantly via SQLite FTS5.
-          </p>
         </div>
-      </div>
+      </header>
 
-      {/* Main Search Input Bar */}
       <div className="search-bar-wrap">
         <SearchInput
+          ref={inputRef}
           value={query}
-          onChange={(val) => setQuery(val)}
+          onChange={setQuery}
           onKeyDown={handleKeyDown}
-          onClear={() => {
-            setQuery('');
-            setDebouncedQuery('');
-            setResults(null);
-          }}
+          onClear={clearSearch}
           isLoading={isLoading}
-          placeholder="Search by track title, artist, album name, or playlist..."
+          placeholder="Search your library"
+          shortcut=""
           className="search-main-input"
         />
       </div>
 
-      {/* Category Tabs */}
-      <div className="search-category-row">
-        <Tabs
-          items={[
-            { id: 'all', label: 'All Results' },
-            { id: 'tracks', label: 'Tracks' },
-            { id: 'albums', label: 'Albums' },
-            { id: 'artists', label: 'Artists' },
-            { id: 'playlists', label: 'Playlists' },
-          ]}
-          activeId={category}
-          onChange={(id) => setCategory(id as SearchCategory)}
-          variant="segmented"
-        />
-
-        <div className="search-scope-tag">
-          <Badge variant="outline" size="sm">
-            SCOPE: LOCAL SQLITE FTS5
-          </Badge>
+      {isQueryActive && (
+        <div className="search-category-row">
+          <Tabs
+            items={[
+              { id: 'all', label: 'All' },
+              { id: 'tracks', label: 'Tracks' },
+              { id: 'albums', label: 'Albums' },
+              { id: 'artists', label: 'Artists' },
+              { id: 'playlists', label: 'Playlists' },
+            ]}
+            activeId={category}
+            onChange={(id) => setCategory(id as SearchCategory)}
+            variant="segmented"
+            ariaLabel="Search result categories"
+          />
         </div>
-      </div>
+      )}
 
-      {/* Error Banner */}
       {searchError && (
-        <div className="cavia-toast toast-error" role="alert" style={{ marginBottom: 16 }}>
-          <XCircle size={16} className="text-danger" />
+        <div className="cavia-banner banner-error search-error" role="alert">
+          <XCircle size={16} />
           <span>Search failed: {searchError}</span>
         </div>
       )}
 
-      {/* Loading state indicator */}
-      {isLoading && !results && (
-        <div className="search-loading-state">
-          <Loader2 size={28} className="search-loading-spinner" />
-          <p>Querying local SQLite FTS5 index...</p>
+      {isQueryActive && isLoading && !results && (
+        <div className="search-loading-line">
+          <Loader2 size={16} className="search-loading-spinner" />
+          <span>Searching your library…</span>
         </div>
       )}
 
-      {/* Empty Input: Show Recent Search History or Discovery Prompt */}
-      {!isQueryActive && (
-        <>
-          {recentSearches.length > 0 ? (
-            <div className="search-history-section">
-              <div className="history-header">
-                <div className="history-title">
-                  <Clock size={14} />
-                  <span>RECENT SEARCHES</span>
-                </div>
-                <button
-                  type="button"
-                  className="history-clear-btn"
-                  onClick={handleClearHistory}
-                  aria-label="Clear session search history"
-                >
-                  <Trash2 size={13} />
-                  <span>Clear History</span>
-                </button>
-              </div>
-
-              <div className="history-chips">
-                {recentSearches.map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    className="history-chip"
-                    onClick={() => {
-                      setQuery(item);
-                      setDebouncedQuery(item);
-                    }}
-                  >
-                    <span>{item}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="search-discovery-prompt">
-              <div className="discovery-kanji" aria-hidden="true">
-                尋
-              </div>
-              <div className="discovery-copy">
-                <div className="cavia-eyebrow">
-                  <Sparkles size={14} className="text-vermilion" />
-                  <span>DIRECT CATALOGUE LOOKUP</span>
-                </div>
-                <h3>Local Search Engine Ready</h3>
-                <p>
-                  Type any query above to filter tracks, albums, artists, or playlists indexed in your Cavia collection. Your searches remain 100% private and offline.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {/* Provider Standing By Banner */}
-          <div className="cavia-banner banner-info" style={{ marginTop: 24 }}>
-            <RadioTower size={18} className="banner-icon-accent" />
-            <div className="banner-content">
-              <strong>Local Library Engine Active</strong>
-              <p>
-                Search queries are evaluated locally against your SQLite FTS5 trigram index. Online streaming catalogues will activate when authorized provider adapters are configured. No fabricated tracks are shown.
-              </p>
-            </div>
-            <Badge variant="neutral" size="sm">
-              OFFLINE / FTS5
-            </Badge>
-          </div>
-        </>
-      )}
-
-      {/* Query Active & No Results */}
       {isQueryActive && !isLoading && results && results.totalCount === 0 && (
-        <div className="search-results-empty">
-          <div className="search-results-icon">
-            <Search size={28} />
-          </div>
-          <h3>No matching recordings found</h3>
-          <p>
-            No indexed tracks, albums, artists, or playlists match &ldquo;
-            <strong>{debouncedQuery || query}</strong>&rdquo; in your local library.
-          </p>
-          <div className="search-empty-actions">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setQuery('');
-                setDebouncedQuery('');
-                setResults(null);
-              }}
-            >
-              Clear Search
-            </Button>
-          </div>
+        <div className="search-empty">
+          <h2>Nothing found for &ldquo;{debouncedQuery || query}&rdquo;</h2>
+          <p>Try a different spelling.</p>
         </div>
       )}
 
-      {/* Query Active & Results Available */}
-      {isQueryActive && results && results.totalCount > 0 && (
-        <div className="search-results-container">
-          {/* TRACKS SECTION */}
+      {isQueryActive && hasResults && results && (
+        <div className="search-results">
           {(category === 'all' || category === 'tracks') && results.tracks.length > 0 && (
-            <section className="search-section" aria-label="Matching Tracks">
-              <div className="search-section-header">
-                <div className="search-section-title">
-                  <span>TRACKS</span>
-                  <Badge variant="vermilion" size="sm">
-                    {results.tracks.length}
-                  </Badge>
-                </div>
-                {category === 'all' && results.tracks.length >= 20 && (
-                  <button
-                    type="button"
-                    className="search-see-all-btn"
-                    onClick={() => setCategory('tracks')}
-                  >
-                    View all track results →
-                  </button>
-                )}
+            <section className="search-section" aria-label="Track results">
+              <div className="section-title-row">
+                <h2>Tracks</h2>
+                <span className="result-count">{results.tracks.length}</span>
               </div>
-
-              <div className="tracks-table" role="table" aria-label="Search track results">
-                <div className="tracks-table-head" role="row">
-                  <span className="col-num" role="columnheader">#</span>
-                  <span className="col-title" role="columnheader">TITLE</span>
-                  <span className="col-artist" role="columnheader">ARTIST</span>
-                  <span className="col-album" role="columnheader">ALBUM</span>
-                  <span className="col-duration" role="columnheader">TIME</span>
-                  <span className="col-action" role="columnheader">ACTION</span>
-                </div>
-
-                <div className="tracks-table-body" role="rowgroup">
-                  {results.tracks.map((track, i) => {
-                    const isCurrent = track.id === currentTrackId;
-                    const isLiked = track.isLiked || likedTrackIds.has(track.id);
-                    const formattedArt = formatArtworkUri(track.artworkUri);
-
-                    return (
-                      <div
-                        key={track.id}
-                        className={`track-row ${isCurrent ? 'current' : ''}`}
-                        tabIndex={0}
-                        role="row"
-                        aria-label={`Track ${track.trackNumber || i + 1}: ${track.title} by ${track.artist || 'Unknown Artist'}`}
-                        onClick={() => onPlayTrack?.(track.id)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault();
-                            onPlayTrack?.(track.id);
-                          }
-                        }}
-                      >
-                        <span className="col-num" role="cell">
-                          {isCurrent && isPlaying ? (
-                            <span className="track-playing-indicator" title="Playing">
-                              ▶
-                            </span>
-                          ) : (
-                            track.trackNumber || i + 1
-                          )}
-                        </span>
-
-                        <span className="col-title" role="cell">
-                          {formattedArt ? (
-                            <img
-                              src={formattedArt}
-                              alt=""
-                              className="track-row-art"
-                              loading="lazy"
-                            />
-                          ) : (
-                            <div className="track-art-placeholder">
-                              <Disc3 size={14} />
-                            </div>
-                          )}
-                          <span className="track-title-text">{track.title}</span>
-                        </span>
-
-                        <span className="col-artist" role="cell">{track.artist || 'Unknown Artist'}</span>
-                        <span className="col-album" role="cell">{track.album || 'Unknown Album'}</span>
-                        <span className="col-duration" role="cell">{formatDuration(track.durationMs)}</span>
-
-                        <span className="col-action" role="cell" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            type="button"
-                            className="track-action-inline-btn"
-                            onClick={() => onAddToPlaylist?.(track)}
-                            aria-label={`Add ${track.title} to playlist`}
-                            title="Add to playlist"
-                          >
-                            <ListPlus size={15} />
-                          </button>
-
-                          <button
-                            type="button"
-                            className={`track-like-inline-btn ${isLiked ? 'active' : ''}`}
-                            onClick={() => onToggleLike?.(track.id)}
-                            aria-label={isLiked ? 'Remove from liked songs' : 'Add to liked songs'}
-                            aria-pressed={isLiked ? 'true' : 'false'}
-                            title={isLiked ? 'Liked' : 'Like track'}
-                          >
-                            <Heart
-                              size={15}
-                              fill={isLiked ? 'var(--accent-vermilion)' : 'none'}
-                              color={isLiked ? 'var(--accent-vermilion)' : 'currentColor'}
-                            />
-                          </button>
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
+              <TrackList
+                tracks={results.tracks}
+                density={density}
+                onPlayTrack={(trackId) => {
+                  const index = results.tracks.findIndex((track) => track.id === trackId);
+                  onPlayTracks?.(results.tracks, index >= 0 ? index : 0, false);
+                }}
+                ariaLabel="Search track results"
+                {...trackListProps}
+              />
             </section>
           )}
 
-          {/* ALBUMS SECTION */}
           {(category === 'all' || category === 'albums') && results.albums.length > 0 && (
-            <section className="search-section" aria-label="Matching Albums">
-              <div className="search-section-header">
-                <div className="search-section-title">
-                  <span>ALBUMS</span>
-                  <Badge variant="vermilion" size="sm">
-                    {results.albums.length}
-                  </Badge>
-                </div>
-                {category === 'all' && results.albums.length >= 10 && (
-                  <button
-                    type="button"
-                    className="search-see-all-btn"
-                    onClick={() => setCategory('albums')}
-                  >
-                    View all album results →
-                  </button>
-                )}
+            <section className="search-section" aria-label="Album results">
+              <div className="section-title-row">
+                <h2>Albums</h2>
+                <span className="result-count">{results.albums.length}</span>
               </div>
-
-              <div className="albums-grid">
-                {results.albums.map((album) => {
-                  const formattedArt = formatArtworkUri(album.artworkUri);
-
-                  return (
-                    <article
-                      key={album.id}
-                      className="album-card"
-                      tabIndex={0}
-                      role="button"
-                      onClick={() => handlePlayAlbum(album)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          handlePlayAlbum(album);
-                        }
-                      }}
-                    >
-                      <div className="album-sleeve-frame">
-                        {formattedArt ? (
-                          <img
-                            src={formattedArt}
-                            alt={album.title}
-                            className="album-artwork-img"
-                            loading="lazy"
-                          />
-                        ) : (
-                          <div className="album-artwork-placeholder">
-                            <Disc3 size={32} />
-                            <span className="album-badge">ALBUM</span>
-                          </div>
-                        )}
-                        <div className="album-shadow-sheen" />
-                      </div>
-
-                      <div className="album-meta">
-                        <strong className="album-title">{album.title}</strong>
-                        <span className="album-artist">{album.artist}</span>
-                        <div className="album-submeta">
-                          {album.year && <span>{album.year}</span>}
-                          {album.year && <span>·</span>}
-                          <span>
-                            {album.trackCount} {album.trackCount === 1 ? 'track' : 'tracks'}
-                          </span>
-                          <button
-                            type="button"
-                            className="album-add-playlist-inline-btn"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleAddAlbumToPlaylist(album);
-                            }}
-                            title={`Add all tracks from ${album.title} to playlist`}
-                            aria-label={`Add all tracks from ${album.title} to playlist`}
-                          >
-                            <ListPlus size={13} />
-                            <span>Playlist</span>
-                          </button>
-                        </div>
-                      </div>
-                    </article>
-                  );
-                })}
+              <div className="media-grid">
+                {results.albums.map((album) => (
+                  <AlbumCard
+                    key={album.id}
+                    album={album}
+                    onOpen={setSelectedAlbum}
+                    onPlay={onPlayAlbum}
+                    playDisabled={!isBackendReady}
+                  />
+                ))}
               </div>
             </section>
           )}
 
-          {/* ARTISTS SECTION */}
           {(category === 'all' || category === 'artists') && results.artists.length > 0 && (
-            <section className="search-section" aria-label="Matching Artists">
-              <div className="search-section-header">
-                <div className="search-section-title">
-                  <span>ARTISTS</span>
-                  <Badge variant="vermilion" size="sm">
-                    {results.artists.length}
-                  </Badge>
-                </div>
-                {category === 'all' && results.artists.length >= 10 && (
-                  <button
-                    type="button"
-                    className="search-see-all-btn"
-                    onClick={() => setCategory('artists')}
-                  >
-                    View all artist results →
-                  </button>
-                )}
+            <section className="search-section" aria-label="Artist results">
+              <div className="section-title-row">
+                <h2>Artists</h2>
+                <span className="result-count">{results.artists.length}</span>
               </div>
-
-              <div className="artists-grid">
-                {results.artists.map((artist) => {
-                  const formattedArt = formatArtworkUri(artist.artworkUri);
-
-                  return (
-                    <article
-                      key={artist.id}
-                      className="artist-card"
-                      tabIndex={0}
-                      role="button"
-                      onClick={() => handlePlayArtist(artist)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          handlePlayArtist(artist);
-                        }
-                      }}
-                    >
-                      <div className="artist-avatar-frame">
-                        {formattedArt ? (
-                          <img
-                            src={formattedArt}
-                            alt={artist.name}
-                            className="artist-artwork-img"
-                            loading="lazy"
-                            style={{
-                              width: '100%',
-                              height: '100%',
-                              objectFit: 'cover',
-                              borderRadius: '50%',
-                            }}
-                          />
-                        ) : (
-                          <span className="artist-monogram">
-                            {artist.name.slice(0, 2).toUpperCase()}
-                          </span>
-                        )}
-                        <div className="artist-avatar-halo" />
-                      </div>
-
-                      <div className="artist-meta">
-                        <strong className="artist-name">{artist.name}</strong>
-                        <span className="artist-stats">
-                          {artist.albumCount} {artist.albumCount === 1 ? 'album' : 'albums'} ·{' '}
-                          {artist.trackCount} {artist.trackCount === 1 ? 'track' : 'tracks'}
-                        </span>
-                      </div>
-                    </article>
-                  );
-                })}
+              <div className="media-grid">
+                {results.artists.map((artist) => (
+                  <ArtistCard
+                    key={artist.id}
+                    artist={artist}
+                    onOpen={setSelectedArtist}
+                    onPlay={onPlayArtist}
+                    playDisabled={!isBackendReady}
+                  />
+                ))}
               </div>
             </section>
           )}
 
-          {/* PLAYLISTS SECTION */}
           {(category === 'all' || category === 'playlists') && results.playlists.length > 0 && (
-            <section className="search-section" aria-label="Matching Playlists">
-              <div className="search-section-header">
-                <div className="search-section-title">
-                  <span>PLAYLISTS</span>
-                  <Badge variant="vermilion" size="sm">
-                    {results.playlists.length}
-                  </Badge>
-                </div>
-                {category === 'all' && results.playlists.length >= 10 && (
-                  <button
-                    type="button"
-                    className="search-see-all-btn"
-                    onClick={() => setCategory('playlists')}
-                  >
-                    View all playlist results →
-                  </button>
-                )}
+            <section className="search-section" aria-label="Playlist results">
+              <div className="section-title-row">
+                <h2>Playlists</h2>
+                <span className="result-count">{results.playlists.length}</span>
               </div>
-
-              <div className="playlists-grid">
+              <div className="playlist-rows">
                 {results.playlists.map((playlist) => (
-                  <article
+                  <button
                     key={playlist.id}
-                    className="playlist-card"
-                    tabIndex={0}
-                    role="button"
+                    type="button"
+                    className="playlist-row"
                     onClick={() => setSelectedPlaylist(playlist)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        setSelectedPlaylist(playlist);
-                      }
-                    }}
-                    aria-label={`Open playlist ${playlist.name}`}
                   >
-                    <div className="playlist-card-art">
-                      <Disc3 size={36} className="playlist-vinyl-emblem" />
-                      <span className="playlist-art-sheen" />
-                    </div>
-
-                    <div className="playlist-card-body">
-                      <div className="playlist-badge-row">
-                        <Badge variant="vermilion" size="sm">
-                          {playlist.sourceProvider
-                            ? playlist.sourceProvider.toUpperCase()
-                            : 'LOCAL PLAYLIST'}
-                        </Badge>
-                        <span className="playlist-track-badge">
-                          {playlist.trackCount}{' '}
-                          {playlist.trackCount === 1 ? 'track' : 'tracks'}
-                        </span>
-                      </div>
-
-                      <h3 className="playlist-title">{playlist.name}</h3>
-                      <p className="playlist-description">
-                        {playlist.description || 'Custom curated local playlist archive'}
-                      </p>
-                    </div>
-                  </article>
+                    <span className="playlist-row-icon" aria-hidden="true">
+                      <Music2 size={18} />
+                    </span>
+                    <span className="playlist-row-copy">
+                      <strong>{playlist.name}</strong>
+                      <span>
+                        {playlist.trackCount} {playlist.trackCount === 1 ? 'track' : 'tracks'}
+                        {playlist.description ? ` · ${playlist.description}` : ''}
+                      </span>
+                    </span>
+                  </button>
                 ))}
               </div>
             </section>
@@ -728,11 +451,10 @@ export const SearchView = memo(function SearchView({
         </div>
       )}
 
-      {/* Playlist Detail Modal for Selected Playlist in Search Results */}
       {selectedPlaylist && (
         <PlaylistDetailModal
           playlist={selectedPlaylist}
-          isOpen={Boolean(selectedPlaylist)}
+          isOpen
           onClose={() => setSelectedPlaylist(null)}
           isBackendReady={isBackendReady}
           onDeletePlaylist={onDeletePlaylist}
@@ -742,4 +464,4 @@ export const SearchView = memo(function SearchView({
       )}
     </section>
   );
-});
+}
