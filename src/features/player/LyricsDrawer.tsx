@@ -52,6 +52,13 @@ export function LyricsDrawer({
   const currentPositionMs = livePos.positionMs || (playbackPositionMs ?? 0);
 
   // Focus management and keyboard escape handler
+  // Inline onClose props would otherwise re-run this effect on every parent
+  // render and repeatedly move focus back to the first control.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
   useEffect(() => {
     if (!isOpen) return;
 
@@ -59,18 +66,20 @@ export function LyricsDrawer({
     document.body.style.overflow = 'hidden';
 
     const timer = setTimeout(() => {
-      if (drawerRef.current) {
-        const firstFocusable = drawerRef.current.querySelector<HTMLElement>(
-          'button:not([disabled]), [tabindex]:not([tabindex="-1"])'
-        );
-        firstFocusable?.focus();
-      }
+      const drawer = drawerRef.current;
+      if (!drawer) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && drawer.contains(active)) return;
+      const firstFocusable = drawer.querySelector<HTMLElement>(
+        'button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      firstFocusable?.focus();
     }, 50);
 
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onClose();
+        onCloseRef.current();
         return;
       }
 
@@ -107,7 +116,7 @@ export function LyricsDrawer({
         previousActiveElementRef.current.focus();
       }
     };
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   // Fetch lyrics when track changes or drawer opens
   useEffect(() => {

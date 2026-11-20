@@ -78,6 +78,13 @@ export function ExpandedPlayer({
   const overlayRef = useRef<HTMLDivElement>(null);
   const previousActiveElementRef = useRef<HTMLElement | null>(null);
 
+  // Inline onClose props would otherwise re-run this effect on every parent
+  // render and repeatedly move focus back to the first control.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
   useEffect(() => {
     if (!isOpen) return;
 
@@ -85,18 +92,20 @@ export function ExpandedPlayer({
     document.body.style.overflow = 'hidden';
 
     const timer = setTimeout(() => {
-      if (overlayRef.current) {
-        const firstFocusable = overlayRef.current.querySelector<HTMLElement>(
-          'button:not([disabled]), [tabindex]:not([tabindex="-1"])'
-        );
-        firstFocusable?.focus();
-      }
+      const overlay = overlayRef.current;
+      if (!overlay) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && overlay.contains(active)) return;
+      const firstFocusable = overlay.querySelector<HTMLElement>(
+        'button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      firstFocusable?.focus();
     }, 50);
 
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onClose();
+        onCloseRef.current();
         return;
       }
 
@@ -132,7 +141,7 @@ export function ExpandedPlayer({
         previousActiveElementRef.current.focus();
       }
     };
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   const handleShareTrack = async () => {
     if (!currentTrack) return;

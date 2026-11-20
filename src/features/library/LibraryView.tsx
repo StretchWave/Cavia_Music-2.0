@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import {
   ArrowLeft,
   AudioWaveform,
@@ -101,6 +101,7 @@ export function LibraryView({
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
+  const chipsRef = useRef<HTMLDivElement>(null);
 
   const recentTracks = useMemo(
     () =>
@@ -141,6 +142,28 @@ export function LibraryView({
     setFilter(next);
     setSelectedAlbum(null);
     setSelectedArtist(null);
+    setSelectedPlaylist(null);
+  };
+
+  const handleChipKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    let nextIndex = -1;
+
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+      nextIndex = (index + 1) % FILTERS.length;
+    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+      nextIndex = (index - 1 + FILTERS.length) % FILTERS.length;
+    } else if (event.key === 'Home') {
+      nextIndex = 0;
+    } else if (event.key === 'End') {
+      nextIndex = FILTERS.length - 1;
+    }
+
+    if (nextIndex === -1) return;
+    event.preventDefault();
+    selectFilter(FILTERS[nextIndex].id);
+    // Focus the newly active tab immediately. Deferring with rAF/setTimeout
+    // makes focus follow selection only when frames are being produced.
+    chipsRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[nextIndex]?.focus();
   };
 
   const handleCreateSubmit = (event: FormEvent) => {
@@ -189,6 +212,7 @@ export function LibraryView({
     <section className="cavia-library-page">
       <header className="library-header">
         <div className="library-heading">
+          <p className="page-eyebrow">Your collection</p>
           <h1 className="library-title">
             Library<span>.</span>
           </h1>
@@ -200,15 +224,23 @@ export function LibraryView({
         {headerActions}
       </header>
 
-      <div className="library-chips" role="tablist" aria-label="Library sections">
-        {FILTERS.map((item) => (
+      <div
+        ref={chipsRef}
+        className="library-chips"
+        role="tablist"
+        aria-label="Library sections"
+      >
+        {FILTERS.map((item, index) => (
           <button
             key={item.id}
             type="button"
             role="tab"
             aria-selected={filter === item.id}
+            aria-controls="library-panel"
+            tabIndex={filter === item.id ? 0 : -1}
             className={`library-chip ${filter === item.id ? 'active' : ''}`}
             onClick={() => selectFilter(item.id)}
+            onKeyDown={(event) => handleChipKeyDown(event, index)}
           >
             {item.label}
           </button>
@@ -222,6 +254,11 @@ export function LibraryView({
         </div>
       )}
 
+      <div
+        id="library-panel"
+        role="tabpanel"
+        aria-label={`${FILTERS.find((item) => item.id === filter)?.label ?? 'Library'} section`}
+      >
       {filter === 'all' && (
         <>
           {tracks.length > 0 ? (
@@ -257,43 +294,6 @@ export function LibraryView({
             </div>
           )}
 
-          <section className="library-section" aria-label="Browse library">
-            <div className="section-title-row">
-              <h2>Browse</h2>
-            </div>
-            <div className="browse-list">
-              <button type="button" className="browse-row" onClick={() => selectFilter('tracks')}>
-                <Music2 size={18} />
-                <span className="browse-row-label">Tracks</span>
-                <span className="browse-row-count">{tracks.length}</span>
-                <ChevronRight size={16} />
-              </button>
-              <button type="button" className="browse-row" onClick={() => selectFilter('albums')}>
-                <Disc3 size={18} />
-                <span className="browse-row-label">Albums</span>
-                <span className="browse-row-count">{albums.length}</span>
-                <ChevronRight size={16} />
-              </button>
-              <button type="button" className="browse-row" onClick={() => selectFilter('artists')}>
-                <AudioWaveform size={18} />
-                <span className="browse-row-label">Artists</span>
-                <span className="browse-row-count">{artists.length}</span>
-                <ChevronRight size={16} />
-              </button>
-              <button type="button" className="browse-row" onClick={() => selectFilter('playlists')}>
-                <ListMusic size={18} />
-                <span className="browse-row-label">Playlists</span>
-                <span className="browse-row-count">{playlists.length}</span>
-                <ChevronRight size={16} />
-              </button>
-              <button type="button" className="browse-row" onClick={() => selectFilter('liked')}>
-                <Heart size={18} />
-                <span className="browse-row-label">Liked</span>
-                <span className="browse-row-count">{likedTracks.length}</span>
-                <ChevronRight size={16} />
-              </button>
-            </div>
-          </section>
         </>
       )}
 
@@ -585,6 +585,8 @@ export function LibraryView({
           )}
         </section>
       )}
+
+      </div>
 
       <Modal
         isOpen={isCreateOpen}

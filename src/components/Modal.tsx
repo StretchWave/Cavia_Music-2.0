@@ -25,6 +25,14 @@ export function Modal({
   const previousActiveElementRef = useRef<HTMLElement | null>(null);
   const titleId = useRef(`modal-title-${Math.random().toString(36).slice(2, 9)}`).current;
 
+  // Keep the latest callback without re-running the open/close effect.
+  // Callers commonly pass inline handlers, which would otherwise re-run the
+  // effect (and re-steal focus) on every parent render, including each keystroke.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
   useEffect(() => {
     if (!isOpen) return;
 
@@ -33,25 +41,32 @@ export function Modal({
 
     // Auto-focus first focusable element or dialog panel
     const focusTimer = setTimeout(() => {
-      if (dialogRef.current) {
-        const focusables = dialogRef.current.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-        );
-        const autoFocusTarget = dialogRef.current.querySelector<HTMLElement>('[autofocus]');
-        if (autoFocusTarget) {
-          autoFocusTarget.focus();
-        } else if (focusables.length > 0) {
-          focusables[0].focus();
-        } else {
-          dialogRef.current.focus();
-        }
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+
+      // Respect a field the dialog already focused (autoFocus inputs).
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active !== dialog && dialog.contains(active)) {
+        return;
+      }
+
+      const focusables = dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      const autoFocusTarget = dialog.querySelector<HTMLElement>('[autofocus]');
+      if (autoFocusTarget) {
+        autoFocusTarget.focus();
+      } else if (focusables.length > 0) {
+        focusables[0].focus();
+      } else {
+        dialog.focus();
       }
     }, 50);
 
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onClose();
+        onCloseRef.current();
         return;
       }
 
@@ -95,7 +110,7 @@ export function Modal({
         previousActiveElementRef.current.focus();
       }
     };
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 

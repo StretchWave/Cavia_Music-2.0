@@ -25,6 +25,7 @@ import { Badge } from '../../components/Badge';
 import { Button } from '../../components/Button';
 import { Modal } from '../../components/Modal';
 import type { PlatformHealth } from '../../lib/platform';
+import type { MotionSetting } from '../../lib/motion';
 import type { SyncAccountStatus, SyncConfigDTO } from '../../lib/types';
 import {
   getArtworkCacheSummary,
@@ -51,6 +52,8 @@ interface SettingsViewProps {
   health: PlatformHealth | null;
   density: 'standard' | 'compact';
   onDensityChange: (density: 'standard' | 'compact') => void;
+  motion: MotionSetting;
+  onMotionChange: (motion: MotionSetting) => void;
 }
 
 type SettingsSection = 'appearance' | 'audio' | 'library' | 'account' | 'about';
@@ -67,6 +70,8 @@ export const SettingsView = memo(function SettingsView({
   health,
   density,
   onDensityChange,
+  motion,
+  onMotionChange,
 }: SettingsViewProps) {
   const [activeSection, setActiveSection] = useState<SettingsSection>('appearance');
 
@@ -285,9 +290,12 @@ export const SettingsView = memo(function SettingsView({
   return (
     <section className="cavia-subpage settings-page">
       <header className="settings-header">
-        <h1 className="library-title">
-          Settings<span>.</span>
-        </h1>
+        <div className="library-heading">
+          <p className="page-eyebrow">Preferences</p>
+          <h1 className="library-title">
+            Settings<span>.</span>
+          </h1>
+        </div>
       </header>
 
       <div className="settings-layout">
@@ -343,15 +351,45 @@ export const SettingsView = memo(function SettingsView({
                 <Palette size={18} className="card-icon" />
                 <div>
                   <h3>Palette</h3>
-                  <p>Obsidian, aged ivory, and restrained vermilion.</p>
+                  <p>Ink surfaces, bone type, one sodium lamp. Artwork tints the glow, never the text.</p>
                 </div>
               </div>
               <div className="palette-strip">
-                <span className="palette-swatch" style={{ background: '#090a0d' }} title="Canvas #090a0d" />
-                <span className="palette-swatch" style={{ background: '#12141a' }} title="Surface #12141a" />
-                <span className="palette-swatch" style={{ background: '#f5f2eb' }} title="Aged ivory #f5f2eb" />
-                <span className="palette-swatch" style={{ background: '#d64732' }} title="Vermilion #d64732" />
+                <span className="palette-swatch" style={{ background: '#08070d' }} title="Ink canvas #08070d" />
+                <span className="palette-swatch" style={{ background: '#1e1a2b' }} title="Ink card #1e1a2b" />
+                <span className="palette-swatch" style={{ background: '#f6f1e7' }} title="Bone #f6f1e7" />
+                <span className="palette-swatch" style={{ background: '#ffb23e' }} title="Sodium #ffb23e" />
+                <span className="palette-swatch" style={{ background: '#4fe3c1' }} title="Lagoon #4fe3c1" />
               </div>
+            </div>
+
+            <div className="settings-card">
+              <div className="card-head">
+                <Layers size={18} className="card-icon" />
+                <div>
+                  <h3>Motion</h3>
+                  <p>Vinyl spin, sleeve pull and page transitions follow this setting.</p>
+                </div>
+              </div>
+              <div className="setting-control-row">
+                <Tabs
+                  items={[
+                    { id: 'full', label: 'Full' },
+                    { id: 'reduced', label: 'Reduced' },
+                    { id: 'off', label: 'Off' },
+                  ]}
+                  activeId={motion}
+                  onChange={(id) => onMotionChange(id as MotionSetting)}
+                  variant="pill"
+                />
+              </div>
+              <p className="text-muted-xs">
+                {motion === 'full'
+                  ? 'Every signature animation runs.'
+                  : motion === 'reduced'
+                    ? 'Spin, drift, tilt and parallax are disabled. Fades stay at 120ms.'
+                    : 'All animation is off, including the ambient Afterglow.'}
+              </p>
             </div>
           </section>
 
@@ -908,12 +946,12 @@ export const SettingsView = memo(function SettingsView({
                 <AudioWaveform size={26} className="text-vermilion" />
                 <div>
                   <h2>cavia music<span>.</span></h2>
-                  <span className="about-edition">VERSION 2.0.0</span>
+                  <span className="about-edition">VERSION 3.0.0 · AFTERGLOW</span>
                 </div>
               </div>
 
               <p className="about-text">
-                A local-first music application built with Tauri 2, React 19, TypeScript, and Rust.
+                A local-first listening room, built with Tauri 2, React 19, TypeScript, and Rust.
               </p>
 
               <div className="about-badges">

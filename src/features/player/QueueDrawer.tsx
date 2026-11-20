@@ -49,6 +49,13 @@ export function QueueDrawer({
   const drawerRef = useRef<HTMLDivElement>(null);
   const previousActiveElementRef = useRef<HTMLElement | null>(null);
 
+  // Inline onClose props would otherwise re-run this effect on every parent
+  // render and repeatedly move focus back to the first control.
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
   useEffect(() => {
     if (!isOpen) return;
 
@@ -56,18 +63,20 @@ export function QueueDrawer({
     document.body.style.overflow = 'hidden';
 
     const timer = setTimeout(() => {
-      if (drawerRef.current) {
-        const firstFocusable = drawerRef.current.querySelector<HTMLElement>(
-          'button:not([disabled]), [tabindex]:not([tabindex="-1"])'
-        );
-        firstFocusable?.focus();
-      }
+      const drawer = drawerRef.current;
+      if (!drawer) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && drawer.contains(active)) return;
+      const firstFocusable = drawer.querySelector<HTMLElement>(
+        'button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      firstFocusable?.focus();
     }, 50);
 
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onClose();
+        onCloseRef.current();
         return;
       }
 
@@ -104,7 +113,7 @@ export function QueueDrawer({
         previousActiveElementRef.current.focus();
       }
     };
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 

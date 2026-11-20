@@ -253,10 +253,7 @@ export function PlayerDock({
             <Slider
               value={isMuted ? 0 : volumeDraft ?? volume}
               max={100}
-              onChange={(newVol) => {
-                setVolumeDraft(newVol);
-                onVolumeChange?.(newVol);
-              }}
+              onChange={setVolumeDraft}
               onCommit={(newVol) => {
                 setVolumeDraft(null);
                 onVolumeChange?.(newVol);

@@ -66,6 +66,10 @@ import { ExpandedPlayer } from '../features/player/ExpandedPlayer';
 import { QueueDrawer } from '../features/player/QueueDrawer';
 import { LyricsDrawer } from '../features/player/LyricsDrawer';
 import { AddToPlaylistModal } from '../features/library/AddToPlaylistModal';
+import { AfterglowBackdrop } from '../components/AfterglowBackdrop';
+import { useAfterglowPalette } from '../lib/useAfterglowPalette';
+import { useMotionSetting } from '../lib/motion';
+import { formatArtworkUri } from '../lib/library';
 
 const pageLabels: Record<Page, string> = {
   library: 'Library',
@@ -152,6 +156,7 @@ export function App() {
 
   // Appearance preferences
   const [density, setDensity] = useState<'standard' | 'compact'>('standard');
+  const [motion, setMotion] = useMotionSetting();
 
   // Playback state (honest initial state: audio backend is standby until native initialization)
   const [playback, setPlayback] = useState<PlaybackState>({
@@ -635,20 +640,32 @@ export function App() {
   }, [page]);
 
   useEffect(() => {
-    function handleGlobalKeyDown(e: KeyboardEvent) {
-      const target = e.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.tagName === 'SELECT' ||
-          target.isContentEditable)
-      ) {
-        return;
-      }
+    // Fields and native controls own their Space/Enter behavior. Without this
+    // guard, pressing Space on a focused button, track row or tab both activates
+    // that control and toggles playback.
+    const interactiveTargetSelector = [
+      'input',
+      'textarea',
+      'select',
+      'button',
+      'a[href]',
+      'summary',
+      '[contenteditable="true"]',
+      '[role="button"]',
+      '[role="tab"]',
+      '[role="menuitem"]',
+      '[role="slider"]',
+      '[role="row"]',
+      '[role="option"]',
+    ].join(', ');
 
-      // Space -> Toggle Play/Pause
+    function handleGlobalKeyDown(e: KeyboardEvent) {
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest(interactiveTargetSelector)) return;
+
+      // Space -> Toggle Play/Pause (only when playback is actually available)
       if (e.code === 'Space') {
+        if (health?.audio_backend !== 'ready') return;
         e.preventDefault();
         handleTogglePlay();
       }
@@ -672,7 +689,7 @@ export function App() {
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [handleTogglePlay]);
+  }, [handleTogglePlay, health?.audio_backend]);
 
   const handleNext = useCallback(async () => {
     try {
@@ -825,6 +842,16 @@ export function App() {
 
   const isBackendReady = health?.audio_backend === 'ready';
 
+  // Afterglow: the current artwork lights the room and tints the shell.
+  const nowPlayingArtwork = useMemo(
+    () =>
+      playback.currentTrack?.artworkUri
+        ? formatArtworkUri(playback.currentTrack.artworkUri)
+        : undefined,
+    [playback.currentTrack?.artworkUri]
+  );
+  useAfterglowPalette(nowPlayingArtwork);
+
   const statusLabel = useMemo(() => {
     if (!isNativeApp()) return 'Design preview';
     if (connectionError) return 'Core unavailable';
@@ -850,7 +877,17 @@ export function App() {
   ];
 
   return (
-    <div className={`cavia-app-frame ${density === 'compact' ? 'density-compact' : ''}`}>
+    <div
+      className={`cavia-app-frame ${density === 'compact' ? 'density-compact' : ''}`}
+      data-motion={motion}
+      data-playing={playback.status === 'playing' ? 'true' : 'false'}
+    >
+      <AfterglowBackdrop
+        artworkUri={nowPlayingArtwork}
+        isPlaying={playback.status === 'playing'}
+        enabled={motion !== 'off'}
+      />
+
       <a href="#main-content" className="skip-link">
         Skip to main content
       </a>
@@ -1026,7 +1063,13 @@ export function App() {
           )}
 
           {page === 'settings' && (
-            <SettingsView health={health} density={density} onDensityChange={setDensity} />
+            <SettingsView
+              health={health}
+              density={density}
+              onDensityChange={setDensity}
+              motion={motion}
+              onMotionChange={setMotion}
+            />
           )}
         </div>
 

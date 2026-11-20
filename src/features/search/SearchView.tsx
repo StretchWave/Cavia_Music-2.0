@@ -299,6 +299,7 @@ export function SearchView({
     <section className="cavia-library-page search-page">
       <header className="library-header search-header">
         <div className="library-heading">
+          <p className="page-eyebrow">Find in library</p>
           <h1 className="library-title">
             Search<span>.</span>
           </h1>
@@ -317,6 +318,12 @@ export function SearchView({
           shortcut=""
           className="search-main-input"
         />
+      </div>
+
+      <div className="sr-only" role="status" aria-live="polite">
+        {isQueryActive && results
+          ? `${results.totalCount} ${results.totalCount === 1 ? 'result' : 'results'} for ${debouncedQuery}`
+          : ''}
       </div>
 
       {isQueryActive && (

@@ -1,0 +1,536 @@
+/* ==========================================================================
+   Cavia 3.0 "Afterglow" — shell layer
+   Loaded after styles.css so it can re-shape the 2.x layout without rewriting it.
+   Everything here is transform/opacity/filter only in hot paths.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Canvas
+   -------------------------------------------------------------------------- */
+
+body {
+  background: var(--ink-950);
+}
+
+.cavia-app-frame {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+.cavia-main-shell {
+  z-index: 1;
+  background: transparent;
+}
+
+.cavia-page-scroll {
+  animation: cavia-chapter-in var(--dur-base) var(--ease-out) both;
+}
+
+@keyframes cavia-chapter-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+::selection {
+  background: var(--sodium);
+  color: var(--ink-950);
+}
+
+/* Sodium is a lamp: dark glyphs on it, never bone. */
+.btn-primary {
+  background: var(--sodium);
+  color: var(--ink-950);
+  font-weight: 600;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--sodium-hover);
+}
+
+.btn-primary:active:not(:disabled) {
+  background: var(--sodium-press);
+}
+
+/* --------------------------------------------------------------------------
+   Ambient light ("Afterglow")
+   One pre-blurred artwork plate, cross-fading, drifting only while playing.
+   -------------------------------------------------------------------------- */
+
+.afterglow {
+  position: fixed;
+  inset: -12%;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0.6;
+}
+
+.afterglow-layer {
+  position: absolute;
+  inset: 0;
+  background-position: center;
+  background-size: cover;
+  filter: blur(72px) saturate(1.5);
+  transform: scale(1.25);
+  will-change: opacity, transform;
+}
+
+.afterglow-layer-current {
+  animation: afterglow-fade var(--dur-afterglow) var(--ease-in-out) both,
+    afterglow-drift 60s linear infinite;
+}
+
+.afterglow-layer-outgoing {
+  opacity: 0.85;
+}
+
+.afterglow[data-playing='false'] .afterglow-layer-current {
+  animation-play-state: running, paused;
+}
+
+.afterglow-veil {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(120% 85% at 50% 22%, transparent 0%, rgba(8, 7, 13, 0.6) 58%, var(--ink-950) 100%),
+    linear-gradient(180deg, rgba(8, 7, 13, 0.35) 0%, transparent 40%);
+}
+
+@keyframes afterglow-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes afterglow-drift {
+  from {
+    transform: scale(1.25) rotate(0deg);
+  }
+  50% {
+    transform: scale(1.28) rotate(1deg);
+  }
+  to {
+    transform: scale(1.25) rotate(0deg);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Typography — display titles carry the editorial voice
+   -------------------------------------------------------------------------- */
+
+.library-title,
+.settings-section-title,
+.section-title,
+.collection-detail-copy h2,
+.expanded-track-title {
+  font-family: var(--font-display);
+  letter-spacing: -0.025em;
+}
+
+.page-eyebrow {
+  color: var(--bone-400);
+}
+
+/* --------------------------------------------------------------------------
+   Track rows — "needle drop"
+   -------------------------------------------------------------------------- */
+
+.track-row {
+  position: relative;
+  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.track-row::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 2px;
+  height: 0;
+  border-radius: 2px;
+  background: var(--sodium);
+  transform: translateY(-50%);
+  transition: height var(--dur-fast) var(--ease-out);
+}
+
+.track-row:hover::before,
+.track-row:focus-within::before {
+  height: 18px;
+}
+
+.track-row.active {
+  background: var(--art-wash);
+}
+
+.track-row.active::before {
+  height: 26px;
+  background: var(--art-1);
+}
+
+.track-row.active .track-title-text {
+  color: var(--bone-50);
+}
+
+.track-index-play {
+  color: var(--sodium);
+}
+
+.track-row.active .eq-bounce span,
+.eq-bounce span {
+  background: var(--art-1);
+}
+
+/* --------------------------------------------------------------------------
+   Desktop shell: floating glass icon rail + floating Now Playing Island
+   -------------------------------------------------------------------------- */
+
+@media (min-width: 769px) {
+  .cavia-app-frame {
+    grid-template-columns: calc(var(--rail-width) + (var(--rail-inset) * 2)) minmax(0, 1fr);
+  }
+
+  /* The rail is fixed, so the shell must be placed in the content column
+     explicitly instead of being auto-placed into the rail's track. */
+  .cavia-main-shell {
+    grid-column: 2;
+  }
+
+  .cavia-sidebar {
+    position: fixed;
+    top: var(--rail-inset);
+    left: var(--rail-inset);
+    bottom: var(--rail-inset);
+    z-index: 120;
+    display: flex;
+    width: var(--rail-width);
+    height: auto;
+    padding: 6px;
+    overflow: hidden;
+    border: 1px solid var(--glass-stroke);
+    border-radius: var(--radius-rail);
+    background: var(--glass-fill);
+    box-shadow: var(--shadow-md);
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+    transition: width var(--dur-slow) var(--ease-out), background-color var(--dur-base) var(--ease-out);
+  }
+
+  .cavia-sidebar:hover,
+  .cavia-sidebar:focus-within {
+    width: var(--rail-expanded);
+    background: var(--glass-fill-strong);
+  }
+
+  .brand-lockup {
+    height: 54px;
+    padding: 0 13px;
+    gap: 12px;
+    overflow: hidden;
+  }
+
+  .brand-mark {
+    border-radius: 10px;
+    background: var(--sodium-subtle);
+    color: var(--sodium);
+  }
+
+  .brand-name {
+    font-family: var(--font-display);
+    white-space: nowrap;
+    opacity: 0;
+    transform: translateX(-4px);
+    transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+  }
+
+  .cavia-sidebar:hover .brand-name,
+  .cavia-sidebar:focus-within .brand-name {
+    opacity: 1;
+    transform: none;
+  }
+
+  .sidebar-nav {
+    gap: 2px;
+    padding: 4px 0;
+  }
+
+  .nav-item {
+    height: 44px;
+    padding: 0 17px;
+    gap: 14px;
+    border-radius: 14px;
+    white-space: nowrap;
+    transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  }
+
+  .nav-item span {
+    opacity: 0;
+    transform: translateX(-4px);
+    transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+  }
+
+  .cavia-sidebar:hover .nav-item span,
+  .cavia-sidebar:focus-within .nav-item span {
+    opacity: 1;
+    transform: none;
+  }
+
+  .nav-item:hover {
+    background: color-mix(in oklab, var(--bone-50) 6%, transparent);
+  }
+
+  .nav-item.active {
+    background: color-mix(in oklab, var(--sodium) 11%, transparent);
+    color: var(--bone-50);
+  }
+
+  .nav-item.active::before {
+    top: 14px;
+    bottom: 14px;
+    left: 8px;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--sodium);
+  }
+
+  .nav-item:hover svg,
+  .nav-item.active svg {
+    color: var(--sodium);
+  }
+
+  .cavia-topbar {
+    height: 56px;
+    padding: 0 26px;
+    border-bottom: 0;
+    background: transparent;
+  }
+
+  /* The island */
+  .cavia-player-dock {
+    position: absolute;
+    left: 50%;
+    bottom: 16px;
+    z-index: 90;
+    width: min(var(--island-max), calc(100% - 40px));
+    height: var(--island-height);
+    padding: 0 16px;
+    gap: 14px;
+    grid-template-columns: minmax(150px, 1fr) minmax(300px, 1.5fr) auto;
+    border: 1px solid var(--art-hairline);
+    border-radius: var(--radius-island);
+    background: var(--glass-fill);
+    box-shadow:
+      var(--shadow-island),
+      0 26px 64px -28px color-mix(in oklab, var(--art-1) 55%, transparent);
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+    transform: translateX(-50%);
+  }
+
+  .cavia-page-scroll {
+    padding-bottom: calc(var(--island-height) + 48px);
+  }
+}
+
+/* Island internals */
+.dock-art-frame {
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  box-shadow: 0 6px 18px rgba(4, 3, 8, 0.45);
+}
+
+.dock-track-title {
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  font-variation-settings: 'wght' 520;
+  transition: font-variation-settings var(--dur-base) var(--ease-out);
+}
+
+.cavia-app-frame[data-playing='true'] .dock-track-title {
+  font-variation-settings: 'wght' 720;
+}
+
+.dock-play-btn {
+  background: var(--sodium);
+  color: var(--ink-950);
+  box-shadow: 0 6px 20px -6px var(--sodium-glow);
+}
+
+.dock-play-btn:hover:not(:disabled) {
+  background: var(--sodium-hover);
+}
+
+.dock-play-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.dock-speed-pill {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.dock-time-code {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------------------
+   Mobile shell: floating tab pill + mini island
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 768px) {
+  .cavia-page-scroll {
+    padding-bottom: calc(60px + 84px + 24px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .cavia-topbar {
+    height: 52px;
+    border-bottom: 0;
+    background: transparent;
+  }
+
+  .cavia-mobile-nav {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 10px);
+    z-index: 130;
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    height: 56px;
+    padding: 4px;
+    border: 1px solid var(--glass-stroke);
+    border-radius: var(--radius-island);
+    background: var(--glass-fill-strong);
+    box-shadow: var(--shadow-md);
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+  }
+
+  .mobile-nav-btn {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    height: 48px;
+    border: 0;
+    border-radius: 22px;
+    background: transparent;
+    color: var(--bone-400);
+    font-size: 10px;
+    letter-spacing: 0.01em;
+    transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  }
+
+  .mobile-nav-btn.active {
+    background: color-mix(in oklab, var(--sodium) 13%, transparent);
+    color: var(--bone-50);
+  }
+
+  .mobile-nav-btn.active svg {
+    color: var(--sodium);
+  }
+
+  .cavia-player-dock {
+    left: 12px;
+    right: 12px;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 78px);
+    height: 60px;
+    padding: 0 10px;
+    border: 1px solid var(--art-hairline);
+    border-radius: var(--radius-island);
+    background: var(--glass-fill-strong);
+    box-shadow: var(--shadow-island);
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+  }
+
+  .mobile-mini-art {
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .mobile-mini-play,
+  .mobile-mini-next {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--bone-50);
+  }
+
+  .mobile-mini-play {
+    background: var(--sodium);
+    color: var(--ink-950);
+  }
+
+  .mobile-mini-play:disabled,
+  .mobile-mini-next:disabled {
+    opacity: 0.35;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Motion modes
+   -------------------------------------------------------------------------- */
+
+[data-motion='reduced'] .afterglow-layer-current,
+[data-motion='reduced'] .spinning,
+[data-motion='reduced'] .eq-bounce span {
+  animation: none !important;
+}
+
+[data-motion='reduced'] .afterglow-layer-current {
+  transform: scale(1.25);
+}
+
+[data-motion='reduced'] .cavia-page-scroll {
+  animation-duration: var(--dur-instant);
+}
+
+[data-motion='off'] .afterglow {
+  display: none;
+}
+
+[data-motion='off'] .cavia-page-scroll {
+  animation: none;
+}
+
+[data-motion='off'] *,
+[data-motion='off'] *::before,
+[data-motion='off'] *::after {
+  animation-duration: 1ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 1ms !important;
+  scroll-behavior: auto !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .afterglow-layer-current {
+    animation: none !important;
+  }
+
+  .cavia-page-scroll {
+    animation: none;
+  }
+
+  .track-row,
+  .nav-item,
+  .cavia-sidebar {
+    transition-duration: var(--dur-instant);
+  }
+}
