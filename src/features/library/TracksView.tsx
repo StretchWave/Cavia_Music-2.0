@@ -2,6 +2,7 @@ import { memo } from 'react';
 import { FolderPlus, Heart, ListPlus, Music2, Play, Shuffle } from 'lucide-react';
 import { EmptyState } from '../../components/EmptyState';
 import { Button } from '../../components/Button';
+import { ArtworkImage } from '../../components/ArtworkImage';
 import { formatArtworkUri } from '../../lib/library';
 import type { Track } from '../../lib/types';
 
@@ -44,15 +45,11 @@ export const TracksView = memo(function TracksView({
     <section className="cavia-subpage tracks-page">
       <div className="subpage-header">
         <div>
-          <div className="cavia-eyebrow">
-            <span className="eyebrow-accent-line" />
-            <span>INDIVIDUAL RECORDINGS</span>
-          </div>
           <h1 className="subpage-title">
-            All Tracks<span>.</span>
+            Tracks<span>.</span>
           </h1>
           <p className="subpage-subtitle">
-            Flat list of every indexed audio file with full technical metadata.
+            {tracks.length.toLocaleString()} indexed recordings.
           </p>
         </div>
 
@@ -130,14 +127,11 @@ export const TracksView = memo(function TracksView({
                     )}
                   </span>
                   <span className="col-title" role="cell">
-                    {track.artworkUri && (
-                      <img
-                        src={formatArtworkUri(track.artworkUri)}
-                        alt=""
-                        className="track-row-art"
-                        loading="lazy"
-                      />
-                    )}
+                    <ArtworkImage
+                      src={track.artworkUri ? formatArtworkUri(track.artworkUri) : undefined}
+                      alt=""
+                      className="track-row-art"
+                    />
                     <span className="track-meta-cell">
                       <span className="track-title-text">{track.title}</span>
                       <span className="track-subtitle-mobile">

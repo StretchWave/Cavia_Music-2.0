@@ -53,15 +53,11 @@ export const PlaylistsView = memo(function PlaylistsView({
     <section className="cavia-subpage playlists-page">
       <div className="subpage-header">
         <div>
-          <div className="cavia-eyebrow">
-            <span className="eyebrow-accent-line" />
-            <span>COLLECTION ARCHIVE</span>
-          </div>
           <h1 className="subpage-title">
-            Your Playlists<span>.</span>
+            Playlists<span>.</span>
           </h1>
           <p className="subpage-subtitle">
-            Curated collections saved locally in SQLite without cloud dependencies.
+            {playlists.length.toLocaleString()} local collections.
           </p>
         </div>
 

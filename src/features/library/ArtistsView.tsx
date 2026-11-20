@@ -16,15 +16,11 @@ export const ArtistsView = memo(function ArtistsView({ artists, onImportFolder, 
     <section className="cavia-subpage artists-page">
       <div className="subpage-header">
         <div>
-          <div className="cavia-eyebrow">
-            <span className="eyebrow-accent-line" />
-            <span>CREATORS & PERFORMERS</span>
-          </div>
           <h1 className="subpage-title">
             Artists<span>.</span>
           </h1>
           <p className="subpage-subtitle">
-            All musicians, producers, and performers represented in your collection.
+            {artists.length.toLocaleString()} performers and creators.
           </p>
         </div>
 

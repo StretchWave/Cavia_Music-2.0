@@ -2,6 +2,7 @@ import { memo } from 'react';
 import { Disc3, FolderPlus, ListPlus } from 'lucide-react';
 import { EmptyState } from '../../components/EmptyState';
 import { Button } from '../../components/Button';
+import { ArtworkImage } from '../../components/ArtworkImage';
 import { formatArtworkUri } from '../../lib/library';
 import type { Album } from '../../lib/types';
 
@@ -24,15 +25,11 @@ export const AlbumsView = memo(function AlbumsView({
     <section className="cavia-subpage albums-page">
       <div className="subpage-header">
         <div>
-          <div className="cavia-eyebrow">
-            <span className="eyebrow-accent-line" />
-            <span>DISCOGRAPHY ARCHIVE</span>
-          </div>
           <h1 className="subpage-title">
             Albums<span>.</span>
           </h1>
           <p className="subpage-subtitle">
-            Long-form releases categorized by album metadata and year.
+            {albums.length.toLocaleString()} releases in collection.
           </p>
         </div>
 
@@ -69,19 +66,12 @@ export const AlbumsView = memo(function AlbumsView({
                 }}
               >
                 <div className="album-sleeve-frame">
-                  {formattedArt ? (
-                    <img
-                      src={formattedArt}
-                      alt={album.title}
-                      className="album-artwork-img"
-                      loading="lazy"
-                    />
-                  ) : (
-                    <div className="album-artwork-placeholder">
-                      <Disc3 size={32} />
-                      <span className="album-badge">ALBUM</span>
-                    </div>
-                  )}
+                  <ArtworkImage
+                    src={formattedArt}
+                    alt={album.title}
+                    className="album-artwork-img"
+                    fallbackIcon={<Disc3 size={32} />}
+                  />
                   <div className="album-shadow-sheen" />
                 </div>
                 <div className="album-meta">

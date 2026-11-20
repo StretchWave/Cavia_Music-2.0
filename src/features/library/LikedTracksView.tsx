@@ -2,6 +2,7 @@ import { memo } from 'react';
 import { Heart, ListPlus, Play, Shuffle } from 'lucide-react';
 import { EmptyState } from '../../components/EmptyState';
 import { Button } from '../../components/Button';
+import { ArtworkImage } from '../../components/ArtworkImage';
 import { formatArtworkUri } from '../../lib/library';
 import type { Track } from '../../lib/types';
 
@@ -40,15 +41,11 @@ export const LikedTracksView = memo(function LikedTracksView({
     <section className="cavia-subpage liked-page">
       <div className="subpage-header">
         <div>
-          <div className="cavia-eyebrow">
-            <span className="eyebrow-accent-line" />
-            <span>PINNED FAVORITES</span>
-          </div>
           <h1 className="subpage-title">
             Liked Tracks<span>.</span>
           </h1>
           <p className="subpage-subtitle">
-            Songs you have marked for fast access across your sessions.
+            {tracks.length.toLocaleString()} saved tracks.
           </p>
         </div>
 
@@ -114,14 +111,11 @@ export const LikedTracksView = memo(function LikedTracksView({
                     )}
                   </span>
                   <span className="col-title" role="cell">
-                    {track.artworkUri && (
-                      <img
-                        src={formatArtworkUri(track.artworkUri)}
-                        alt=""
-                        className="track-row-art"
-                        loading="lazy"
-                      />
-                    )}
+                    <ArtworkImage
+                      src={track.artworkUri ? formatArtworkUri(track.artworkUri) : undefined}
+                      alt=""
+                      className="track-row-art"
+                    />
                     <span className="track-meta-cell">
                       <span className="track-title-text">{track.title}</span>
                       <span className="track-subtitle-mobile">

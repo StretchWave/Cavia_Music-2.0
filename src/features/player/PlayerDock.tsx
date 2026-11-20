@@ -22,6 +22,7 @@ import {
 import { IconButton } from '../../components/IconButton';
 import { Slider } from '../../components/Slider';
 import { formatArtworkUri } from '../../lib/library';
+import { ArtworkImage } from '../../components/ArtworkImage';
 import type { PlaybackState } from '../../lib/types';
 
 interface PlayerDockProps {
@@ -107,13 +108,12 @@ export function PlayerDock({
         >
           <div className="dock-art-container">
             <div className="dock-art-frame">
-              {currentTrack?.artworkUri ? (
-                <img src={formatArtworkUri(currentTrack.artworkUri)} alt="" className="dock-artwork-img" />
-              ) : (
-                <div className="dock-art-empty" aria-hidden="true">
-                  <Disc3 size={20} className={isPlaying ? 'spinning' : ''} />
-                </div>
-              )}
+              <ArtworkImage
+                src={currentTrack?.artworkUri ? formatArtworkUri(currentTrack.artworkUri) : undefined}
+                alt=""
+                className="dock-artwork-img"
+                fallbackIcon={<Disc3 size={20} className={isPlaying ? 'spinning' : ''} aria-hidden="true" />}
+              />
             </div>
             <span className="dock-vinyl-peeking" aria-hidden="true" />
           </div>
@@ -125,8 +125,10 @@ export function PlayerDock({
             <span className={`dock-track-artist ${playback.errorMessage ? 'dock-error-text' : ''}`}>
               {playback.errorMessage
                 ? playback.errorMessage
-                : currentTrack?.artist
-                ? `${currentTrack.artist} — ${currentTrack.album}`
+                : currentTrack
+                ? (currentTrack.artist && currentTrack.album
+                    ? `${currentTrack.artist} — ${currentTrack.album}`
+                    : currentTrack.artist || currentTrack.album || 'Unknown Artist')
                 : 'Select a track to start playback'}
             </span>
           </div>
@@ -347,15 +349,22 @@ export function PlayerDock({
           title="Open expanded player"
         >
           <div className="mobile-mini-art">
-            {currentTrack?.artworkUri ? (
-              <img src={formatArtworkUri(currentTrack.artworkUri)} alt="" className="mobile-mini-art-img" />
-            ) : (
-              <Headphones size={16} />
-            )}
+            <ArtworkImage
+              src={currentTrack?.artworkUri ? formatArtworkUri(currentTrack.artworkUri) : undefined}
+              alt=""
+              className="mobile-mini-art-img"
+              fallbackIcon={<Headphones size={16} />}
+            />
           </div>
           <div className="mobile-mini-info">
             <strong>{currentTrack?.title ?? 'No audio loaded'}</strong>
-            <span>{currentTrack?.artist ?? 'Select a track to play'}</span>
+            <span>
+              {currentTrack
+                ? (currentTrack.artist && currentTrack.album
+                    ? `${currentTrack.artist} — ${currentTrack.album}`
+                    : currentTrack.artist || currentTrack.album || 'Unknown Artist')
+                : 'Select a track to play'}
+            </span>
           </div>
         </button>
         <div className="mobile-mini-actions">

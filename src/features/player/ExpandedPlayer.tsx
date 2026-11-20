@@ -15,13 +15,13 @@ import {
   Rewind,
   Share2,
   Shuffle,
-  SlidersHorizontal,
   Volume2,
   VolumeX,
 } from 'lucide-react';
 import { IconButton } from '../../components/IconButton';
 import { Slider } from '../../components/Slider';
 import { Badge } from '../../components/Badge';
+import { ArtworkImage } from '../../components/ArtworkImage';
 import { formatArtworkUri } from '../../lib/library';
 import type { PlaybackState } from '../../lib/types';
 
@@ -177,37 +177,26 @@ export function ExpandedPlayer({
         />
 
         <div className="expanded-header-meta">
-          <span className="expanded-eyebrow">NOW LISTENING</span>
+          <span className="expanded-eyebrow">
+            {currentTrack?.trackNumber ? `TRACK ${currentTrack.trackNumber}` : 'NOW LISTENING'}
+          </span>
           <strong className="expanded-header-title">
-            {currentTrack ? currentTrack.album : 'Cavia Audio Foundation'}
+            {currentTrack?.album || currentTrack?.artist || 'Cavia Music'}
           </strong>
         </div>
 
         <div className="expanded-header-actions">
-          <Badge
-            variant={
-              isBackendReady
-                ? 'ready'
+          {audioBackendStatus && audioBackendStatus !== 'ready' && (
+            <Badge variant="warn" size="sm">
+              {audioBackendStatus === 'device_unavailable'
+                ? 'AUDIO DEVICE UNAVAILABLE'
                 : audioBackendStatus === 'error'
-                ? 'warn'
-                : 'outline'
-            }
-            size="sm"
-          >
-            {isBackendReady
-              ? 'NATIVE AUDIO ENGINE CONNECTED'
-              : audioBackendStatus === 'device_unavailable'
-              ? 'AUDIO DEVICE UNAVAILABLE'
-              : audioBackendStatus === 'not_integrated'
-              ? 'BACKEND NOT INTEGRATED'
-              : audioBackendStatus === 'error'
-              ? 'ENGINE ERROR'
-              : audioBackendStatus === 'unsupported'
-              ? 'BACKEND UNSUPPORTED'
-              : audioBackendStatus === 'initializing'
-              ? 'ENGINE INITIALIZING'
-              : 'AUDIO ENGINE STANDBY'}
-          </Badge>
+                ? 'ENGINE ERROR'
+                : audioBackendStatus === 'initializing'
+                ? 'INITIALIZING'
+                : 'STANDBY'}
+            </Badge>
+          )}
           <IconButton
             label={copiedShare ? 'Copied track metadata' : 'Share track'}
             icon={copiedShare ? <Check size={18} className="text-ready" /> : <Share2 size={18} />}
@@ -222,34 +211,27 @@ export function ExpandedPlayer({
       <div className="expanded-body">
         {/* Left Column: Tactical Artwork & Vinyl Assembly */}
         <div className="expanded-sleeve-stage">
-          <div className={`vinyl-disc ${isPlaying ? 'spinning' : ''}`} aria-hidden="true">
-            <span className="groove-a" />
-            <span className="groove-b" />
-            <span className="groove-c" />
-            <div className="vinyl-center-label">
-              <span className="vinyl-label-text">藏</span>
-              <span className="vinyl-spindle" />
-            </div>
-          </div>
-
-          <div className="sleeve-card">
-            {currentTrack?.artworkUri ? (
-              <img
-                src={formatArtworkUri(currentTrack.artworkUri)}
-                alt={currentTrack.title}
-                className="sleeve-art-img"
-              />
-            ) : (
-              <div className="sleeve-art-placeholder">
-                <span className="sleeve-kanji" aria-hidden="true">
-                  音
-                </span>
-                <span className="sleeve-label">
-                  {currentTrack ? currentTrack.title : 'CAVIA ARCHIVE'}
-                </span>
+          <div className="expanded-sleeve-assembly">
+            <div className={`vinyl-disc ${isPlaying ? 'spinning' : ''}`} aria-hidden="true">
+              <span className="groove-a" />
+              <span className="groove-b" />
+              <span className="groove-c" />
+              <div className="vinyl-center-label">
+                <span className="vinyl-label-text">藏</span>
+                <span className="vinyl-spindle" />
               </div>
-            )}
-            <div className="sleeve-sheen" aria-hidden="true" />
+            </div>
+
+            <div className="sleeve-card">
+              <ArtworkImage
+                src={currentTrack?.artworkUri ? formatArtworkUri(currentTrack.artworkUri) : undefined}
+                alt={currentTrack ? currentTrack.title : 'Album artwork'}
+                className="sleeve-art-img"
+                kanji="音"
+                fallbackText={currentTrack?.title || 'CAVIA ARCHIVE'}
+              />
+              <div className="sleeve-sheen" aria-hidden="true" />
+            </div>
           </div>
         </div>
 
@@ -257,17 +239,15 @@ export function ExpandedPlayer({
         <div className="expanded-info-column">
           <div className="expanded-metadata-header">
             <div className="expanded-title-group">
-              <div className="cavia-eyebrow">
-                <span className="eyebrow-accent-line" />
-                <span>
-                  {currentTrack?.trackNumber ? `TRACK ${currentTrack.trackNumber}` : 'NOW PLAYING'}
-                </span>
-              </div>
               <h1 className="expanded-track-title">
                 {currentTrack?.title ?? (playback.errorMessage ? 'Playback Halted' : 'No audio loaded')}
               </h1>
               <p className="expanded-track-artist">
-                {currentTrack?.artist ? `${currentTrack.artist} — ${currentTrack.album}` : 'Select a recording to listen'}
+                {currentTrack
+                  ? (currentTrack.artist && currentTrack.album
+                      ? `${currentTrack.artist} — ${currentTrack.album}`
+                      : currentTrack.artist || currentTrack.album || 'Unknown Artist')
+                  : (playback.errorMessage ? playback.errorMessage : 'Select a recording to listen')}
               </p>
               {playback.errorMessage && (
                 <div className="expanded-error-banner" role="alert">
@@ -296,66 +276,25 @@ export function ExpandedPlayer({
             </button>
           </div>
 
-          {/* Honest Technical Badges */}
+          {/* Useful Controls: Speed and Format only if relevant */}
           <div className="expanded-format-badges">
-            {currentTrack ? (
+            {currentTrack && (
               <>
-                <Badge variant="vermilion" size="sm">
-                  {currentTrack.sourceKind === 'local' ? 'LOCAL AUDIO' : (currentTrack.providerId?.toUpperCase() ?? 'STREAM')}
-                </Badge>
-                <Badge variant="neutral" size="sm">
-                  {currentTrack.genre || 'BIT-PERFECT PCM'}
-                </Badge>
-                <button
-                  type="button"
-                  className="badge-speed-btn"
-                  disabled={!isBackendReady}
-                  onClick={onCycleSpeed}
-                  title={!isBackendReady ? 'Playback engine unavailable' : 'Click to change playback speed'}
-                >
-                  <Badge variant="outline" size="sm">
-                    RATE: {playbackSpeed}x
+                {currentTrack.genre && (
+                  <Badge variant="neutral" size="sm">
+                    {currentTrack.genre}
                   </Badge>
-                </button>
-              </>
-            ) : (
-              <>
-                <Badge variant="outline" size="sm">
-                  AUDIO STANDBY
-                </Badge>
-                <Badge
-                  variant={
-                    isBackendReady
-                      ? 'ready'
-                      : audioBackendStatus === 'error'
-                      ? 'warn'
-                      : 'neutral'
-                  }
-                  size="sm"
-                >
-                  {isBackendReady
-                    ? 'ENGINE READY'
-                    : audioBackendStatus === 'device_unavailable'
-                    ? 'DEVICE UNAVAILABLE'
-                    : audioBackendStatus === 'not_integrated'
-                    ? 'BACKEND NOT INTEGRATED'
-                    : audioBackendStatus === 'error'
-                    ? 'ENGINE ERROR'
-                    : audioBackendStatus === 'unsupported'
-                    ? 'UNSUPPORTED'
-                    : audioBackendStatus === 'initializing'
-                    ? 'ENGINE INITIALIZING'
-                    : 'ENGINE STANDBY'}
-                </Badge>
+                )}
                 <button
                   type="button"
                   className="badge-speed-btn"
                   disabled={!isBackendReady}
                   onClick={onCycleSpeed}
                   title={!isBackendReady ? 'Playback engine unavailable' : 'Click to change playback speed'}
+                  aria-label={`Playback speed: ${playbackSpeed}x. Click to change.`}
                 >
                   <Badge variant="outline" size="sm">
-                    RATE: {playbackSpeed}x
+                    {playbackSpeed}x
                   </Badge>
                 </button>
               </>
@@ -457,17 +396,6 @@ export function ExpandedPlayer({
               <span>Queue</span>
             </button>
 
-            <button
-              type="button"
-              className="expanded-chip-btn"
-              disabled
-              title="DSP & Equalizer unconfigured"
-              aria-disabled="true"
-            >
-              <SlidersHorizontal size={16} />
-              <span>Equalizer</span>
-            </button>
-
             <div className="expanded-volume-control">
               <IconButton
                 label={isMuted ? 'Unmute' : 'Mute'}
@@ -492,30 +420,20 @@ export function ExpandedPlayer({
         </div>
       </div>
 
-      <div className="expanded-footer">
-        <div className="expanded-pipeline-note">
-          <span
-            className={`pipeline-dot ${
-              isBackendReady ? 'ready' : audioBackendStatus === 'error' ? 'error' : 'muted'
-            }`}
-          />
-          <span>
-            {isBackendReady
-              ? 'AUDIO ENGINE: NATIVE ZERO-DEPENDENCY ENGINE (RODIO / CPAL WASAPI) · VERIFIED'
-              : audioBackendStatus === 'device_unavailable'
-              ? 'AUDIO ENGINE: PHYSICAL AUDIO OUTPUT DEVICE UNAVAILABLE'
-              : audioBackendStatus === 'not_integrated'
-              ? 'AUDIO ENGINE: BACKEND NOT INTEGRATED FOR THIS PLATFORM'
-              : audioBackendStatus === 'error'
-              ? 'AUDIO ENGINE: INITIALIZATION ERROR'
-              : audioBackendStatus === 'unsupported'
-              ? 'AUDIO ENGINE: UNSUPPORTED'
-              : audioBackendStatus === 'initializing'
-              ? 'AUDIO ENGINE: INITIALIZING'
-              : 'AUDIO ENGINE: STANDBY'}
-          </span>
+      {audioBackendStatus && audioBackendStatus !== 'ready' && (
+        <div className="expanded-footer">
+          <div className="expanded-pipeline-note">
+            <span className="pipeline-dot error" />
+            <span>
+              {audioBackendStatus === 'device_unavailable'
+                ? 'Audio output device unavailable. Connect speakers or headphones to resume.'
+                : audioBackendStatus === 'error'
+                ? 'Audio engine encountered an initialization error.'
+                : 'Audio engine standby.'}
+            </span>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
