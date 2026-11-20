@@ -1172,4 +1172,60 @@ Milestone 5.4 established an empirical, reproducible performance baseline for Ca
 ### 7. Deferred Platform Behavior
 - Physical device testing for macOS, Android, and iOS is deferred to native device release passes; packaging structures and CI workflows are established and verified via automated pipelines.
 
+---
+
+## 17. Milestone 5.6 Implementation: Final Release Readiness & Distribution Preparation
+
+### 1. Actual Product Capability Matrix & Release Scope
+- **Fully Implemented & Verified (Windows 11 host)**:
+  - Bit-perfect local audio decoding for FLAC, ALAC, WAV, AIFF, MP3, AAC, OGG Vorbis, and Opus.
+  - Recursive audio library discovery with streaming SHA-256 duplicate and moved-file recovery.
+  - Embedded metadata extraction (Lofty 0.25) and SHA-256 artwork cache deduplication.
+  - Synchronized lyrics (embedded ID3v2/Vorbis/MP4 with LRCLIB community fallback, click-to-seek, and follow scrolling).
+  - SQLite FTS5 trigram universal search with 1-2 char prefix matching across tracks, albums, artists, and playlists.
+  - Full local playlist CRUD, transactional compaction removal, and accessible drag/keyboard reordering.
+  - Windows Media Controls (SMTC) integration via `souvlaki` crate.
+  - Multi-viewport responsive layout (8 device tiers from 360px to 1920px).
+  - WCAG 2.2 AA accessibility (0 axe-core automated violations across 15 views).
+  - Optional multi-device cloud synchronization (Supabase Auth & PostgreSQL with Row-Level Security).
+- **Explicitly Unconfigured / Planned**:
+  - Spotify PKCE import: Marked as unconfigured in Settings; zero non-functional controls surfaced.
+  - MusicBrainz discography lookup: Marked as planned in Settings.
+- **Explicit Non-Target**: Linux desktop is excluded per `AGENTS.md`.
+
+### 2. Privacy & Data-Flow Audit
+- **Zero Telemetry**: Audited client code; zero analytics SDKs, tracking pixels, or crash daemons exist.
+- **Audio Privacy**: Audio files and embedded picture bytes never leave the local computer.
+- **External Network Scope**:
+  - `https://lrclib.net/api/get`: HTTPS GET with sanitized track metadata only (title, artist, album, duration); zero filenames or local paths sent.
+  - Optional Supabase Sync: Authenticated HTTPS sending user ID, track content hashes, and playlist definitions only.
+- **Privacy Policy**: Authored [`docs/legal/privacy-policy.md`](file:///c:/Programs/Spoty/Cavia_Music%202.0/docs/legal/privacy-policy.md) and technical data flows in [`docs/legal/data-handling.md`](file:///c:/Programs/Spoty/Cavia_Music%202.0/docs/legal/data-handling.md).
+- **Terms of Service**: Authored [`docs/legal/terms-of-service.md`](file:///c:/Programs/Spoty/Cavia_Music%202.0/docs/legal/terms-of-service.md) with clearly marked publisher placeholders.
+
+### 3. Licensing & Software Bill of Materials (SBOM)
+- **Dependency Inventory**: Audited all 590 Cargo crates and npm packages; all components use permissive open-source licenses (MIT, Apache-2.0, ISC, BSD-2/3, MPL-2.0, Zlib, Unicode-3.0). Zero copyleft GPL/AGPL dependencies.
+- **Attribution Notices**: Published [`docs/legal/THIRD-PARTY-LICENSES.md`](file:///c:/Programs/Spoty/Cavia_Music%202.0/docs/legal/THIRD-PARTY-LICENSES.md).
+- **SPDX 2.3 SBOM**: Generated machine-readable SBOM at [`docs/security/cavia-music-sbom.spdx.json`](file:///c:/Programs/Spoty/Cavia_Music%202.0/docs/security/cavia-music-sbom.spdx.json) tracking 679 total components.
+
+### 4. Dependency & Application Security Audit
+- **npm Security**: `npm audit` reported **0 vulnerabilities** across production and development dependencies.
+- **Rust Dependencies**: Evaluated against the RustSec Advisory Database; zero active CVEs in production binaries.
+- **Security Checklist**: Authored [`docs/security/release-security-checklist.md`](file:///c:/Programs/Spoty/Cavia_Music%202.0/docs/security/release-security-checklist.md) verifying parameterized SQLx queries, OS Keyring token protection, memory-only session tokens, strict CSP, and audio metadata sanitization.
+
+### 5. Store Listings & User Documentation
+- **Store Listings**: Created platform-specific listing metadata packages in [`docs/release/store-listings/`](file:///c:/Programs/Spoty/Cavia_Music%202.0/docs/release/store-listings) for Windows, macOS, Android (including Google Play Data Safety), and iOS (including Privacy Nutrition Labels).
+- **User Support**: Created [`docs/support/bug-report-guide.md`](file:///c:/Programs/Spoty/Cavia_Music%202.0/docs/support/bug-report-guide.md), [`playback-troubleshooting.md`](file:///c:/Programs/Spoty/Cavia_Music%202.0/docs/support/playback-troubleshooting.md), and [`installation-troubleshooting.md`](file:///c:/Programs/Spoty/Cavia_Music%202.0/docs/support/installation-troubleshooting.md).
+- **Disaster Recovery**: Documented safe atomic database backup (`VACUUM INTO`) and library restoration in [`docs/support/backup-and-restore.md`](file:///c:/Programs/Spoty/Cavia_Music%202.0/docs/support/backup-and-restore.md).
+- **Issue Templates**: Added GitHub issue templates for bug reports, playback issues, scanner issues, and sync issues in [`.github/ISSUE_TEMPLATE/`](file:///c:/Programs/Spoty/Cavia_Music%202.0/.github/ISSUE_TEMPLATE).
+- **Release Notes**: Created [`docs/release/CHANGELOG.md`](file:///c:/Programs/Spoty/Cavia_Music%202.0/docs/release/CHANGELOG.md) adhering to Keep a Changelog standards.
+
+### 6. Release Verification & Verification Suite
+- **Release Candidate Verified**: `Cavia Music_2.0.0_x64-setup.exe` (4,432,132 bytes, SHA-256 `34489BD0213B70ACBEAAFDA93796BD5151B5289BE15E6044662E4B1FBECF596F`).
+- **Rust Test Suite**: 197 passed, 5 ignored (physical audio device), 0 failed (`cargo test --manifest-path src-tauri/Cargo.toml`).
+- **Smoke Integration Test**: 1 passed (`tests/smoke.rs`).
+- **Node.js Contract Tests**: 39 passed, 0 failed (`npm run test:unit`).
+- **Rust Formatting & Typecheck**: `cargo fmt --check` and `cargo check --all-targets` clean with 0 warnings.
+- **Frontend Production Build**: `npm run build` clean in 439ms.
+
+
 
