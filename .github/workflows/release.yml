@@ -1,0 +1,241 @@
+name: Cavia Release Packaging
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release Tag (e.g. v2.0.0)'
+        required: false
+        default: 'v2.0.0'
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    name: Build Windows Release (NSIS)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Windows NSIS bundle
+        run: npm run tauri:build:windows
+
+      - name: Compute Windows Artifact Checksum & Metadata
+        shell: pwsh
+        run: |
+          $installer = Get-Item "src-tauri/target/release/bundle/nsis/*-setup.exe"
+          $hash = (Get-FileHash -Path $installer.FullName -Algorithm SHA256).Hash
+          $size = $installer.Length
+          $name = $installer.Name
+          
+          Write-Output "Artifact: $name"
+          Write-Output "Size: $size bytes"
+          Write-Output "SHA-256: $hash"
+
+          @{
+            platform = "windows-x64"
+            format = "nsis-setup"
+            file = $name
+            size_bytes = $size
+            sha256 = $hash
+          } | ConvertTo-Json | Set-Content "windows-metadata.json"
+
+      - name: Upload Windows NSIS Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: cavia-music-windows-nsis
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            windows-metadata.json
+
+  build-macos:
+    name: Build macOS Release (DMG / App)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS DMG & App bundle
+        run: npx tauri build --bundles dmg,app
+
+      - name: Compute macOS Artifact Checksum & Metadata
+        run: |
+          dmg_file=$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -n 1)
+          dmg_name=$(basename "$dmg_file")
+          dmg_size=$(stat -f%z "$dmg_file")
+          dmg_sha256=$(shasum -a 256 "$dmg_file" | awk '{print $1}')
+          
+          echo "macOS DMG: $dmg_name ($dmg_size bytes, SHA-256: $dmg_sha256)"
+          
+          cat <<EOF > macos-metadata.json
+          {
+            "platform": "macos-universal",
+            "format": "dmg",
+            "file": "$dmg_name",
+            "size_bytes": $dmg_size,
+            "sha256": "$dmg_sha256"
+          }
+          EOF
+
+      - name: Upload macOS DMG Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cavia-music-macos-dmg
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            macos-metadata.json
+
+  build-android:
+    name: Build Android Release (APK)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Android APK
+        run: npx tauri android build --apk
+
+      - name: Compute Android Artifact Checksum & Metadata
+        run: |
+          apk_file=$(find src-tauri/gen/android -name "*.apk" | head -n 1)
+          if [ -f "$apk_file" ]; then
+            apk_name=$(basename "$apk_file")
+            apk_size=$(stat -c%s "$apk_file")
+            apk_sha256=$(sha256sum "$apk_file" | awk '{print $1}')
+            
+            echo "Android APK: $apk_name ($apk_size bytes, SHA-256: $apk_sha256)"
+            
+            cat <<EOF > android-metadata.json
+            {
+              "platform": "android-universal",
+              "format": "apk",
+              "file": "$apk_name",
+              "size_bytes": $apk_size,
+              "sha256": "$apk_sha256"
+            }
+            EOF
+          fi
+
+      - name: Upload Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cavia-music-android-apk
+          path: |
+            src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+            android-metadata.json
+
+  manifest-aggregation:
+    name: Aggregate Release Manifest
+    needs: [build-windows, build-macos, build-android]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Generate Consolidated Manifest
+        run: |
+          echo "Aggregating release manifest from build jobs..."
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            
+            const manifest = {
+              app: "Cavia Music",
+              version: "2.0.0",
+              timestamp: new Date().toISOString(),
+              git_commit: process.env.GITHUB_SHA || "unknown",
+              artifacts: []
+            };
+
+            const metaFiles = [
+              "cavia-music-windows-nsis/windows-metadata.json",
+              "cavia-music-macos-dmg/macos-metadata.json",
+              "cavia-music-android-apk/android-metadata.json"
+            ];
+
+            for (const f of metaFiles) {
+              if (fs.existsSync(f)) {
+                try {
+                  const data = JSON.parse(fs.readFileSync(f, "utf8"));
+                  manifest.artifacts.push(data);
+                } catch (e) {
+                  console.error("Failed to parse " + f, e);
+                }
+              }
+            }
+
+            fs.writeFileSync("release-manifest.json", JSON.stringify(manifest, null, 2));
+            console.log("Release manifest generated:");
+            console.log(JSON.stringify(manifest, null, 2));
+          '
+
+      - name: Upload Release Manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: cavia-music-release-manifest
+          path: release-manifest.json

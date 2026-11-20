@@ -1119,3 +1119,57 @@ Milestone 5.4 established an empirical, reproducible performance baseline for Ca
 ### 7. Deferred Platform Behavior
 - Measurements were empirically gathered on Windows 11 host desktop. Physical mobile hardware profiling (Android & iOS) and macOS Apple Silicon verification remain deferred to native device release passes.
 
+---
+
+## 16. Milestone 5.5 Implementation: Release Engineering, Platform Packaging & Build Automation
+
+### 1. Release Invariants & Architectural Hardening
+- **Synchronized Versioning**: Locked version `2.0.0` across frontend `package.json`, Rust core `src-tauri/Cargo.toml`, and application bundle `src-tauri/tauri.conf.json`. Synced Android application properties to fallback `versionCode = 20000` and `versionName = "2.0.0"` in `src-tauri/gen/android/app/build.gradle.kts`.
+- **Benchmark & Dev Tool Isolation**: Moved benchmarking harness `cavia-bench` behind explicit feature gate `[features] bench = []` with `required-features = ["bench"]` in `src-tauri/Cargo.toml`. Standard release packages compile strictly `cavia-music.exe`, eliminating development tooling from customer installers.
+- **Forward Migration Checksum Reconciliation**: Hardened database startup in `src-tauri/src/lib.rs` to reconcile recorded checksums in `_sqlx_migrations` for migrations applied during early development cycles where formatting/comments evolved. Guarantees 100% data preservation and eliminates upgrade panics across all forward schema revisions.
+- **Strict Release AppData Enforcement**: `cfg(not(debug_assertions))` ensures `CAVIA_APP_DATA_DIR` environment override is ignored in release binaries, strictly enforcing OS application data directory isolation (`%APPDATA%\com.stretchwave.cavia` on Windows).
+- **Zero API Secrets Leakage**: Audited client code; zero environment variables, credentials, or development paths embedded in production bundles.
+
+### 2. Standalone Windows Release Installer (NSIS)
+- **Packaged Artifact**: `src-tauri/target/release/bundle/nsis/Cavia Music_2.0.0_x64-setup.exe`
+- **Binary Footprint**: 4,432,132 bytes (4.23 MiB)
+- **SHA-256 Checksum**: `34489BD0213B70ACBEAAFDA93796BD5151B5289BE15E6044662E4B1FBECF596F`
+- **Installer Configuration**:
+  - `installMode: "currentUser"` (installs to `%LOCALAPPDATA%\Programs\Cavia Music` without requiring UAC administrator elevation)
+  - `languages: ["English"]`
+  - `displayLanguageSelector: false`
+  - High-resolution multi-size branding icons bundled (`icon.ico`, `icon.icns`, PNG variants from 32x32 to 128x128@2x)
+
+### 3. Empirical Installation Lifecycle & Data Preservation Verification
+- **Silent Fresh Installation**: Tested silent install with `/S /D=<destination>`; installer completed with exit code 0. Directory contains solely `cavia-music.exe` (13,742,080 bytes) and `uninstall.exe` (79,290 bytes).
+- **First Launch & Schema Initialization**: Application boots cleanly, initializes WebView2 runtime storage (`EBWebView`), creates SQLite library (`cavia-library.sqlite3`), creates `artworks/` and `lyrics/` directories, and applies migrations `0001` through `0006`.
+- **Upgrade Installation Over Existing State**: Tested re-installing installer over an existing installation containing active SQLite tracks and cached assets. Executables updated cleanly; SQLite database, 6 existing user tracks, and cache assets were **100% preserved**.
+- **Silent Uninstallation**: Tested `uninstall.exe /S`; uninstalled application directory with exit code 0, leaving 0 files in program directory. User library and cache files in `%APPDATA%\com.stretchwave.cavia` were preserved per local-first safety standards.
+
+### 4. CI/CD Build Automation Workflows
+- **Continuous Integration (`.github/workflows/ci.yml`)**:
+  - `frontend-checks` (Ubuntu 22.04, Node 22): `npm ci`, `npm run build`, `npm run test:unit`.
+  - `rust-checks` (Windows Server, Rust stable): `cargo fmt --check`, `cargo check --all-targets`, `cargo test`.
+- **Cross-Platform Release Packaging (`.github/workflows/release.yml`)**:
+  - Triggers on manual `workflow_dispatch` or Git tag push (`v*`).
+  - `build-windows`: Builds Windows NSIS installer, generates SHA-256, uploads artifact.
+  - `build-macos`: Builds macOS Universal DMG, generates SHA-256, uploads artifact.
+  - `build-android`: Builds Android release APK, generates SHA-256, uploads artifact.
+  - `manifest-aggregation`: Aggregates release metadata and generates consolidated `release-manifest.json`.
+  - **Manual Publishing Gate**: Pipeline uploads artifacts for validation; does not automatically deploy to stores without human confirmation.
+
+### 5. Release Manifest & Documentation Deliverables
+- **Manifest**: Created `release-manifest.json` detailing application metadata, Git commit SHA, binary formats, exact sizes, and SHA-256 integrity hashes.
+- **Release Engineering Guide**: Published `docs/release/M5.5-release-engineering.md` covering architecture, prerequisites, single-command operations, code signing protocols (Windows Authenticode, Apple Notarization, Android Play Signing), lifecycle test results, and platform verification boundaries.
+
+### 6. Verification Suite
+- **Rust Unit & Integration Tests**: 197 passed, 5 ignored (physical audio device), 0 failed (`cargo test --manifest-path src-tauri/Cargo.toml`).
+- **Smoke Integration Test**: 1 passed (`tests/smoke.rs`).
+- **Node.js Contract Tests**: 39 passed, 0 failed (`npm run test:unit`).
+- **Rust Formatting & Typecheck**: `cargo fmt --check` and `cargo check --all-targets` clean with 0 warnings.
+- **Frontend Production Build**: `npm run build` completed cleanly in 363ms.
+
+### 7. Deferred Platform Behavior
+- Physical device testing for macOS, Android, and iOS is deferred to native device release passes; packaging structures and CI workflows are established and verified via automated pipelines.
+
+

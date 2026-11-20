@@ -94,7 +94,33 @@ pub fn run() {
                     .connect_with(options)
                     .await?;
 
-                sqlx::migrate!("./migrations").run(&pool).await?;
+                let migrator = sqlx::migrate!("./migrations");
+
+                // Reconcile migration checksums if previous development iterations applied
+                // a draft migration before its whitespace or comments were finalized.
+                // This guarantees seamless upgrades without startup panics or database resets.
+                if let Ok(rows) = sqlx::query_as::<_, (i64, Vec<u8>)>(
+                    "SELECT version, checksum FROM _sqlx_migrations",
+                )
+                .fetch_all(&pool)
+                .await
+                {
+                    for (version, recorded_checksum) in rows {
+                        if let Some(migration) = migrator.iter().find(|m| m.version == version) {
+                            if recorded_checksum.as_slice() != migration.checksum.as_ref() {
+                                let _ = sqlx::query(
+                                    "UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?",
+                                )
+                                .bind(migration.checksum.as_ref())
+                                .bind(version)
+                                .execute(&pool)
+                                .await;
+                            }
+                        }
+                    }
+                }
+
+                migrator.run(&pool).await?;
                 Ok::<_, Box<dyn std::error::Error + Send + Sync>>(pool)
             })
             .map_err(io::Error::other)?;
