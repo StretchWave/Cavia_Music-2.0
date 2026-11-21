@@ -178,7 +178,60 @@ impl LrclibClient {
     ///   difference greater than 3 seconds is rejected.
     /// - A response without a title or artist is rejected: identity cannot be
     ///   established from the remaining fields.
+    /// Tries the exact lookup with the metadata as tagged, then relaxes the
+    /// album and finally the collaborating artists. Local tags often carry a
+    /// semicolon-joined artist list or an edition-specific album that LRCLIB
+    /// does not index that way, which used to end as a bare "not found".
     pub async fn get_lyrics(
+        &self,
+        title: &str,
+        artist: &str,
+        album: Option<&str>,
+        duration_s: Option<i64>,
+    ) -> Result<LrclibResult, LrclibError> {
+        let trimmed_title = title.trim();
+        let trimmed_artist = artist.trim();
+        if trimmed_title.is_empty() || trimmed_artist.is_empty() {
+            return Ok(LrclibResult::NotFound);
+        }
+
+        let mut attempts: Vec<(String, Option<String>)> = vec![(trimmed_artist.to_string(), None)];
+        if let Some(album) = album.map(str::trim).filter(|album| !album.is_empty()) {
+            attempts[0].1 = Some(album.to_string());
+        }
+        // Same artist without the album constraint.
+        attempts.push((trimmed_artist.to_string(), None));
+        // Primary artist only, for "A; B" / "A & B" / "A feat. B" tags.
+        if let Some(primary) = primary_artist_raw(trimmed_artist) {
+            attempts.push((primary, None));
+        }
+
+        for (artist_attempt, album_attempt) in attempts {
+            let result = self
+                .get_once(
+                    trimmed_title,
+                    &artist_attempt,
+                    album_attempt.as_deref(),
+                    duration_s,
+                )
+                .await?;
+            match result {
+                LrclibResult::Found { .. } | LrclibResult::Instrumental { .. } => {
+                    return Ok(result);
+                }
+                // A contradiction is a real answer: the indexed recording is
+                // not this one, and relaxing the query cannot change that.
+                LrclibResult::Mismatch { reason } => {
+                    return Ok(LrclibResult::Mismatch { reason });
+                }
+                LrclibResult::NotFound => {}
+            }
+        }
+
+        Ok(LrclibResult::NotFound)
+    }
+
+    async fn get_once(
         &self,
         title: &str,
         artist: &str,
@@ -395,6 +448,40 @@ fn primary_artist(normalized: &str) -> &str {
     normalized
 }
 
+/// Splits a raw tag artist list at the first collaboration separator, so
+/// "Sandro Cavazza; Georgia Ku" can also be looked up as "Sandro Cavazza".
+fn primary_artist_raw(artist: &str) -> Option<String> {
+    const SEPARATORS: &[&str] = &[
+        ";",
+        ",",
+        " & ",
+        " feat. ",
+        " feat ",
+        " ft. ",
+        " ft ",
+        " featuring ",
+        " with ",
+        " vs. ",
+        " vs ",
+    ];
+    let earliest = SEPARATORS
+        .iter()
+        .filter_map(|separator| {
+            artist
+                .to_lowercase()
+                .find(&separator.to_lowercase())
+                .map(|index| (index, separator.len()))
+        })
+        .min();
+    let (index, _) = earliest?;
+    let primary = artist[..index].trim();
+    if primary.is_empty() || primary.len() == artist.trim().len() {
+        None
+    } else {
+        Some(primary.to_string())
+    }
+}
+
 fn title_matches(requested: &str, returned: &str) -> bool {
     normalize_text(requested) == normalize_text(returned)
 }
@@ -503,6 +590,138 @@ fn validate_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_not_found_with_album_retries_without_it() {
+        let server = spawn_mock_server(|_, req| {
+            if req.contains("album_name") {
+                (404, vec![], String::new())
+            } else {
+                (
+                    200,
+                    vec![("Content-Type", "application/json")],
+                    r#"{"id":5,"trackName":"Sugar","artistName":"Maroon 5","albumName":"V","duration":236,"syncedLyrics":"[00:01.00]Sugar"}"#
+                        .to_string(),
+                )
+            }
+        })
+        .await;
+        let client = LrclibClient::with_base_url(server.base_url.clone()).unwrap();
+
+        let result = client
+            .get_lyrics(
+                "Sugar",
+                "Maroon 5",
+                Some("V (Asia Tour Edition)"),
+                Some(235),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result, LrclibResult::Found { .. }),
+            "an unindexed edition album must not hide an otherwise identical recording"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_contradicting_album_is_not_retried_without_it() {
+        let server = spawn_mock_server(|_, _| {
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                r#"{"id":6,"trackName":"Midnight","artistName":"Cavia Artist","albumName":"Other Album","duration":180,"plainLyrics":"Wrong recording"}"#
+                    .to_string(),
+            )
+        })
+        .await;
+        let client = LrclibClient::with_base_url(server.base_url.clone()).unwrap();
+
+        let result = client
+            .get_lyrics("Midnight", "Cavia Artist", Some("Obsidian"), Some(180))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            LrclibResult::Mismatch {
+                reason: IdentityMismatch::Album
+            }
+        ));
+        assert_eq!(
+            server.request_count().await,
+            1,
+            "a contradiction stops the chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collaboration_artist_retries_primary() {
+        let server = spawn_mock_server(|_, req| {
+            if req.contains("Georgia") {
+                (404, vec![], String::new())
+            } else {
+                (
+                    200,
+                    vec![("Content-Type", "application/json")],
+                    r#"{"id":7,"trackName":"Love To Lose","artistName":"Sandro Cavazza","albumName":"Love To Lose","duration":178,"syncedLyrics":"[00:02.00]Line"}"#
+                        .to_string(),
+                )
+            }
+        })
+        .await;
+        let client = LrclibClient::with_base_url(server.base_url.clone()).unwrap();
+
+        let result = client
+            .get_lyrics(
+                "Love To Lose",
+                "Sandro Cavazza; Georgia Ku",
+                None,
+                Some(177),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(result, LrclibResult::Found { .. }));
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the live LRCLIB API with real library metadata"]
+    async fn live_library_sample() {
+        let client = LrclibClient::new().expect("client");
+        let samples: [(&str, &str, &str, i64); 6] = [
+            ("Die For You", "VALORANT; Grabbitz", "Die For You", 212),
+            ("Sugar", "Maroon 5", "V (Asia Tour Edition)", 235),
+            (
+                "Shut Up and Dance",
+                "Walk The Moon",
+                "TALKING IS HARD (Expanded Edition)",
+                199,
+            ),
+            ("Talk to You", "Ryan Carter", "Talk to You", 182),
+            (
+                "Love To Lose",
+                "Sandro Cavazza; Georgia Ku",
+                "Love To Lose",
+                177,
+            ),
+            ("Go Fuck Yourself", "Two Feet", "First Steps", 129),
+        ];
+
+        for (title, artist, album, duration) in samples {
+            let result = client
+                .get_lyrics(title, artist, Some(album), Some(duration))
+                .await;
+            let label = match &result {
+                Ok(LrclibResult::Found { synced_lyrics, .. }) => {
+                    format!("found synced={}", synced_lyrics.is_some())
+                }
+                Ok(other) => format!("{other:?}"),
+                Err(err) => format!("error: {err:?}"),
+            };
+            println!("{title} / {artist} -> {label}");
+        }
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;

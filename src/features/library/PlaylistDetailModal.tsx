@@ -1,23 +1,30 @@
 import { useEffect, useState } from 'react';
 import {
   Calendar,
+  Check,
+  CheckCheck,
+  CheckSquare,
   ChevronDown,
   ChevronUp,
   Disc3,
+  FlipHorizontal,
   ListMusic,
   Pencil,
   Play,
   Shuffle,
   Sparkles,
   Trash2,
+  X,
 } from 'lucide-react';
 import { Modal } from '../../components/Modal';
 import { Button } from '../../components/Button';
 import { Badge } from '../../components/Badge';
 import {
+  clearPlaylistTracks,
   formatArtworkUri,
   getPlaylistTracks,
   removeTrackFromPlaylist,
+  removeTracksFromPlaylist,
   reorderPlaylistTracks,
   updatePlaylist,
 } from '../../lib/library';
@@ -50,6 +57,20 @@ export function PlaylistDetailModal({
   const [editError, setEditError] = useState<string | null>(null);
   const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showClearTracksConfirm, setShowClearTracksConfirm] = useState(false);
+  const [isClearingTracks, setIsClearingTracks] = useState(false);
+  const [isManaging, setIsManaging] = useState(false);
+  const [selectedPositions, setSelectedPositions] = useState<Set<number>>(new Set());
+  const [lastSelectedPosition, setLastSelectedPosition] = useState<number | null>(null);
+  const [showBatchRemoveConfirm, setShowBatchRemoveConfirm] = useState(false);
+  const [isBatchRemoving, setIsBatchRemoving] = useState(false);
+
+  useEffect(() => {
+    setIsManaging(false);
+    setSelectedPositions(new Set());
+    setLastSelectedPosition(null);
+    setShowBatchRemoveConfirm(false);
+  }, [currentPlaylist?.id, isOpen]);
 
   useEffect(() => {
     setCurrentPlaylist(playlist);
@@ -127,6 +148,100 @@ export function PlaylistDetailModal({
     }
   };
 
+  const handleToggleManage = () => {
+    setIsManaging((prev) => {
+      if (prev) {
+        setSelectedPositions(new Set());
+        setLastSelectedPosition(null);
+        return false;
+      }
+      return true;
+    });
+  };
+
+  const handleToggleSelectPosition = (pos: number) => {
+    setIsManaging(true);
+    setSelectedPositions((prev) => {
+      const next = new Set(prev);
+      if (next.has(pos)) {
+        next.delete(pos);
+      } else {
+        next.add(pos);
+      }
+      return next;
+    });
+    setLastSelectedPosition(pos);
+  };
+
+  const handleRangeSelectPosition = (targetPos: number) => {
+    setIsManaging(true);
+    const anchorPos = lastSelectedPosition ?? 0;
+    const start = Math.min(anchorPos, targetPos);
+    const end = Math.max(anchorPos, targetPos);
+
+    setSelectedPositions((prev) => {
+      const next = new Set(prev);
+      for (let i = start; i <= end; i++) {
+        next.add(i);
+      }
+      return next;
+    });
+    setLastSelectedPosition(targetPos);
+  };
+
+  const handleSelectAll = () => {
+    setSelectedPositions(new Set(tracks.map((_, i) => i)));
+  };
+
+  const handleSelectInverse = () => {
+    const next = new Set<number>();
+    for (let i = 0; i < tracks.length; i++) {
+      if (!selectedPositions.has(i)) {
+        next.add(i);
+      }
+    }
+    setSelectedPositions(next);
+  };
+
+  const handleClearSelection = () => {
+    setSelectedPositions(new Set());
+    setLastSelectedPosition(null);
+  };
+
+  const handleExitManage = () => {
+    setIsManaging(false);
+    setSelectedPositions(new Set());
+    setLastSelectedPosition(null);
+  };
+
+  const handleConfirmBatchRemove = async () => {
+    if (selectedPositions.size === 0 || !currentPlaylist) return;
+    setIsBatchRemoving(true);
+    try {
+      const sortedPositions = Array.from(selectedPositions).sort((a, b) => a - b);
+      await removeTracksFromPlaylist(currentPlaylist.id, sortedPositions);
+
+      const posSet = new Set(selectedPositions);
+      const updated = tracks.filter((_, idx) => !posSet.has(idx));
+      setTracks(updated);
+      setCurrentPlaylist((prev) =>
+        prev ? { ...prev, trackCount: Math.max(0, prev.trackCount - posSet.size) } : null
+      );
+
+      setSelectedPositions(new Set());
+      setLastSelectedPosition(null);
+      setIsManaging(false);
+      setShowBatchRemoveConfirm(false);
+      onPlaylistUpdated?.();
+    } catch (err) {
+      console.error('Failed to batch remove tracks from playlist:', err);
+      const fresh = await getPlaylistTracks(currentPlaylist.id);
+      setTracks(fresh);
+    } finally {
+      setIsBatchRemoving(false);
+    }
+  };
+
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editTitle.trim()) {
@@ -189,6 +304,17 @@ export function PlaylistDetailModal({
               >
                 Edit Details
               </Button>
+              {tracks.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  icon={<Trash2 size={14} />}
+                  onClick={() => setShowClearTracksConfirm(true)}
+                  title="Remove all tracks from this playlist"
+                >
+                  Clear Tracks
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
@@ -232,7 +358,9 @@ export function PlaylistDetailModal({
 
               <div className="playlist-action-bar">
                 {(() => {
-                  const playableTracks = tracks.filter((t) => t.fileUri && t.sourceKind !== 'remote_sync');
+                  const playableTracks = tracks.filter(
+                    (t) => t.sourceKind === 'provider' || (t.fileUri && t.sourceKind !== 'remote_sync')
+                  );
                   const hasPlayable = isBackendReady && playableTracks.length > 0;
                   return (
                     <>
@@ -279,6 +407,18 @@ export function PlaylistDetailModal({
                   );
                 })()}
 
+                {tracks.length > 0 && (
+                  <button
+                    type="button"
+                    className={`btn-manage-toggle ${isManaging ? 'active' : ''}`}
+                    onClick={handleToggleManage}
+                    title="Manage playlist tracks"
+                  >
+                    <CheckSquare size={14} />
+                    {isManaging ? 'Done' : 'Manage'}
+                  </button>
+                )}
+
                 <Badge variant="neutral" size="sm">
                   {tracks.length} {tracks.length === 1 ? 'TRACK' : 'TRACKS'}
                 </Badge>
@@ -289,6 +429,72 @@ export function PlaylistDetailModal({
           {/* Track listing */}
           <div className="playlist-tracks-section">
             <h3 className="section-label">TRACK LIST</h3>
+
+            {(isManaging || selectedPositions.size > 0) && (
+              <div className="manage-selection-bar" role="toolbar" aria-label="Manage playlist tracks">
+                <div className="manage-selection-status">
+                  <span className="manage-count-badge">
+                    {selectedPositions.size} of {tracks.length} selected
+                  </span>
+                </div>
+
+                <div className="manage-selection-buttons">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={<CheckCheck size={14} />}
+                    onClick={handleSelectAll}
+                    title="Select all tracks in this playlist"
+                  >
+                    Select All
+                  </Button>
+
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={<FlipHorizontal size={14} />}
+                    onClick={handleSelectInverse}
+                    title="Invert current track selection"
+                  >
+                    Select Inverse
+                  </Button>
+
+                  {selectedPositions.size > 0 && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleClearSelection}
+                      title="Deselect all tracks"
+                    >
+                      Clear
+                    </Button>
+                  )}
+
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    className="btn-danger"
+                    disabled={selectedPositions.size === 0}
+                    icon={<Trash2 size={14} />}
+                    onClick={() => setShowBatchRemoveConfirm(true)}
+                    title="Remove selected tracks from playlist"
+                  >
+                    Remove ({selectedPositions.size})
+                  </Button>
+
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={<X size={14} />}
+                    onClick={handleExitManage}
+                    title="Exit manage mode"
+                  >
+                    Done
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {tracks.length > 0 ? (
               <div className="tracks-table" role="table" aria-label={`Tracks in ${currentPlaylist.name}`}>
                 <div className="tracks-table-head playlist-table-grid" role="row">
@@ -301,33 +507,79 @@ export function PlaylistDetailModal({
                 </div>
                 <div className="tracks-table-body" role="rowgroup">
                   {tracks.map((track, i) => {
-                    const isUnplayable = !track.fileUri || track.sourceKind === 'remote_sync';
+                    const isUnplayable =
+                      track.sourceKind !== 'provider' && (!track.fileUri || track.sourceKind === 'remote_sync');
+                    const isSelected = selectedPositions.has(i);
                     return (
                       <div
                         key={`${track.id}-${i}`}
-                        className={`track-row playlist-table-grid ${isUnplayable ? 'track-row-unplayable' : ''}`}
+                        className={`track-row playlist-table-grid ${isUnplayable ? 'track-row-unplayable' : ''} ${isSelected ? 'row-selected' : ''}`}
                         tabIndex={isUnplayable ? -1 : 0}
                         role="row"
                         aria-label={`Track ${i + 1}: ${track.title} by ${track.artist}${isUnplayable ? ' (Unavailable locally)' : ''}`}
-                        onClick={() => {
-                          if (isUnplayable) return;
-                          const playable = tracks.filter((t) => t.fileUri && t.sourceKind !== 'remote_sync');
-                          const playIndex = playable.findIndex((t) => t.id === track.id);
-                          onPlayTracks?.(playable, playIndex >= 0 ? playIndex : 0, false);
-                          onClose();
+                        onClick={(event) => {
+                          if (isManaging) {
+                            if (event.shiftKey) {
+                              handleRangeSelectPosition(i);
+                            } else {
+                              handleToggleSelectPosition(i);
+                            }
+                          } else if (event.shiftKey || event.ctrlKey || event.metaKey) {
+                            event.preventDefault();
+                            setIsManaging(true);
+                            if (event.shiftKey) {
+                              handleRangeSelectPosition(i);
+                            } else {
+                              handleToggleSelectPosition(i);
+                            }
+                          } else {
+                            if (isUnplayable) return;
+                            const playable = tracks.filter(
+                              (t) => t.sourceKind === 'provider' || (t.fileUri && t.sourceKind !== 'remote_sync')
+                            );
+                            const playIndex = playable.findIndex((t) => t.id === track.id);
+                            onPlayTracks?.(playable, playIndex >= 0 ? playIndex : 0, false);
+                            onClose();
+                          }
                         }}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' || e.key === ' ') {
                             e.preventDefault();
+                            if (isManaging) {
+                              handleToggleSelectPosition(i);
+                              return;
+                            }
                             if (isUnplayable) return;
-                            const playable = tracks.filter((t) => t.fileUri && t.sourceKind !== 'remote_sync');
+                            const playable = tracks.filter(
+                              (t) => t.sourceKind === 'provider' || (t.fileUri && t.sourceKind !== 'remote_sync')
+                            );
                             const playIndex = playable.findIndex((t) => t.id === track.id);
                             onPlayTracks?.(playable, playIndex >= 0 ? playIndex : 0, false);
                             onClose();
                           }
                         }}
                       >
-                        <span className="col-num" role="cell">{i + 1}</span>
+                        <span className="col-num" role="cell">
+                          {isManaging ? (
+                            <span
+                              className={`track-select-checkbox ${isSelected ? 'checked' : ''}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (e.shiftKey) {
+                                  handleRangeSelectPosition(i);
+                                } else {
+                                  handleToggleSelectPosition(i);
+                                }
+                              }}
+                              role="checkbox"
+                              aria-checked={isSelected}
+                            >
+                              {isSelected && <Check size={11} strokeWidth={3} />}
+                            </span>
+                          ) : (
+                            i + 1
+                          )}
+                        </span>
                         <span className="col-title" role="cell">
                           {track.artworkUri && (
                             <img
@@ -408,6 +660,41 @@ export function PlaylistDetailModal({
         </div>
       </Modal>
 
+      {/* Batch Remove from Playlist Confirmation Modal */}
+      {showBatchRemoveConfirm && (
+        <Modal
+          isOpen={showBatchRemoveConfirm}
+          onClose={() => setShowBatchRemoveConfirm(false)}
+          title={`Remove ${selectedPositions.size} ${selectedPositions.size === 1 ? 'track' : 'tracks'} from playlist?`}
+          size="sm"
+          role="alertdialog"
+          footer={
+            <div className="modal-actions-right">
+              <Button variant="ghost" size="sm" onClick={() => setShowBatchRemoveConfirm(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                className="btn-danger"
+                disabled={isBatchRemoving}
+                onClick={handleConfirmBatchRemove}
+                icon={<Trash2 size={14} />}
+              >
+                {isBatchRemoving
+                  ? 'Removing…'
+                  : `Remove ${selectedPositions.size} ${selectedPositions.size === 1 ? 'track' : 'tracks'}`}
+              </Button>
+            </div>
+          }
+        >
+          <p className="modal-body-text">
+            Remove <strong>{selectedPositions.size}</strong> selected {selectedPositions.size === 1 ? 'track' : 'tracks'} from <strong>"{currentPlaylist.name}"</strong>?
+            They will only be removed from this playlist. Your library and original audio files will <strong>not</strong> be deleted.
+          </p>
+        </Modal>
+      )}
+
       {/* Delete Confirmation Alert Dialog */}
       {showDeleteConfirm && (
         <Modal
@@ -439,6 +726,50 @@ export function PlaylistDetailModal({
         >
           <p className="text-dim-sm" style={{ lineHeight: 1.5 }}>
             Are you sure you want to delete <strong>{currentPlaylist.name}</strong>? This removes the playlist from your local database. Your original audio files remain untouched.
+          </p>
+        </Modal>
+      )}
+
+      {/* Clear Playlist Tracks Confirmation Dialog */}
+      {showClearTracksConfirm && (
+        <Modal
+          isOpen={showClearTracksConfirm}
+          onClose={() => setShowClearTracksConfirm(false)}
+          title={`Clear all tracks from "${currentPlaylist.name}"?`}
+          size="sm"
+          role="alertdialog"
+          footer={
+            <div className="modal-actions-right">
+              <Button variant="ghost" size="sm" onClick={() => setShowClearTracksConfirm(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                className="text-danger"
+                disabled={isClearingTracks}
+                onClick={async () => {
+                  setIsClearingTracks(true);
+                  try {
+                    await clearPlaylistTracks(currentPlaylist.id);
+                    setTracks([]);
+                    onPlaylistUpdated?.();
+                    setShowClearTracksConfirm(false);
+                  } catch (err) {
+                    console.error('Failed to clear tracks:', err);
+                  } finally {
+                    setIsClearingTracks(false);
+                  }
+                }}
+                icon={<Trash2 size={14} />}
+              >
+                {isClearingTracks ? 'Clearing…' : 'Clear All Tracks'}
+              </Button>
+            </div>
+          }
+        >
+          <p className="text-dim-sm" style={{ lineHeight: 1.5 }}>
+            This will remove all {tracks.length} {tracks.length === 1 ? 'track' : 'tracks'} from this playlist. The playlist itself will remain in your library.
           </p>
         </Modal>
       )}

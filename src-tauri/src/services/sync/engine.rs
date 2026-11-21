@@ -62,13 +62,13 @@ impl SyncEngine {
             .bind(url_json)
             .execute(&self.pool)
             .await
-            .map_err(|e| format!("Failed to save Supabase URL: {e}"))?;
+            .map_err(|e| format!("Failed to save the sync endpoint: {e}"))?;
 
         sqlx::query("INSERT OR REPLACE INTO app_settings (key, value_json, updated_at) VALUES ('supabase_anon_key', ?, CURRENT_TIMESTAMP)")
             .bind(key_json)
             .execute(&self.pool)
             .await
-            .map_err(|e| format!("Failed to save Supabase anon key: {e}"))?;
+            .map_err(|e| format!("Failed to save the sync credential: {e}"))?;
 
         Ok(())
     }
@@ -123,7 +123,7 @@ impl SyncEngine {
     pub async fn signup(&self, email: &str, password: &str) -> Result<SyncAccountStatus, String> {
         let (url, key) = self.get_config().await;
         if url.is_empty() || key.is_empty() {
-            return Err("Supabase backend is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.".to_string());
+            return Err("Account sync is not available in this build.".to_string());
         }
 
         let resp = self.auth.signup(&url, &key, email, password).await?;
@@ -162,7 +162,7 @@ impl SyncEngine {
     pub async fn login(&self, email: &str, password: &str) -> Result<SyncAccountStatus, String> {
         let (url, key) = self.get_config().await;
         if url.is_empty() || key.is_empty() {
-            return Err("Supabase backend is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.".to_string());
+            return Err("Account sync is not available in this build.".to_string());
         }
 
         let resp = self.auth.login(&url, &key, email, password).await?;
@@ -200,6 +200,7 @@ impl SyncEngine {
                 &url,
                 &key,
                 &resp.access_token,
+                status.account_id.as_deref().unwrap_or_default(),
                 &status.device_id,
                 "Cavia Desktop",
                 std::env::consts::OS,
@@ -265,7 +266,7 @@ impl SyncEngine {
 
         let (url, key) = self.get_config().await;
         if url.is_empty() || key.is_empty() {
-            return Err("Supabase backend is not configured.".to_string());
+            return Err("Account sync is not available right now.".to_string());
         }
 
         let refresh_token = self
@@ -306,7 +307,7 @@ impl SyncEngine {
                 pushed_count: 0,
                 pulled_count: 0,
                 success: false,
-                error_message: Some("Supabase backend not configured".to_string()),
+                error_message: Some("Account sync is not available right now".to_string()),
             });
         }
 
@@ -322,6 +323,7 @@ impl SyncEngine {
         };
 
         let device_id = status.device_id.clone();
+        let user_id = status.account_id.clone().unwrap_or_default();
         let mut pushed = 0;
 
         // 1. PUSH: Fetch pending outbox mutations
@@ -345,6 +347,7 @@ impl SyncEngine {
                     &url,
                     &key,
                     &access_token,
+                    &user_id,
                     &device_id,
                     &item.operation_id,
                     &item.entity_type,
@@ -823,7 +826,7 @@ impl SyncEngine {
     pub async fn delete_cloud_data(&self) -> Result<(), String> {
         let (url, key) = self.get_config().await;
         if url.is_empty() || key.is_empty() {
-            return Err("Supabase backend not configured".to_string());
+            return Err("Account sync is not available right now".to_string());
         }
 
         let access_token = self.get_valid_access_token().await?;

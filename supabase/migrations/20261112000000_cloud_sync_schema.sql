@@ -15,19 +15,23 @@ CREATE TABLE IF NOT EXISTS public.cloud_devices (
 
 ALTER TABLE public.cloud_devices ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can only select their own devices" ON public.cloud_devices;
 CREATE POLICY "Users can only select their own devices"
     ON public.cloud_devices FOR SELECT
     USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can only insert their own devices" ON public.cloud_devices;
 CREATE POLICY "Users can only insert their own devices"
     ON public.cloud_devices FOR INSERT
     WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can only update their own devices" ON public.cloud_devices;
 CREATE POLICY "Users can only update their own devices"
     ON public.cloud_devices FOR UPDATE
     USING (auth.uid() = user_id)
     WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can only delete their own devices" ON public.cloud_devices;
 CREATE POLICY "Users can only delete their own devices"
     ON public.cloud_devices FOR DELETE
     USING (auth.uid() = user_id);
@@ -48,19 +52,23 @@ CREATE TABLE IF NOT EXISTS public.cloud_playlists (
 
 ALTER TABLE public.cloud_playlists ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can only select their own playlists" ON public.cloud_playlists;
 CREATE POLICY "Users can only select their own playlists"
     ON public.cloud_playlists FOR SELECT
     USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can only insert their own playlists" ON public.cloud_playlists;
 CREATE POLICY "Users can only insert their own playlists"
     ON public.cloud_playlists FOR INSERT
     WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can only update their own playlists" ON public.cloud_playlists;
 CREATE POLICY "Users can only update their own playlists"
     ON public.cloud_playlists FOR UPDATE
     USING (auth.uid() = user_id)
     WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can only delete their own playlists" ON public.cloud_playlists;
 CREATE POLICY "Users can only delete their own playlists"
     ON public.cloud_playlists FOR DELETE
     USING (auth.uid() = user_id);
@@ -85,19 +93,23 @@ CREATE TABLE IF NOT EXISTS public.cloud_playlist_tracks (
 
 ALTER TABLE public.cloud_playlist_tracks ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can only select their own playlist tracks" ON public.cloud_playlist_tracks;
 CREATE POLICY "Users can only select their own playlist tracks"
     ON public.cloud_playlist_tracks FOR SELECT
     USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can only insert their own playlist tracks" ON public.cloud_playlist_tracks;
 CREATE POLICY "Users can only insert their own playlist tracks"
     ON public.cloud_playlist_tracks FOR INSERT
     WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can only update their own playlist tracks" ON public.cloud_playlist_tracks;
 CREATE POLICY "Users can only update their own playlist tracks"
     ON public.cloud_playlist_tracks FOR UPDATE
     USING (auth.uid() = user_id)
     WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can only delete their own playlist tracks" ON public.cloud_playlist_tracks;
 CREATE POLICY "Users can only delete their own playlist tracks"
     ON public.cloud_playlist_tracks FOR DELETE
     USING (auth.uid() = user_id);
@@ -121,19 +133,23 @@ CREATE TABLE IF NOT EXISTS public.cloud_liked_tracks (
 
 ALTER TABLE public.cloud_liked_tracks ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can only select their own liked tracks" ON public.cloud_liked_tracks;
 CREATE POLICY "Users can only select their own liked tracks"
     ON public.cloud_liked_tracks FOR SELECT
     USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can only insert their own liked tracks" ON public.cloud_liked_tracks;
 CREATE POLICY "Users can only insert their own liked tracks"
     ON public.cloud_liked_tracks FOR INSERT
     WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can only update their own liked tracks" ON public.cloud_liked_tracks;
 CREATE POLICY "Users can only update their own liked tracks"
     ON public.cloud_liked_tracks FOR UPDATE
     USING (auth.uid() = user_id)
     WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can only delete their own liked tracks" ON public.cloud_liked_tracks;
 CREATE POLICY "Users can only delete their own liked tracks"
     ON public.cloud_liked_tracks FOR DELETE
     USING (auth.uid() = user_id);
@@ -154,13 +170,59 @@ CREATE TABLE IF NOT EXISTS public.cloud_sync_events (
 
 ALTER TABLE public.cloud_sync_events ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can only select their own sync events" ON public.cloud_sync_events;
 CREATE POLICY "Users can only select their own sync events"
     ON public.cloud_sync_events FOR SELECT
     USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "Users can only insert their own sync events" ON public.cloud_sync_events;
 CREATE POLICY "Users can only insert their own sync events"
     ON public.cloud_sync_events FOR INSERT
     WITH CHECK (auth.uid() = user_id);
 
 CREATE INDEX IF NOT EXISTS idx_cloud_sync_events_user_seq ON public.cloud_sync_events(user_id, server_seq ASC);
+
+-- 6. Explicit table privileges for the authenticated role (RLS still applies)
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.cloud_devices TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.cloud_playlists TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.cloud_playlist_tracks TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.cloud_liked_tracks TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.cloud_sync_events TO authenticated;
+
+-- 7. Keep updated_at current on server-side writes
+CREATE OR REPLACE FUNCTION public.cloud_touch_updated_at()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_cloud_playlists_touch ON public.cloud_playlists;
+CREATE TRIGGER trg_cloud_playlists_touch
+    BEFORE UPDATE ON public.cloud_playlists
+    FOR EACH ROW EXECUTE FUNCTION public.cloud_touch_updated_at();
+
+DROP TRIGGER IF EXISTS trg_cloud_playlist_tracks_touch ON public.cloud_playlist_tracks;
+CREATE TRIGGER trg_cloud_playlist_tracks_touch
+    BEFORE UPDATE ON public.cloud_playlist_tracks
+    FOR EACH ROW EXECUTE FUNCTION public.cloud_touch_updated_at();
+
+DROP TRIGGER IF EXISTS trg_cloud_liked_tracks_touch ON public.cloud_liked_tracks;
+CREATE TRIGGER trg_cloud_liked_tracks_touch
+    BEFORE UPDATE ON public.cloud_liked_tracks
+    FOR EACH ROW EXECUTE FUNCTION public.cloud_touch_updated_at();
+
+-- 8. Ownership and timestamp defaults
+--    PostgREST inserts sent by the desktop client may omit user_id; the default
+--    keeps auth.uid() as the single source of truth for row ownership.
+ALTER TABLE public.cloud_devices ALTER COLUMN user_id SET DEFAULT auth.uid();
+ALTER TABLE public.cloud_playlists ALTER COLUMN user_id SET DEFAULT auth.uid();
+ALTER TABLE public.cloud_playlist_tracks ALTER COLUMN user_id SET DEFAULT auth.uid();
+ALTER TABLE public.cloud_liked_tracks ALTER COLUMN user_id SET DEFAULT auth.uid();
+ALTER TABLE public.cloud_sync_events ALTER COLUMN user_id SET DEFAULT auth.uid();
+ALTER TABLE public.cloud_playlists ALTER COLUMN client_updated_at SET DEFAULT now();
 

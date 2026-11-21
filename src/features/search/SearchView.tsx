@@ -11,11 +11,18 @@ import {
 import { SearchInput } from '../../components/SearchInput';
 import { Tabs } from '../../components/Tabs';
 import { Button } from '../../components/Button';
+import { Modal } from '../../components/Modal';
 import { ArtworkImage } from '../../components/ArtworkImage';
 import { TrackList } from '../../components/TrackList';
 import { AlbumCard, ArtistCard } from '../../components/MediaCards';
 import { PlaylistDetailModal } from '../library/PlaylistDetailModal';
-import { formatArtworkUri, searchLibrary } from '../../lib/library';
+import {
+  clearRecentPlays,
+  deleteRecentPlay,
+  formatArtworkUri,
+  getRecentPlays,
+  searchLibrary,
+} from '../../lib/library';
 import {
   formatOnlineDuration,
   isOnlineSearchAvailable,
@@ -37,6 +44,8 @@ export interface SearchViewProps {
   onPlayAlbum?: (album: Album) => void;
   onPlayArtist?: (artist: Artist) => void;
   onPlayNext?: (trackId: string) => void;
+  onPlayOnlineTrack?: (track: YtMusicTrack) => Promise<void>;
+  historyRevision?: number;
   allTracks?: Track[];
   likedTrackIds?: Set<string>;
   currentTrackId?: string;
@@ -55,6 +64,8 @@ export function SearchView({
   onPlayAlbum,
   onPlayArtist,
   onPlayNext,
+  onPlayOnlineTrack,
+  historyRevision = 0,
   allTracks = [],
   currentTrackId,
   isPlaying = false,
@@ -68,6 +79,9 @@ export function SearchView({
   const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<Artist | null>(null);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
+  const [recentPlays, setRecentPlays] = useState<Track[]>([]);
+  const [showClearHistoryConfirm, setShowClearHistoryConfirm] = useState(false);
+  const [isClearingHistory, setIsClearingHistory] = useState(false);
 
   // YouTube Music catalogue results. These are online, never persisted into the
   // local library, and only shown for All/Tracks where they make sense.
@@ -159,18 +173,91 @@ export function SearchView({
     };
   }, [debouncedQuery, onlineRetryToken, onlineAvailable]);
 
+  useEffect(() => {
+    if (!isBackendReady) return;
+    let active = true;
+    getRecentPlays()
+      .then((rows) => {
+        if (active) setRecentPlays(rows);
+      })
+      .catch((err) => console.error('Failed to load playback history:', err));
+    return () => {
+      active = false;
+    };
+  }, [isBackendReady, currentTrackId, historyRevision]);
+
+  const handlePlayRecent = (trackId: string) => {
+    const entry = recentPlays.find((track) => track.id === trackId);
+    if (!entry) return;
+
+    if (entry.sourceKind === 'provider') {
+      const videoId = entry.id.replace(/^ytmusic:/, '');
+      if (videoId.length !== 11) return;
+      void handlePlayOnline({
+        videoId,
+        title: entry.title,
+        artist: entry.artist,
+        album: entry.album,
+        durationMs: entry.durationMs,
+        artworkUrl: entry.artworkUri,
+      });
+      return;
+    }
+
+    const localTrack = allTracks.find((track) => track.id === entry.id);
+    if (localTrack) onPlayTracks?.([localTrack], 0, false);
+  };
+
+  const handleClearHistory = async () => {
+    setIsClearingHistory(true);
+    try {
+      await clearRecentPlays();
+      setRecentPlays([]);
+      setShowClearHistoryConfirm(false);
+    } catch (err) {
+      console.error('Failed to clear playback history:', err);
+    } finally {
+      setIsClearingHistory(false);
+    }
+  };
+
+  const handleRemoveRecent = async (trackId: string) => {
+    try {
+      await deleteRecentPlay(trackId);
+      setRecentPlays((prev) => prev.filter((t) => t.id !== trackId));
+    } catch (err) {
+      console.error('Failed to remove recent play:', err);
+    }
+  };
+
   const handlePlayOnline = async (track: YtMusicTrack) => {
     if (playingOnlineId) return;
     setPlayingOnlineId(track.videoId);
     setOnlineError(null);
     try {
-      await playYouTubeMusic(track);
+      if (onPlayOnlineTrack) {
+        await onPlayOnlineTrack(track);
+      } else {
+        await playYouTubeMusic(track);
+      }
     } catch (err) {
       setOnlineError(err instanceof Error ? err.message : String(err));
     } finally {
       setPlayingOnlineId(null);
     }
   };
+
+  // Local entries that no longer exist in the library are hidden rather than
+  // shown as broken rows; catalogue entries replay from their provider id.
+  const visibleRecent = useMemo(
+    () =>
+      recentPlays.filter(
+        (entry) =>
+          entry.sourceKind === 'provider' ||
+          allTracks.some((track) => track.id === entry.id)
+      ),
+    [recentPlays, allTracks]
+  );
 
   const albumTracks = useMemo(() => {
     if (!selectedAlbum) return [];
@@ -386,6 +473,44 @@ export function SearchView({
           : ''}
       </div>
 
+      {!isQueryActive && (
+        <section className="search-section" aria-label="Recently played">
+          <div className="section-title-row">
+            <h2>Recently played</h2>
+            {visibleRecent.length > 0 && (
+              <div className="section-title-actions">
+                <span className="result-count">{visibleRecent.length}</span>
+                <button
+                  type="button"
+                  className="text-link text-danger"
+                  onClick={() => setShowClearHistoryConfirm(true)}
+                  title="Clear playback history"
+                >
+                  Clear history
+                </button>
+              </div>
+            )}
+          </div>
+          {visibleRecent.length > 0 ? (
+            <TrackList
+              tracks={visibleRecent}
+              density={density}
+              currentTrackId={currentTrackId}
+              isPlaying={isPlaying}
+              isBackendReady={isBackendReady}
+              onPlayTrack={handlePlayRecent}
+              onRemoveFromHistory={handleRemoveRecent}
+              ariaLabel="Recently played tracks"
+            />
+          ) : (
+            <div className="search-empty">
+              <h2>No playback history yet</h2>
+              <p>Play a result and it will appear here, newest first.</p>
+            </div>
+          )}
+        </section>
+      )}
+
       {isQueryActive && (
         <div className="search-category-row">
           <Tabs
@@ -514,12 +639,32 @@ export function SearchView({
                 tracks={results.tracks}
                 density={density}
                 onPlayTrack={(trackId) => {
-                  const index = results.tracks.findIndex((track) => track.id === trackId);
-                  onPlayTracks?.(results.tracks, index >= 0 ? index : 0, false);
+                  // Play only the selected result. Queueing the whole result
+                  // list made autoplay continue into a near-identical name
+                  // (a remix or another upload) instead of a related song.
+                  const selected = results.tracks.find((track) => track.id === trackId);
+                  if (selected) onPlayTracks?.([selected], 0, false);
                 }}
                 ariaLabel="Search track results"
                 {...trackListProps}
               />
+              {category === 'all' && results.tracks.length >= 20 && (
+                <div className="search-more-row">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setCategory('tracks')}
+                    className="search-more-btn"
+                  >
+                    View all matching tracks →
+                  </Button>
+                </div>
+              )}
+              {category === 'tracks' && results.tracks.length >= 50 && (
+                <p className="library-muted-note" style={{ marginTop: '0.75rem' }}>
+                  Showing top 50 matches. Refine your query for more specific results.
+                </p>
+              )}
             </section>
           )}
 
@@ -540,6 +685,18 @@ export function SearchView({
                   />
                 ))}
               </div>
+              {category === 'all' && results.albums.length >= 10 && (
+                <div className="search-more-row">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setCategory('albums')}
+                    className="search-more-btn"
+                  >
+                    View all matching albums →
+                  </Button>
+                </div>
+              )}
             </section>
           )}
 
@@ -560,6 +717,18 @@ export function SearchView({
                   />
                 ))}
               </div>
+              {category === 'all' && results.artists.length >= 10 && (
+                <div className="search-more-row">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setCategory('artists')}
+                    className="search-more-btn"
+                  >
+                    View all matching artists →
+                  </Button>
+                </div>
+              )}
             </section>
           )}
 
@@ -590,6 +759,18 @@ export function SearchView({
                   </button>
                 ))}
               </div>
+              {category === 'all' && results.playlists.length >= 10 && (
+                <div className="search-more-row">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setCategory('playlists')}
+                    className="search-more-btn"
+                  >
+                    View all matching playlists →
+                  </Button>
+                </div>
+              )}
             </section>
           )}
         </div>
@@ -606,6 +787,40 @@ export function SearchView({
           onPlaylistUpdated={onPlaylistUpdated}
         />
       )}
+
+      {/* Clear History Confirmation Modal */}
+      <Modal
+        isOpen={showClearHistoryConfirm}
+        onClose={() => setShowClearHistoryConfirm(false)}
+        title="Clear playback history"
+        size="sm"
+        role="alertdialog"
+        footer={
+          <div className="modal-actions-right">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowClearHistoryConfirm(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              className="btn-danger"
+              disabled={isClearingHistory}
+              onClick={handleClearHistory}
+            >
+              {isClearingHistory ? 'Clearing…' : 'Clear history'}
+            </Button>
+          </div>
+        }
+      >
+        <p className="modal-body-text">
+          Are you sure you want to clear your playback history?
+          This will not remove any tracks from your library or playlists.
+        </p>
+      </Modal>
     </section>
   );
 }

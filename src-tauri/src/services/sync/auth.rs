@@ -107,7 +107,7 @@ impl SupabaseAuthClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Network error contacting Supabase auth: {e}"))?;
+            .map_err(|e| format!("Network error reaching the account service: {e}"))?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -153,7 +153,7 @@ impl SupabaseAuthClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Network error contacting Supabase auth: {e}"))?;
+            .map_err(|e| format!("Network error reaching the account service: {e}"))?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -196,15 +196,11 @@ impl SupabaseAuthClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Network error contacting Supabase refresh: {e}"))?;
+            .map_err(|e| format!("Network error reaching the account service: {e}"))?;
 
         let status = resp.status();
         if !status.is_success() {
-            let error_text = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "Session expired".to_string());
-            return Err(format!("Refresh token expired ({status}): {error_text}"));
+            return Err("Your session has expired. Please sign in again.".to_string());
         }
 
         let auth_resp: AuthResponse = resp

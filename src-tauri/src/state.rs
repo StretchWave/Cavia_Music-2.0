@@ -21,7 +21,8 @@ pub struct AppState {
     #[allow(dead_code)]
     pub credentials: Arc<dyn CredentialStore>,
     pub sync: Arc<SyncEngine>,
-    pub ytmusic: YtMusicService,
+    pub ytmusic: Arc<YtMusicService>,
+    pub import_manager: Arc<crate::services::spotify::ImportManager>,
 }
 
 impl AppState {
@@ -33,7 +34,8 @@ impl AppState {
         artwork: ArtworkService,
         credentials: Arc<dyn CredentialStore>,
         sync: Arc<SyncEngine>,
-        ytmusic: YtMusicService,
+        ytmusic: Arc<YtMusicService>,
+        import_manager: Arc<crate::services::spotify::ImportManager>,
     ) -> Self {
         Self {
             database,
@@ -45,6 +47,7 @@ impl AppState {
             credentials,
             sync,
             ytmusic,
+            import_manager,
         }
     }
 }

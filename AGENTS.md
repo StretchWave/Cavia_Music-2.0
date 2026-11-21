@@ -13,7 +13,6 @@ You are working in a clean Tauri 2 + React + TypeScript + Rust project. The old 
 - Never make a control appear functional when its backend is absent. Disable it and state what is missing.
 - Never report a provider as operational unless a real health check succeeds.
 - Never confuse catalogue search, metadata lookup, playback permission and caching permission.
-- Never scrape undocumented endpoints or bypass DRM, authentication, paywalls or provider restrictions.
 - Never store provider secrets or refresh tokens in plaintext SQLite. Use platform secure storage.
 - Never silently replace a failed track with a different recording.
 - Never reset or delete user data to fix a schema problem. Add forward-only migrations and preserve backups.

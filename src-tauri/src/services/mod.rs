@@ -7,5 +7,6 @@ pub mod playback;
 pub mod queue;
 pub mod scanner;
 pub mod search;
+pub mod spotify;
 pub mod sync;
 pub mod ytmusic;

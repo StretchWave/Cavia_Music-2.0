@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { usePlaybackPosition } from '../../lib/usePlaybackPosition';
+import { getActiveLyricLine, useTrackLyrics } from '../../lib/useTrackLyrics';
 import {
   AlertCircle,
   Check,
@@ -68,6 +69,8 @@ export function ExpandedPlayer({
   const positionMs = livePos.positionMs ?? playback.positionMs;
   const durationMs = livePos.durationMs ?? playback.durationMs;
   const isPlaying = status === 'playing';
+  const lyrics = useTrackLyrics(currentTrack, isOpen);
+  const activeLyric = getActiveLyricLine(lyrics, positionMs);
   // Streamed provider tracks are not persisted in the library, so a like has
   // nowhere honest to go. Disable it instead of failing silently.
   const canLikeTrack = currentTrack?.sourceKind !== 'provider';
@@ -263,6 +266,17 @@ export function ExpandedPlayer({
           </div>
 
           <div className="expanded-scrubber-box">
+            {activeLyric !== null && (
+              <button
+                type="button"
+                className="expanded-lyric-line"
+                onClick={onOpenLyrics}
+                title="Open synced lyrics"
+                aria-label="Open synced lyrics at the current line"
+              >
+                {activeLyric.trim() || '♪'}
+              </button>
+            )}
             <Slider
               value={activePosition}
               max={displayDuration || 100}

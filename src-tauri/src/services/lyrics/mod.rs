@@ -31,6 +31,18 @@ pub struct LyricsService {
     now_unix: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
 
+/// Metadata for a track that is not a row in the local library, such as a
+/// YouTube Music stream. Without it the resolver can only answer for imported
+/// files.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LyricsTrackMeta {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration_ms: i64,
+}
+
 impl LyricsService {
     pub fn new(pool: SqlitePool) -> Result<Self, String> {
         let client = LrclibClient::new()?;
@@ -61,18 +73,31 @@ impl LyricsService {
 
     /// Fetches lyrics for a track, checking cache, embedded tags, and LRCLIB in order.
     pub async fn get_lyrics(&self, track_id: &str) -> Result<LyricsResponseDTO, String> {
-        self.resolve_lyrics(track_id, false).await
+        self.resolve_lyrics(track_id, false, None).await
     }
 
     /// Forces a refresh by bypassing existing cache.
     pub async fn refresh_lyrics(&self, track_id: &str) -> Result<LyricsResponseDTO, String> {
-        self.resolve_lyrics(track_id, true).await
+        self.resolve_lyrics(track_id, true, None).await
+    }
+
+    /// Catalogue lookup: the caller supplies the metadata because the track is
+    /// not in the local library.
+    pub async fn get_lyrics_with_meta(
+        &self,
+        track_id: &str,
+        meta: &LyricsTrackMeta,
+        force_refresh: bool,
+    ) -> Result<LyricsResponseDTO, String> {
+        self.resolve_lyrics(track_id, force_refresh, Some(meta))
+            .await
     }
 
     async fn resolve_lyrics(
         &self,
         track_id: &str,
         force_refresh: bool,
+        meta: Option<&LyricsTrackMeta>,
     ) -> Result<LyricsResponseDTO, String> {
         // 1. Resolve track from SQLite
         let track_row: Option<(String, String, String, i64, Option<String>)> = sqlx::query_as(
@@ -87,9 +112,20 @@ impl LyricsService {
         .await
         .map_err(|e| format!("Database error resolving track: {e}"))?;
 
+        // Catalogue streams are not library rows, so their metadata arrives
+        // with the request instead of coming from `tracks`.
         let (title, artist, album, duration_ms, file_uri) = match track_row {
             Some(row) => row,
-            None => return Err(format!("Track not found in library: {track_id}")),
+            None => match meta.filter(|meta| !meta.title.trim().is_empty()) {
+                Some(meta) => (
+                    meta.title.trim().to_string(),
+                    meta.artist.trim().to_string(),
+                    meta.album.trim().to_string(),
+                    meta.duration_ms.max(0),
+                    None,
+                ),
+                None => return Err(format!("Track not found in library: {track_id}")),
+            },
         };
 
         // 2. Compute signature
@@ -784,6 +820,71 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the live LRCLIB API"]
+    async fn live_catalogue_track_resolves_synced_lyrics() {
+        let pool = create_test_db().await;
+        let service = LyricsService::new(pool).unwrap();
+        let meta = LyricsTrackMeta {
+            title: "Die For You".to_string(),
+            artist: "VALORANT & Grabbitz".to_string(),
+            album: "Die For You".to_string(),
+            duration_ms: 3 * 60 * 1000 + 32 * 1000,
+        };
+
+        let res = service
+            .get_lyrics_with_meta("ytmusic:live-check", &meta, false)
+            .await
+            .unwrap();
+
+        let lines = res.synced_lines.unwrap_or_default();
+        println!("status={} lines={}", res.status, lines.len());
+        assert_eq!(res.status, "synced");
+        assert!(lines.len() > 20, "expected a full synced sheet");
+    }
+
+    #[tokio::test]
+    async fn test_catalogue_track_resolves_from_request_metadata() {
+        let pool = create_test_db().await;
+        let server = spawn_mock_server(|_, _| {
+            (
+                200,
+                vec![("Content-Type", "application/json")],
+                r#"{"id":77,"trackName":"Die For You","artistName":"VALORANT","albumName":"Die For You","duration":213,"syncedLyrics":"[00:01.00]Hello\n[00:05.00]World"}"#
+                    .to_string(),
+            )
+        })
+        .await;
+        let client = LrclibClient::with_base_url(server.base_url.clone()).unwrap();
+        let service = LyricsService::with_client(pool.clone(), client);
+        let meta = LyricsTrackMeta {
+            title: "Die For You".to_string(),
+            artist: "VALORANT".to_string(),
+            album: "Die For You".to_string(),
+            duration_ms: 212_000,
+        };
+
+        let res = service
+            .get_lyrics_with_meta("ytmusic:dQw4w9WgXcQ", &meta, false)
+            .await
+            .unwrap();
+
+        assert_eq!(res.status, "synced");
+        assert_eq!(res.track_id, "ytmusic:dQw4w9WgXcQ");
+        assert_eq!(res.synced_lines.as_ref().map(|lines| lines.len()), Some(2));
+
+        let cached: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM lyrics_cache WHERE track_id = 'ytmusic:dQw4w9WgXcQ'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            cached, 1,
+            "catalogue lyrics are cached without a tracks row"
+        );
     }
 
     #[tokio::test]

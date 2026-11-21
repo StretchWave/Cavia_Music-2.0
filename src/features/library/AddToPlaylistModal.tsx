@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Check, FolderPlus, ListMusic, Plus, Sparkles } from 'lucide-react';
 import { Modal } from '../../components/Modal';
 import { Button } from '../../components/Button';
-import { addTrackToPlaylist, createPlaylist, formatArtworkUri } from '../../lib/library';
+import { addProviderTrackToPlaylist, addTrackToPlaylist, createPlaylist, formatArtworkUri } from '../../lib/library';
 import type { Playlist, Track } from '../../lib/types';
 
 interface AddToPlaylistModalProps {
@@ -39,7 +39,11 @@ export function AddToPlaylistModal({
     setErrorMessage(null);
     try {
       for (const track of tracksToAdd) {
-        await addTrackToPlaylist(playlistId, track.id);
+        if (track.sourceKind === 'provider' || track.id.startsWith('ytmusic:')) {
+          await addProviderTrackToPlaylist(playlistId, track);
+        } else {
+          await addTrackToPlaylist(playlistId, track.id);
+        }
       }
       setAddedPlaylists((prev) => ({ ...prev, [playlistId]: true }));
       onPlaylistUpdated?.();
@@ -63,7 +67,11 @@ export function AddToPlaylistModal({
     try {
       const created = await createPlaylist(newTitle.trim(), newDesc.trim());
       for (const track of tracksToAdd) {
-        await addTrackToPlaylist(created.id, track.id);
+        if (track.sourceKind === 'provider' || track.id.startsWith('ytmusic:')) {
+          await addProviderTrackToPlaylist(created.id, track);
+        } else {
+          await addTrackToPlaylist(created.id, track.id);
+        }
       }
       setAddedPlaylists((prev) => ({ ...prev, [created.id]: true }));
       onPlaylistUpdated?.();

@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 
 const CLIENT_VERSION: &str = "1.20241127.01.00";
 const SEARCH_URL: &str = "https://music.youtube.com/youtubei/v1/search?prettyPrint=false";
+const NEXT_URL: &str = "https://music.youtube.com/youtubei/v1/next?prettyPrint=false";
 const PLAYER_URL: &str = "https://music.youtube.com/youtubei/v1/player?prettyPrint=false";
 const GUIDE_URL: &str = "https://music.youtube.com/youtubei/v1/guide?prettyPrint=false";
 const ORIGIN: &str = "https://music.youtube.com";
@@ -35,6 +36,10 @@ const VISIONOS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleW
 /// Upper bound for a single cached audio fetch. A 10-minute Opus track is
 /// well under this; anything larger is treated as a provider error.
 const MAX_AUDIO_BYTES: u64 = 80 * 1024 * 1024;
+
+/// Upper bound for total disk space consumed by cached audio streams (500 MB).
+/// When this threshold is exceeded, older cached streams are evicted LRU-style.
+const MAX_TOTAL_CACHE_BYTES: u64 = 500 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -197,6 +202,62 @@ impl YtMusicService {
         let mut seen = HashSet::new();
         items.retain(|track| seen.insert(track.video_id.clone()));
         items.truncate(24);
+        Ok(items)
+    }
+
+    /// Tracks YouTube Music offers as a continuation of `video_id` (the same
+    /// list the web player shows under "Up next"). Used as a radio when the
+    /// user plays one catalogue result without building a queue.
+    pub async fn related(&self, video_id: &str) -> Result<Vec<YtMusicTrack>, String> {
+        if !is_valid_video_id(video_id) {
+            return Err("Invalid YouTube Music video id".into());
+        }
+
+        let body = json!({
+            "context": {
+                "client": {
+                    "clientName": "WEB_REMIX",
+                    "clientVersion": CLIENT_VERSION,
+                    "gl": "US",
+                    "hl": "en"
+                }
+            },
+            "videoId": video_id,
+            "playlistId": format!("RDAMVM{video_id}"),
+            "isAudioOnly": true,
+            "enablePersistentPlaylistPanel": true
+        });
+
+        let response = self
+            .client
+            .post(NEXT_URL)
+            .header("Content-Type", "application/json")
+            .header("Origin", ORIGIN)
+            .header("X-YouTube-Client-Name", "67")
+            .header("X-YouTube-Client-Version", CLIENT_VERSION)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("YouTube Music radio is unreachable: {e}"))?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "YouTube Music radio failed with status {}",
+                response.status().as_u16()
+            ));
+        }
+
+        let value: Value = response
+            .json()
+            .await
+            .map_err(|e| format!("YouTube Music returned an unreadable radio response: {e}"))?;
+
+        let mut items = Vec::new();
+        collect_panel_items(&value, &mut items);
+
+        let mut seen = HashSet::new();
+        items.retain(|track| track.video_id != video_id && seen.insert(track.video_id.clone()));
+        items.truncate(20);
         Ok(items)
     }
 
@@ -383,7 +444,45 @@ impl YtMusicService {
 
         std::fs::rename(&partial, &path)
             .map_err(|e| format!("Could not finalize the stream cache file: {e}"))?;
+
+        let _ = self.prune_cache(MAX_TOTAL_CACHE_BYTES);
+
         Ok(path)
+    }
+
+    /// Evicts oldest cached streams when the total stream cache size exceeds `max_bytes`.
+    pub fn prune_cache(&self, max_bytes: u64) -> Result<(), std::io::Error> {
+        if !self.cache_dir.exists() {
+            return Ok(());
+        }
+        let mut entries = Vec::new();
+        let mut total_size: u64 = 0;
+        for entry in std::fs::read_dir(&self.cache_dir)? {
+            let entry = entry?;
+            let file_path = entry.path();
+            if file_path.is_file() {
+                if let Ok(meta) = file_path.metadata() {
+                    let len = meta.len();
+                    total_size += len;
+                    let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    entries.push((file_path, len, mtime));
+                }
+            }
+        }
+        if total_size <= max_bytes {
+            return Ok(());
+        }
+        // Sort oldest modified first
+        entries.sort_by_key(|(_, _, mtime)| *mtime);
+        for (file_path, len, _) in entries {
+            if total_size <= max_bytes {
+                break;
+            }
+            if std::fs::remove_file(&file_path).is_ok() {
+                total_size = total_size.saturating_sub(len);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -441,6 +540,42 @@ fn parse_duration_ms(text: &str) -> Option<i64> {
         return None;
     }
     Some(seconds * 1000)
+}
+
+/// Google's image proxy encodes the served size in the URL
+/// (`=w120-h120-l90-rj`). Search rows hand back the small variant even though
+/// a 544px image exists, which is what makes catalogue art look soft once it
+/// is scaled up in the player. Ask the CDN for the largest variant instead.
+fn upgrade_thumbnail_url(url: &str) -> String {
+    let Some((base, params)) = url.rsplit_once('=') else {
+        return url.to_string();
+    };
+    if !(params.starts_with('w') || params.starts_with('s') || params.starts_with("p-")) {
+        return url.to_string();
+    }
+
+    let kept: Vec<&str> = params
+        .split('-')
+        .filter(|part| {
+            !part.starts_with('w')
+                && !part.starts_with('h')
+                && !part.starts_with('s')
+                && !part.starts_with("p-")
+        })
+        .collect();
+
+    if kept.is_empty() {
+        format!("{base}=w544-h544")
+    } else {
+        format!("{base}=w544-h544-{}", kept.join("-"))
+    }
+}
+
+fn is_valid_video_id(video_id: &str) -> bool {
+    video_id.len() == 11
+        && video_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn last_thumbnail_url(value: &Value) -> Option<String> {
@@ -526,7 +661,8 @@ fn parse_search_item(item: &Value) -> Option<YtMusicTrack> {
         .or_else(|| {
             item.pointer("/thumbnail/thumbnails")
                 .and_then(last_thumbnail_url)
-        });
+        })
+        .map(|url| upgrade_thumbnail_url(&url));
 
     Some(YtMusicTrack {
         video_id,
@@ -536,6 +672,85 @@ fn parse_search_item(item: &Value) -> Option<YtMusicTrack> {
         duration_ms,
         artwork_url,
     })
+}
+
+fn parse_panel_item(item: &Value) -> Option<YtMusicTrack> {
+    let video_id = item.pointer("/videoId").and_then(Value::as_str)?;
+    if !is_valid_video_id(video_id) {
+        return None;
+    }
+
+    let mut title = item.pointer("/title").map(text_runs).unwrap_or_default();
+    if title.is_empty() {
+        title = item
+            .pointer("/title/runs")
+            .map(text_runs)
+            .unwrap_or_default();
+    }
+    if title.is_empty() {
+        return None;
+    }
+
+    let byline = item
+        .pointer("/longBylineText")
+        .or_else(|| item.pointer("/shortBylineText"))
+        .map(text_runs)
+        .unwrap_or_default();
+    let mut artist = String::new();
+    let mut album = String::new();
+    for part in byline
+        .split(['•', '·'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if artist.is_empty() {
+            artist = part.to_string();
+        } else if album.is_empty() {
+            album = part.to_string();
+        }
+    }
+
+    let duration_ms = item
+        .pointer("/lengthText")
+        .map(text_runs)
+        .and_then(|text| parse_duration_ms(&text))
+        .unwrap_or(0);
+
+    let artwork_url = item
+        .pointer("/thumbnail/thumbnails")
+        .and_then(last_thumbnail_url)
+        .map(|url| upgrade_thumbnail_url(&url));
+
+    Some(YtMusicTrack {
+        video_id: video_id.to_string(),
+        title,
+        artist,
+        album,
+        duration_ms,
+        artwork_url,
+    })
+}
+
+fn collect_panel_items(value: &Value, out: &mut Vec<YtMusicTrack>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                if key == "playlistPanelVideoRenderer" {
+                    if let Some(track) = parse_panel_item(child) {
+                        out.push(track);
+                    }
+                    continue;
+                }
+                collect_panel_items(child, out);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                collect_panel_items(child, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collect_search_items(value: &Value, out: &mut Vec<YtMusicTrack>) {
@@ -607,6 +822,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn upgrades_thumbnail_size() {
+        assert_eq!(
+            upgrade_thumbnail_url("https://lh3.googleusercontent.com/abc=w120-h120-l90-rj"),
+            "https://lh3.googleusercontent.com/abc=w544-h544-l90-rj"
+        );
+        assert_eq!(
+            upgrade_thumbnail_url("https://i.ytimg.com/vi/x/hqdefault.jpg"),
+            "https://i.ytimg.com/vi/x/hqdefault.jpg"
+        );
+    }
+
+    #[test]
+    fn parses_a_radio_panel_item() {
+        let item = json!({
+            "videoId": "dQw4w9WgXcQ",
+            "title": { "runs": [{ "text": "Instant Crush" }] },
+            "longBylineText": { "runs": [{ "text": "Daft Punk • Random Access Memories" }] },
+            "lengthText": { "runs": [{ "text": "5:37" }] },
+            "thumbnail": { "thumbnails": [
+                { "url": "https://lh3.googleusercontent.com/x=w60-h60-l90-rj" },
+                { "url": "https://lh3.googleusercontent.com/x=w120-h120-l90-rj" }
+            ] }
+        });
+        let parsed = parse_panel_item(&item).expect("panel item should parse");
+        assert_eq!(parsed.video_id, "dQw4w9WgXcQ");
+        assert_eq!(parsed.title, "Instant Crush");
+        assert_eq!(parsed.artist, "Daft Punk");
+        assert_eq!(parsed.album, "Random Access Memories");
+        assert_eq!(parsed.duration_ms, 337_000);
+        assert_eq!(
+            parsed.artwork_url.as_deref(),
+            Some("https://lh3.googleusercontent.com/x=w544-h544-l90-rj")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the live YouTube Music API"]
+    async fn live_radio_smoke() {
+        let dir = std::env::temp_dir().join("cavia-ytmusic-radio");
+        let service = YtMusicService::new(dir.clone()).expect("service");
+
+        let results = service
+            .search("daft punk instant crush")
+            .await
+            .expect("search");
+        let first = results.first().expect("search should return a track");
+        let related = service.related(&first.video_id).await.expect("related");
+        assert!(!related.is_empty(), "radio returned no tracks");
+        for track in related.iter().take(5) {
+            println!("radio: {} — {}", track.title, track.artist);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     #[ignore = "hits the live YouTube Music API"]
     async fn live_provider_smoke() {
@@ -644,6 +914,43 @@ mod tests {
             .unwrap_or(0);
         println!("decoded duration: {seconds}s");
         assert!(seconds > 30, "decoded stream had an implausible duration");
+
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "plays audio on the default output device"]
+    async fn live_playback_smoke() {
+        let dir = std::env::temp_dir().join("cavia-ytmusic-play");
+        let service = YtMusicService::new(dir.clone()).expect("service");
+
+        let results = service.search("daft punk").await.expect("search");
+        let first = &results[0];
+        let audio = service
+            .resolve_audio(&first.video_id)
+            .await
+            .expect("resolve");
+        let path = service
+            .ensure_cached(&first.video_id, &audio.url)
+            .await
+            .expect("cache");
+
+        let sink = rodio::stream::DeviceSinkBuilder::open_default_sink().expect("audio device");
+        let player = rodio::Player::connect_new(&sink.mixer());
+        let file = std::fs::File::open(&path).expect("open cached stream");
+        let decoder = rodio::Decoder::try_from(file).expect("decode cached stream");
+        player.append(decoder);
+        player.play();
+
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let played = player.get_pos();
+        player.pause();
+        println!("played {:?} of {}", played, first.title);
+        assert!(
+            played.as_millis() > 500,
+            "the audio device produced no playback progress"
+        );
 
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir_all(dir);

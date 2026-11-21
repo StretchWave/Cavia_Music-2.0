@@ -95,31 +95,6 @@ pub fn run() {
                     .await?;
 
                 let migrator = sqlx::migrate!("./migrations");
-
-                // Reconcile migration checksums if previous development iterations applied
-                // a draft migration before its whitespace or comments were finalized.
-                // This guarantees seamless upgrades without startup panics or database resets.
-                if let Ok(rows) = sqlx::query_as::<_, (i64, Vec<u8>)>(
-                    "SELECT version, checksum FROM _sqlx_migrations",
-                )
-                .fetch_all(&pool)
-                .await
-                {
-                    for (version, recorded_checksum) in rows {
-                        if let Some(migration) = migrator.iter().find(|m| m.version == version) {
-                            if recorded_checksum.as_slice() != migration.checksum.as_ref() {
-                                let _ = sqlx::query(
-                                    "UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?",
-                                )
-                                .bind(migration.checksum.as_ref())
-                                .bind(version)
-                                .execute(&pool)
-                                .await;
-                            }
-                        }
-                    }
-                }
-
                 migrator.run(&pool).await?;
                 Ok::<_, Box<dyn std::error::Error + Send + Sync>>(pool)
             })
@@ -167,8 +142,15 @@ pub fn run() {
                 credentials.clone(),
             ));
 
-            let ytmusic = services::ytmusic::YtMusicService::new(app_data_dir.join("stream-cache"))
-                .map_err(io::Error::other)?;
+            let ytmusic = Arc::new(
+                services::ytmusic::YtMusicService::new(app_data_dir.join("stream-cache"))
+                    .map_err(io::Error::other)?,
+            );
+
+            let import_manager = Arc::new(services::spotify::ImportManager::new(
+                pool.clone(),
+                ytmusic.clone(),
+            ));
 
             app.manage(AppState::new(
                 pool,
@@ -179,6 +161,7 @@ pub fn run() {
                 credentials,
                 sync,
                 ytmusic,
+                import_manager,
             ));
             Ok(())
         })
@@ -190,20 +173,41 @@ pub fn run() {
             commands::artwork::recover_track_artwork,
             commands::lyrics::get_track_lyrics,
             commands::lyrics::refresh_track_lyrics,
+            commands::spotify::spotify_start_import,
+            commands::spotify::import_pause,
+            commands::spotify::import_resume,
+            commands::spotify::import_cancel,
+            commands::spotify::import_get_jobs,
+            commands::spotify::import_clear_completed,
+            commands::spotify::import_remove_job,
+            commands::spotify::import_cancel_and_delete,
+            commands::spotify::spotify_import_playlist,
             commands::ytmusic::ytmusic_search,
+            commands::ytmusic::ytmusic_related,
             commands::ytmusic::ytmusic_play,
             commands::library::library_summary,
             commands::library::get_tracks,
+            commands::library::delete_track,
+            commands::library::delete_tracks,
+            commands::library::unlike_tracks,
+            commands::library::suggest_next_track,
             commands::library::get_albums,
             commands::library::get_artists,
             commands::library::get_liked_tracks,
+            commands::library::get_recent_plays,
+            commands::library::record_recent_play,
+            commands::library::clear_recent_plays,
+            commands::library::delete_recent_play,
             commands::library::toggle_liked_track,
             commands::library::get_playlists,
             commands::library::get_playlist_tracks,
             commands::library::create_playlist,
             commands::library::delete_playlist,
+            commands::library::clear_playlist_tracks,
             commands::library::add_track_to_playlist,
+            commands::library::add_provider_track_to_playlist,
             commands::library::remove_track_from_playlist,
+            commands::library::remove_tracks_from_playlist,
             commands::library::reorder_playlist_tracks,
             commands::library::update_playlist,
             commands::library::search_library,

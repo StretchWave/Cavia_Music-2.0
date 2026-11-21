@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   AudioWaveform,
-  FolderPlus,
+  DownloadCloud,
   Library,
   Loader2,
   Search,
@@ -18,12 +18,17 @@ import {
   cancelScan,
   createPlaylist,
   deletePlaylist,
+  deleteTrack,
+  deleteTracks,
+  unlikeTracks,
   getAlbums,
   getArtists,
   getLikedTracks,
   getPlaylists,
   getTracks,
   pickMusicFolder,
+  recordRecentPlay,
+  suggestNextTrack,
   scanMusicDirectory,
   toggleLikedTrack,
   type ScanProgressEvent,
@@ -54,13 +59,19 @@ import {
   setVolume,
   toggleMute,
 } from '../lib/playback';
+import {
+  fetchRelatedYouTubeMusic,
+  playYouTubeMusic,
+  type YtMusicTrack,
+} from '../lib/ytmusic';
 import type { Album, Artist, Page, PlaybackState, Playlist, Track } from '../lib/types';
-import { IconButton } from '../components/IconButton';
 import { Button } from '../components/Button';
 import { Modal } from '../components/Modal';
 import { LibraryView } from '../features/library/LibraryView';
 import { SearchView } from '../features/search/SearchView';
 import { SettingsView } from '../features/settings/SettingsView';
+import { ImportsView } from '../features/imports/ImportsView';
+import { getImportJobs, listenImportProgress } from '../lib/spotify';
 import { PlayerDock } from '../features/player/PlayerDock';
 import { ExpandedPlayer } from '../features/player/ExpandedPlayer';
 import { QueueDrawer } from '../features/player/QueueDrawer';
@@ -74,8 +85,79 @@ import { formatArtworkUri } from '../lib/library';
 const pageLabels: Record<Page, string> = {
   library: 'Library',
   search: 'Search',
+  imports: 'Imports',
   settings: 'Settings',
 };
+
+/// Catalogue tracks are ephemeral and have no audio file, so anything that
+/// wants to play them needs the provider payload rather than the row id.
+function toProviderTrack(track: Track): YtMusicTrack | null {
+  if (track.sourceKind !== 'provider') return null;
+  const videoId = track.id.startsWith('ytmusic:') ? track.id.slice('ytmusic:'.length) : '';
+  if (videoId.length !== 11) return null;
+  return {
+    videoId,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    durationMs: track.durationMs,
+    artworkUrl: track.artworkUri,
+  };
+}
+
+/// Words that mark part of a title as another version of the same song.
+const VERSION_MARKERS = [
+  'remix',
+  'sped up',
+  'spedup',
+  'slowed',
+  'nightcore',
+  'live',
+  'version',
+  'edit',
+  'instrumental',
+  'acoustic',
+  'remaster',
+  'demo',
+  'reverb',
+];
+
+/// Base title used to recognise the same song uploaded under a different
+/// label: "Song (Remix)" and "Song - Sped Up" both reduce to "song".
+function baseSongTitle(title: string): string {
+  let withoutBrackets = '';
+  let depth = 0;
+  for (const char of title) {
+    if (char === '(' || char === '[') {
+      depth += 1;
+    } else if (char === ')' || char === ']') {
+      depth = Math.max(0, depth - 1);
+    } else if (depth === 0) {
+      withoutBrackets += char;
+    }
+  }
+
+  const lowered = withoutBrackets.toLowerCase();
+  const segments = lowered.split(' - ');
+  const head = segments[0].trim();
+  const tail = segments.slice(1);
+  const tailIsVersion =
+    tail.length > 0 &&
+    tail.every((segment) => VERSION_MARKERS.some((marker) => segment.includes(marker)));
+  const chosen = tailIsVersion ? head : lowered;
+
+  const normalized = chosen.split(/[^\p{L}\p{N}]+/u).filter(Boolean).join(' ');
+  return normalized || chosen.trim();
+}
+
+function shuffled<T>(items: T[]): T[] {
+  const copy = [...items];
+  for (let index = copy.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(Math.random() * (index + 1));
+    [copy[index], copy[swap]] = [copy[swap], copy[index]];
+  }
+  return copy;
+}
 
 type ToastKind = 'success' | 'error' | 'info';
 
@@ -120,6 +202,32 @@ export function App() {
   const [artists, setArtists] = useState<Artist[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [likedTracks, setLikedTracks] = useState<Track[]>([]);
+  const [activeImportCount, setActiveImportCount] = useState<number>(0);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getImportJobs()
+      .then((jobs) => {
+        setActiveImportCount(jobs.filter((j) => j.status === 'running' || j.status === 'paused').length);
+      })
+      .catch(console.error);
+
+    listenImportProgress(() => {
+      getImportJobs()
+        .then((jobs) => {
+          setActiveImportCount(jobs.filter((j) => j.status === 'running' || j.status === 'paused').length);
+        })
+        .catch(console.error);
+    })
+      .then((u) => {
+        unlisten = u;
+      })
+      .catch(console.error);
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   const tracksRef = useRef<Track[]>(tracks);
   const likedTracksRef = useRef<Track[]>(likedTracks);
@@ -175,8 +283,14 @@ export function App() {
   // Transient notifications
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const toastIdRef = useRef(0);
+  const toastTimersRef = useRef<Map<number, number>>(new Map());
 
   const dismissToast = useCallback((id: number) => {
+    const timer = toastTimersRef.current.get(id);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      toastTimersRef.current.delete(id);
+    }
     setToasts((prev) => prev.filter((toast) => toast.id !== id));
   }, []);
 
@@ -184,10 +298,22 @@ export function App() {
     (kind: ToastKind, message: string) => {
       const id = ++toastIdRef.current;
       setToasts((prev) => [...prev, { id, kind, message }]);
-      setTimeout(() => dismissToast(id), 4000);
+      const timer = window.setTimeout(() => {
+        dismissToast(id);
+      }, 4000);
+      toastTimersRef.current.set(id, timer);
     },
     [dismissToast]
   );
+
+  useEffect(() => {
+    return () => {
+      for (const timer of toastTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      toastTimersRef.current.clear();
+    };
+  }, []);
 
   const showPlaybackError = useCallback(
     (message: string) => {
@@ -480,11 +606,62 @@ export function App() {
     [pushToast, refreshLibrary]
   );
 
+  const handleDeleteTrack = useCallback(
+    async (trackId: string) => {
+      try {
+        await deleteTrack(trackId);
+        pushToast('success', 'Track removed from library.');
+        await refreshLibrary();
+      } catch (err) {
+        console.error('Error removing track from library:', err);
+        pushToast('error', 'Could not remove track from library.');
+      }
+    },
+    [pushToast, refreshLibrary]
+  );
+
+  const handleDeleteTracks = useCallback(
+    async (trackIds: string[]) => {
+      try {
+        const count = await deleteTracks(trackIds);
+        pushToast('success', `${count} ${count === 1 ? 'track' : 'tracks'} removed from library.`);
+        await refreshLibrary();
+      } catch (err) {
+        console.error('Error removing tracks from library:', err);
+        pushToast('error', 'Could not remove tracks from library.');
+      }
+    },
+    [pushToast, refreshLibrary]
+  );
+
+  const handleUnlikeTracks = useCallback(
+    async (trackIds: string[]) => {
+      try {
+        const count = await unlikeTracks(trackIds);
+        pushToast('success', `${count} ${count === 1 ? 'track' : 'tracks'} removed from Liked.`);
+        await refreshLibrary();
+      } catch (err) {
+        console.error('Error removing tracks from Liked:', err);
+        pushToast('error', 'Could not remove tracks from Liked.');
+      }
+    },
+    [pushToast, refreshLibrary]
+  );
+
   const handleOpenAddToPlaylist = useCallback((track: Track) => {
     setAddToPlaylistData({
       isOpen: true,
       tracks: [track],
       contextLabel: `Track: ${track.title}`,
+    });
+  }, []);
+
+  const handleOpenAddTracksToPlaylist = useCallback((tracks: Track[]) => {
+    if (tracks.length === 0) return;
+    setAddToPlaylistData({
+      isOpen: true,
+      tracks,
+      contextLabel: tracks.length === 1 ? `Track: ${tracks[0].title}` : `${tracks.length} tracks`,
     });
   }, []);
 
@@ -528,6 +705,152 @@ export function App() {
     }
   }, [showPlaybackError]);
 
+  // Online playback is a renderer-side sequence: one stream is playing while
+  // the rest wait here. When it empties, the radio continues from the last
+  // track. A queue that contains local tracks is the user's own and disables
+  // that continuation.
+  const providerQueueRef = useRef<YtMusicTrack[]>([]);
+  const radioHistoryRef = useRef<string[]>([]);
+  // Base titles already played by the radio, so a near-identical upload (a
+  // remix, a sped-up edit or a duplicate upload) is never picked as "next".
+  const radioTitlesRef = useRef<string[]>([]);
+  const previousStatusRef = useRef<PlaybackState['status']>('idle');
+  const activePlayingTrackRef = useRef<Track | null>(null);
+  const userStoppedOrRemovedRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (playback.status === 'playing') {
+      activePlayingTrackRef.current = playback.currentTrack;
+      userStoppedOrRemovedRef.current = false;
+    }
+  }, [playback.currentTrack, playback.status]);
+
+  // Search-page history: only tracks that actually started playing are
+  // recorded. Search queries are never stored.
+  const lastRecordedTrackRef = useRef<string | null>(null);
+  const [historyRevision, setHistoryRevision] = useState(0);
+  useEffect(() => {
+    const track = playback.currentTrack;
+    if (!track) return;
+    if (playback.status !== 'playing' && playback.status !== 'loading') return;
+    if (lastRecordedTrackRef.current === track.id) return;
+    lastRecordedTrackRef.current = track.id;
+    void recordRecentPlay(track)
+      .then(() => setHistoryRevision((revision) => revision + 1))
+      .catch((err) => {
+        console.error('Failed to record playback history:', err);
+      });
+  }, [playback.currentTrack, playback.status]);
+
+  const startProviderSequence = useCallback(
+    async (tracks: YtMusicTrack[], startIndex = 0) => {
+      const first = tracks[startIndex];
+      if (!first) return;
+      providerQueueRef.current = tracks.slice(startIndex + 1);
+      radioHistoryRef.current = [first.videoId];
+      const base = baseSongTitle(first.title);
+      radioTitlesRef.current = base ? [base] : [];
+      await playYouTubeMusic(first);
+    },
+    []
+  );
+
+  useEffect(() => {
+    const status = playback.status;
+    const previous = previousStatusRef.current;
+    previousStatusRef.current = status;
+
+    if (previous !== 'playing' || (status !== 'stopped' && status !== 'idle')) return;
+
+    if (userStoppedOrRemovedRef.current) {
+      userStoppedOrRemovedRef.current = false;
+      return;
+    }
+
+    const finished = activePlayingTrackRef.current;
+    if (!finished) return;
+
+    const queue = playback.queue;
+
+    // A song played on its own (for example a single search result) has no
+    // continuation to follow, so the next track is chosen from its tags. Any
+    // longer queue is the user's own order and is left alone.
+    if (finished.sourceKind === 'local') {
+      providerQueueRef.current = [];
+      radioHistoryRef.current = [];
+      radioTitlesRef.current = [];
+
+      if (queue.length <= 1) {
+        let cancelled = false;
+        void suggestNextTrack(finished.id)
+          .then(async (next) => {
+            if (cancelled || !next) return;
+            await setQueue([next.id], next.id);
+          })
+          .catch((err) => {
+            console.error('Autoplay failed:', err);
+          });
+        return () => {
+          cancelled = true;
+        };
+      }
+      return;
+    }
+
+    if (finished.sourceKind !== 'provider') return;
+
+    // Only continue when every queued track is a catalogue stream, i.e. the
+    // user never built a queue of their own.
+    if (queue.length === 0 || !queue.every((track) => track.sourceKind === 'provider')) {
+      return;
+    }
+
+    const videoId = finished.id.replace(/^ytmusic:/, '');
+    if (videoId.length !== 11) return;
+
+    let cancelled = false;
+
+    const continueRadio = async () => {
+      const pending = providerQueueRef.current.shift();
+      if (pending) {
+        radioHistoryRef.current.push(pending.videoId);
+        const base = baseSongTitle(pending.title);
+        if (base) radioTitlesRef.current.push(base);
+        await playYouTubeMusic(pending);
+        return;
+      }
+
+      const related = await fetchRelatedYouTubeMusic(videoId);
+      if (cancelled || related.length === 0) return;
+
+      // Skip anything already heard and anything whose base title matches a
+      // played song: a "(Remix)" or duplicate upload of the same name is not
+      // a new track.
+      const heard = new Set(radioHistoryRef.current);
+      const playedTitles = new Set(radioTitlesRef.current);
+      const next = related.find((track) => {
+        if (heard.has(track.videoId)) return false;
+        const base = baseSongTitle(track.title);
+        if (!base) return true;
+        return !playedTitles.has(base);
+      });
+      if (!next) return;
+
+      radioHistoryRef.current.push(next.videoId);
+      const nextBase = baseSongTitle(next.title);
+      if (nextBase) radioTitlesRef.current.push(nextBase);
+      await playYouTubeMusic(next);
+    };
+
+    void continueRadio().catch((err) => {
+      console.error('Autoplay failed:', err);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [playback.status, playback.currentTrack?.id, playback.queue.length]);
+
   const handlePlayTrack = useCallback(
     async (trackId: string) => {
       try {
@@ -547,10 +870,42 @@ export function App() {
     async (tracksToPlay: Track[], startIndex = 0, shuffle = false) => {
       try {
         if (tracksToPlay.length === 0) return;
+
+        // Catalogue entries carry no local file, so the native queue cannot
+        // load them. Play the online sequence instead: the first stream starts
+        // now, the rest stay queued in the renderer.
+        const online = tracksToPlay.map(toProviderTrack);
+        const onlineCount = online.filter((track) => track !== null).length;
+        if (onlineCount === tracksToPlay.length) {
+          await startProviderSequence(
+            shuffle ? shuffled(online as YtMusicTrack[]) : (online as YtMusicTrack[]),
+            shuffle ? 0 : startIndex
+          );
+          return;
+        }
+
+        // A mixed collection cannot become one native queue: catalogue rows
+        // have no local file. Play the device's own copy of the collection and
+        // say so, rather than failing on the first online entry.
+        const localOnly =
+          onlineCount > 0 ? tracksToPlay.filter((track) => track.sourceKind !== 'provider') : tracksToPlay;
+        if (onlineCount > 0) {
+          pushToast('info', 'Playing local tracks — streamable tracks play when opened directly.');
+        }
+
+        // Reset provider queue and radio session when starting local playback
+        providerQueueRef.current = [];
+        radioHistoryRef.current = [];
+        radioTitlesRef.current = [];
+
         if (shuffle) await setShuffle(true);
-        const startId = tracksToPlay[startIndex]?.id;
+        const targetTrack = tracksToPlay[startIndex];
+        const startId =
+          targetTrack && targetTrack.sourceKind !== 'provider' && localOnly.some((t) => t.id === targetTrack.id)
+            ? targetTrack.id
+            : localOnly[0]?.id;
         await setQueue(
-          tracksToPlay.map((track) => track.id),
+          localOnly.map((track) => track.id),
           startId
         );
       } catch (err) {
@@ -559,7 +914,7 @@ export function App() {
         showPlaybackError(`Playback failed: ${msg}`);
       }
     },
-    [showPlaybackError]
+    [showPlaybackError, pushToast, startProviderSequence]
   );
 
   const handlePlayAll = useCallback(() => {
@@ -635,9 +990,13 @@ export function App() {
   const [routeAnnouncement, setRouteAnnouncement] = useState('');
 
   useEffect(() => {
-    document.title = `Cavia Music — ${pageLabels[page]}`;
+    if (playback.currentTrack && playback.status === 'playing') {
+      document.title = `${playback.currentTrack.title} — ${playback.currentTrack.artist} | Cavia Music`;
+    } else {
+      document.title = `Cavia Music — ${pageLabels[page]}`;
+    }
     setRouteAnnouncement(`Navigated to ${pageLabels[page]}`);
-  }, [page]);
+  }, [page, playback.currentTrack, playback.status]);
 
   useEffect(() => {
     // Fields and native controls own their Space/Enter behavior. Without this
@@ -789,6 +1148,7 @@ export function App() {
 
   const handleClearQueue = useCallback(async () => {
     try {
+      userStoppedOrRemovedRef.current = true;
       await clearQueue();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -800,6 +1160,12 @@ export function App() {
   const handleRemoveQueueTrack = useCallback(
     async (trackId: string, index?: number) => {
       try {
+        if (
+          playback.currentTrack?.id === trackId ||
+          (typeof index === 'number' && playback.queue[index]?.id === playback.currentTrack?.id)
+        ) {
+          userStoppedOrRemovedRef.current = true;
+        }
         if (typeof index === 'number') {
           await removeFromQueueByIndex(index);
         } else {
@@ -811,7 +1177,7 @@ export function App() {
         showPlaybackError(`Remove track failed: ${msg}`);
       }
     },
-    [showPlaybackError]
+    [playback.currentTrack?.id, playback.queue, showPlaybackError]
   );
 
   const handleReorderQueue = useCallback(
@@ -873,6 +1239,7 @@ export function App() {
   const navItems = [
     { label: 'Library', page: 'library' as const, icon: Library },
     { label: 'Search', page: 'search' as const, icon: Search },
+    { label: 'Imports', page: 'imports' as const, icon: DownloadCloud, badge: activeImportCount },
     { label: 'Settings', page: 'settings' as const, icon: Settings2 },
   ];
 
@@ -920,6 +1287,9 @@ export function App() {
               >
                 <Icon size={17} strokeWidth={1.8} />
                 <span>{item.label}</span>
+                {Boolean(item.badge && item.badge > 0) && (
+                  <span className="nav-badge">{item.badge}</span>
+                )}
               </button>
             );
           })}
@@ -936,13 +1306,6 @@ export function App() {
               title={statusLabel}
               aria-label={statusLabel}
               role="img"
-            />
-            <IconButton
-              label="Import music folder"
-              icon={<FolderPlus size={17} />}
-              onClick={handleImportFolder}
-              disabled={isScanning}
-              title={isScanning ? 'Import already running' : 'Import music folder'}
             />
           </div>
         </header>
@@ -993,7 +1356,7 @@ export function App() {
             <div
               key={toast.id}
               className={`cavia-toast toast-${toast.kind}`}
-              role={toast.kind === 'error' ? 'alert' : 'status'}
+              role="status"
             >
               <span className="toast-dot" aria-hidden="true" />
               <span className="toast-message">{toast.message}</span>
@@ -1026,6 +1389,9 @@ export function App() {
               isScanning={isScanning}
               onCreatePlaylist={handleCreatePlaylist}
               onDeletePlaylist={handleDeletePlaylist}
+              onDeleteTrack={handleDeleteTrack}
+              onDeleteTracks={handleDeleteTracks}
+              onUnlikeTracks={handleUnlikeTracks}
               onPlaylistUpdated={refreshLibrary}
               onToggleLike={handleToggleLike}
               onPlayTrack={handlePlayTrack}
@@ -1038,8 +1404,20 @@ export function App() {
               onPlayAlbum={handlePlayAlbum}
               onPlayArtist={handlePlayArtist}
               onAddToPlaylist={handleOpenAddToPlaylist}
+              onAddTracksToPlaylist={handleOpenAddTracksToPlaylist}
               onAddAlbumToPlaylist={handleOpenAddAlbumToPlaylist}
               onPlayNext={handlePlayNext}
+              onNavigateToImports={() => setPage('imports')}
+            />
+          )}
+
+          {page === 'imports' && (
+            <ImportsView
+              onOpenPlaylist={(_playlistId) => {
+                setPage('library');
+                refreshLibrary();
+              }}
+              onPlaylistCreated={refreshLibrary}
             />
           )}
 
@@ -1056,6 +1434,8 @@ export function App() {
               onPlayAlbum={handlePlayAlbum}
               onPlayArtist={handlePlayArtist}
               onPlayNext={handlePlayNext}
+              onPlayOnlineTrack={(track) => startProviderSequence([track])}
+              historyRevision={historyRevision}
               allTracks={tracks}
               currentTrackId={playback.currentTrack?.id}
               isPlaying={playback.status === 'playing'}
@@ -1164,7 +1544,12 @@ export function App() {
               aria-current={isActive ? 'page' : undefined}
               onClick={() => setPage(item.page)}
             >
-              <Icon size={19} />
+              <div className="mobile-nav-icon-wrap">
+                <Icon size={19} />
+                {Boolean(item.badge && item.badge > 0) && (
+                  <span className="mobile-nav-badge-dot" />
+                )}
+              </div>
               <span>{item.label}</span>
             </button>
           );

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { Heart, ListPlus, ListStart, MoreHorizontal, Play } from 'lucide-react';
+import { Check, Heart, ListPlus, ListStart, MoreHorizontal, Play, Trash2 } from 'lucide-react';
 import { ArtworkImage } from './ArtworkImage';
 import { formatArtworkUri } from '../lib/library';
 import type { Track } from '../lib/types';
@@ -14,7 +14,16 @@ interface TrackListProps {
   onToggleLike?: (trackId: string) => void;
   onAddToPlaylist?: (track: Track) => void;
   onPlayNext?: (trackId: string) => void;
+  onDeleteTrack?: (track: Track) => void;
+  onRemoveFromHistory?: (trackId: string) => void;
   ariaLabel?: string;
+
+  // Manage mode & multi-selection
+  manageMode?: boolean;
+  selectedTrackIds?: Set<string>;
+  onToggleSelectTrack?: (trackId: string, event?: React.MouseEvent) => void;
+  onRangeSelectTracks?: (trackId: string) => void;
+  onEnterManageMode?: () => void;
 }
 
 function formatTime(ms: number): string {
@@ -35,7 +44,14 @@ export function TrackList({
   onToggleLike,
   onAddToPlaylist,
   onPlayNext,
+  onDeleteTrack,
+  onRemoveFromHistory,
   ariaLabel = 'Tracks',
+  manageMode = false,
+  selectedTrackIds,
+  onToggleSelectTrack,
+  onRangeSelectTracks,
+  onEnterManageMode,
 }: TrackListProps) {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -119,7 +135,7 @@ export function TrackList({
     >
       {density === 'standard' && (
         <div className="track-list-head" aria-hidden="true">
-          <span className="track-col-index">#</span>
+          <span className="track-col-index">{manageMode ? '' : '#'}</span>
           <span className="track-col-title">Title</span>
           <span className="track-col-album">Album</span>
           <span className="track-col-duration">Time</span>
@@ -131,32 +147,71 @@ export function TrackList({
         const isCurrent = currentTrackId === track.id;
         const isMenuOpen = openMenuId === track.id;
         const isLiked = Boolean(track.isLiked);
+        const isSelected = selectedTrackIds ? selectedTrackIds.has(track.id) : false;
 
         return (
           <div
             key={track.id}
-            className={`track-row ${isCurrent ? 'active' : ''}`}
+            className={`track-row ${isCurrent ? 'active' : ''} ${isSelected ? 'row-selected' : ''}`}
           >
             <button
               type="button"
               className="track-row-main"
-              aria-label={`Play ${track.title} by ${track.artist || 'Unknown Artist'}`}
+              aria-label={manageMode ? `Select ${track.title}` : `Play ${track.title} by ${track.artist || 'Unknown Artist'}`}
               aria-current={isCurrent ? 'true' : undefined}
-              onClick={() => onPlayTrack?.(track.id)}
+              aria-selected={manageMode ? isSelected : undefined}
+              onClick={(event: React.MouseEvent) => {
+                if (manageMode) {
+                  if (event.shiftKey) {
+                    onRangeSelectTracks?.(track.id);
+                  } else {
+                    onToggleSelectTrack?.(track.id, event);
+                  }
+                } else if ((event.shiftKey || event.ctrlKey || event.metaKey) && onToggleSelectTrack) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onEnterManageMode?.();
+                  if (event.shiftKey) {
+                    onRangeSelectTracks?.(track.id);
+                  } else {
+                    onToggleSelectTrack?.(track.id, event);
+                  }
+                } else {
+                  onPlayTrack?.(track.id);
+                }
+              }}
             >
               <span className="track-col-index" aria-hidden="true">
-                {isCurrent && isPlaying ? (
+                {manageMode ? (
+                  <span
+                    className={`track-select-checkbox ${isSelected ? 'checked' : ''}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (e.shiftKey) {
+                        onRangeSelectTracks?.(track.id);
+                      } else {
+                        onToggleSelectTrack?.(track.id, e);
+                      }
+                    }}
+                    role="checkbox"
+                    aria-checked={isSelected}
+                  >
+                    {isSelected && <Check size={11} strokeWidth={3} />}
+                  </span>
+                ) : isCurrent && isPlaying ? (
                   <span className="eq-bounce">
                     <span />
                     <span />
                     <span />
                   </span>
                 ) : (
-                  <span className="track-index-number">{track.trackNumber || index + 1}</span>
+                  <>
+                    <span className="track-index-number">{track.trackNumber || index + 1}</span>
+                    <span className="track-index-play">
+                      <Play size={11} fill="currentColor" />
+                    </span>
+                  </>
                 )}
-                <span className="track-index-play">
-                  <Play size={11} fill="currentColor" />
-                </span>
               </span>
 
               <span className="track-col-title">
@@ -273,6 +328,36 @@ export function TrackList({
                     <ListStart size={15} />
                     <span>Play Next</span>
                   </button>
+
+                  {onRemoveFromHistory && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="track-menu-item track-menu-item-danger"
+                      onClick={() => {
+                        closeMenu(true);
+                        onRemoveFromHistory(track.id);
+                      }}
+                    >
+                      <Trash2 size={15} />
+                      <span>Remove from history</span>
+                    </button>
+                  )}
+
+                  {onDeleteTrack && track.sourceKind !== 'provider' && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="track-menu-item track-menu-item-danger"
+                      onClick={() => {
+                        closeMenu(true);
+                        onDeleteTrack(track);
+                      }}
+                    >
+                      <Trash2 size={15} />
+                      <span>Remove from library</span>
+                    </button>
+                  )}
                 </div>
               )}
             </span>

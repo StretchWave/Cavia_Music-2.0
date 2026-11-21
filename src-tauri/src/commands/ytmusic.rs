@@ -19,6 +19,17 @@ pub async fn ytmusic_search(
     state.ytmusic.search(trimmed).await
 }
 
+/// Tracks YouTube Music would play after `video_id`. The UI uses this as a
+/// radio when the user played a single catalogue result and never built a
+/// queue of their own.
+#[tauri::command]
+pub async fn ytmusic_related(
+    state: State<'_, AppState>,
+    video_id: String,
+) -> Result<Vec<YtMusicTrack>, String> {
+    state.ytmusic.related(&video_id).await
+}
+
 /// Resolves a YouTube Music result and plays it through the native engine.
 ///
 /// The audio stream is fetched into the app stream cache first so playback,
@@ -79,7 +90,11 @@ pub async fn ytmusic_play(
         date_added: String::new(),
     };
 
-    state.playback.add_to_queue(track).await?;
+    let playback_state = state.playback.snapshot();
+    let in_queue = playback_state.queue.iter().any(|t| t.id == track_id);
+    if !in_queue {
+        state.playback.add_to_queue(track).await?;
+    }
     state.playback.play_track(&track_id).await?;
     state.playback.play().await?;
     Ok(())

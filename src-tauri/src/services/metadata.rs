@@ -91,10 +91,15 @@ pub fn extract_metadata(path: &Path) -> Result<ExtractedMetadata, String> {
                 }
 
                 let pictures = tag.pictures();
+                // Files often carry more than one image (a small thumbnail in
+                // the ID3v2.3 block and the full cover elsewhere). Picking the
+                // first entry is what made covers look soft once scaled up, so
+                // take the largest front cover instead.
                 let cover = pictures
                     .iter()
-                    .find(|p| p.pic_type() == PictureType::CoverFront)
-                    .or_else(|| pictures.first());
+                    .filter(|p| p.pic_type() == PictureType::CoverFront)
+                    .max_by_key(|p| p.data().len())
+                    .or_else(|| pictures.iter().max_by_key(|p| p.data().len()));
 
                 if let Some(pic) = cover {
                     let mime = pic.mime_type().map(|m| m.as_str()).unwrap_or("");

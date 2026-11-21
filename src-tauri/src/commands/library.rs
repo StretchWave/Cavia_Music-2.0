@@ -41,6 +41,17 @@ pub async fn get_tracks(state: State<'_, AppState>) -> Result<Vec<Track>, String
     lib_service::get_all_tracks(&state.database).await
 }
 
+/// Next track for an unqueued song, chosen from the finished track's tags.
+/// Returns `null` when the library has nothing related, so the renderer stops
+/// instead of inventing a continuation.
+#[tauri::command]
+pub async fn suggest_next_track(
+    state: State<'_, AppState>,
+    track_id: String,
+) -> Result<Option<Track>, String> {
+    lib_service::suggest_next_track(&state.database, &track_id).await
+}
+
 #[tauri::command]
 pub async fn get_albums(state: State<'_, AppState>) -> Result<Vec<Album>, String> {
     lib_service::get_albums(&state.database).await
@@ -104,6 +115,32 @@ pub async fn add_track_to_playlist(
 }
 
 #[tauri::command]
+pub async fn add_provider_track_to_playlist(
+    state: State<'_, AppState>,
+    playlist_id: String,
+    provider_id: String,
+    provider_track_id: String,
+    title: String,
+    artist: String,
+    album: String,
+    duration_ms: i64,
+    artwork_uri: Option<String>,
+) -> Result<(), String> {
+    lib_service::add_provider_track_to_playlist(
+        &state.database,
+        &playlist_id,
+        &provider_id,
+        &provider_track_id,
+        &title,
+        &artist,
+        &album,
+        duration_ms,
+        artwork_uri.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn remove_track_from_playlist(
     state: State<'_, AppState>,
     playlist_id: String,
@@ -163,4 +200,67 @@ pub async fn search_library(
     category: String,
 ) -> Result<SearchResultsDTO, String> {
     search_service::search_library(&state.database, &query, &category).await
+}
+
+#[tauri::command]
+pub async fn record_recent_play(state: State<'_, AppState>, track: Track) -> Result<(), String> {
+    lib_service::record_recent_play(&state.database, &track).await
+}
+
+/// Playback history shown on the Search page when no query is active. Search
+/// queries themselves are never stored, only tracks that actually played.
+#[tauri::command]
+pub async fn get_recent_plays(state: State<'_, AppState>) -> Result<Vec<Track>, String> {
+    lib_service::get_recent_plays(&state.database, 60).await
+}
+
+#[tauri::command]
+pub async fn delete_track(state: State<'_, AppState>, track_id: String) -> Result<(), String> {
+    lib_service::delete_track(&state.database, &track_id).await
+}
+
+#[tauri::command]
+pub async fn delete_tracks(
+    state: State<'_, AppState>,
+    track_ids: Vec<String>,
+) -> Result<usize, String> {
+    lib_service::delete_tracks(&state.database, &track_ids).await
+}
+
+#[tauri::command]
+pub async fn unlike_tracks(
+    state: State<'_, AppState>,
+    track_ids: Vec<String>,
+) -> Result<usize, String> {
+    lib_service::unlike_tracks(&state.database, &track_ids).await
+}
+
+#[tauri::command]
+pub async fn remove_tracks_from_playlist(
+    state: State<'_, AppState>,
+    playlist_id: String,
+    positions: Vec<i64>,
+) -> Result<(), String> {
+    lib_service::remove_tracks_from_playlist(&state.database, &playlist_id, &positions).await
+}
+
+#[tauri::command]
+pub async fn clear_playlist_tracks(
+    state: State<'_, AppState>,
+    playlist_id: String,
+) -> Result<(), String> {
+    lib_service::clear_playlist_tracks(&state.database, &playlist_id).await
+}
+
+#[tauri::command]
+pub async fn clear_recent_plays(state: State<'_, AppState>) -> Result<(), String> {
+    lib_service::clear_recent_plays(&state.database).await
+}
+
+#[tauri::command]
+pub async fn delete_recent_play(
+    state: State<'_, AppState>,
+    track_id: String,
+) -> Result<(), String> {
+    lib_service::delete_recent_play(&state.database, &track_id).await
 }

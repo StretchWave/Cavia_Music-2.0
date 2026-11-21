@@ -22,8 +22,11 @@ To enable optional cloud synchronization for a Cavia deployment:
    - Go to [supabase.com](https://supabase.com) and create a free project.
 2. **Apply Migrations**:
    - In the Supabase Dashboard, open the **SQL Editor**.
-   - Copy and execute the contents of `supabase/migrations/20261112000000_cloud_sync_schema.sql`.
+   - Copy and execute the contents of `supabase/migrations/20261112000000_cloud_sync_schema.sql`. The script is idempotent (`CREATE TABLE IF NOT EXISTS`, `DROP POLICY IF EXISTS`), so it is safe to re-run after pulling changes.
    - Optionally run `test/verify_supabase_rls.sql` to verify RLS isolation.
+   - The `user_id` columns default to `auth.uid()`, and `cloud_playlists.client_updated_at` defaults to `now()`, so a client insert can never create a row owned by another account.
+
+   The live project (`wycltgbzbhvnfavwxgpm`) already has this schema applied. Email confirmation is disabled on it because the desktop client authenticates with email + password and expects a session immediately; enable confirmation only once transactional email is configured.
 3. **Configure Environment Variables**:
    - In `.env` (or via the Settings UI in Cavia):
      ```env

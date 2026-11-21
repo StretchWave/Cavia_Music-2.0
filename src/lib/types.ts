@@ -1,4 +1,4 @@
-export type Page = 'library' | 'search' | 'settings';
+export type Page = 'library' | 'search' | 'imports' | 'settings';
 
 export type RepeatMode = 'off' | 'all' | 'one';
 

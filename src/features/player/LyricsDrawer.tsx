@@ -13,7 +13,12 @@ import { Badge } from '../../components/Badge';
 import { Tabs } from '../../components/Tabs';
 import { Button } from '../../components/Button';
 import type { Track } from '../../lib/types';
-import { getTrackLyrics, refreshTrackLyrics, type LyricsResult } from '../../lib/lyrics';
+import {
+  getTrackLyrics,
+  refreshTrackLyrics,
+  type LyricsResult,
+  type LyricsTrackMeta,
+} from '../../lib/lyrics';
 
 interface LyricsDrawerProps {
   isOpen: boolean;
@@ -39,11 +44,31 @@ export function LyricsDrawer({
   const [isFollowing, setIsFollowing] = useState<boolean>(true);
   const [refreshCount, setRefreshCount] = useState<number>(0);
 
+  // Catalogue streams have no library row, so the resolver gets the metadata
+  // from the player instead. Built per request so a changing playback duration
+  // cannot trigger a refetch loop.
+  const trackMeta = useMemo<LyricsTrackMeta | null>(() => {
+    if (!currentTrack) return null;
+    return {
+      title: currentTrack.title,
+      artist: currentTrack.artist,
+      album: currentTrack.album,
+      durationMs: currentTrack.durationMs || null,
+    };
+  }, [
+    currentTrack?.id,
+    currentTrack?.title,
+    currentTrack?.artist,
+    currentTrack?.album,
+    currentTrack?.durationMs,
+  ]);
+
   const containerRef = useRef<HTMLDivElement | null>(null);
   const activeLineRef = useRef<HTMLParagraphElement | null>(null);
   const drawerRef = useRef<HTMLDivElement | null>(null);
   const previousActiveElementRef = useRef<HTMLElement | null>(null);
   const prevActiveIndexRef = useRef<number>(-1);
+  const lastActiveIndexRef = useRef<number>(-1);
   const programmaticScrollRef = useRef<boolean>(false);
   const programmaticScrollTimerRef = useRef<number | null>(null);
 
@@ -129,10 +154,13 @@ export function LyricsDrawer({
 
     const trackId = currentTrack.id;
     let isSubscribed = true;
+    // Drop the previous track's lyrics immediately so its lines can never be
+    // shown against this track while the new lookup is in flight.
+    setLyrics(null);
     setIsLoading(true);
     setError(null);
 
-    getTrackLyrics(trackId)
+    getTrackLyrics(trackId, trackMeta)
       .then((res) => {
         if (!isSubscribed) return;
         setLyrics(res);
@@ -153,7 +181,7 @@ export function LyricsDrawer({
     return () => {
       isSubscribed = false;
     };
-  }, [isOpen, currentTrack?.id, refreshCount]);
+  }, [isOpen, currentTrack?.id, refreshCount, trackMeta]);
 
   // Forced refresh handler
   const handleForceRefresh = async () => {
@@ -161,7 +189,7 @@ export function LyricsDrawer({
     setIsLoading(true);
     setError(null);
     try {
-      const res = await refreshTrackLyrics(currentTrack.id);
+      const res = await refreshTrackLyrics(currentTrack.id, trackMeta);
       setLyrics(res);
       if (res.status === 'synced' && res.syncedLines && res.syncedLines.length > 0) {
         setMode('synced');
@@ -181,6 +209,11 @@ export function LyricsDrawer({
     if (mode !== 'synced' || !lyrics?.syncedLines || lyrics.syncedLines.length === 0) {
       return -1;
     }
+    // If playback stopped and reset position to 0 while we were already on a line,
+    // preserve the last active line so the view doesn't jump back to line 1.
+    if (currentPositionMs === 0 && lastActiveIndexRef.current > 0) {
+      return lastActiveIndexRef.current;
+    }
     let idx = -1;
     for (let i = 0; i < lyrics.syncedLines.length; i++) {
       if (lyrics.syncedLines[i].timestampMs <= currentPositionMs) {
@@ -188,6 +221,9 @@ export function LyricsDrawer({
       } else {
         break;
       }
+    }
+    if (idx >= 0) {
+      lastActiveIndexRef.current = idx;
     }
     return idx;
   }, [mode, lyrics?.syncedLines, currentPositionMs]);
@@ -225,6 +261,7 @@ export function LyricsDrawer({
   // initial scroll treatment.
   useEffect(() => {
     prevActiveIndexRef.current = -1;
+    lastActiveIndexRef.current = -1;
     setIsFollowing(true);
   }, [isOpen, currentTrack?.id]);
 
@@ -452,7 +489,7 @@ export function LyricsDrawer({
                     className={`lyrics-line clickable ${isActive ? 'active-line' : 'inactive'}`}
                     onClick={() => handleLineClick(line.timestampMs)}
                     title={`Seek to ${formatTime(line.timestampMs)}`}
-                    tabIndex={0}
+                    tabIndex={isActive ? 0 : -1}
                     role="button"
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' || e.key === ' ') {

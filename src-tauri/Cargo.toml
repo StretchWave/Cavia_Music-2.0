@@ -5,6 +5,7 @@ description = "Cavia Music desktop and mobile application core"
 authors = ["StretchWave"]
 edition = "2024"
 rust-version = "1.90"
+default-run = "cavia-music"
 
 [lib]
 name = "cavia_lib"

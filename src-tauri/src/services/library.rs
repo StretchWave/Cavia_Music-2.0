@@ -71,7 +71,7 @@ pub async fn get_albums(pool: &SqlitePool) -> Result<Vec<Album>, String> {
             MAX(artwork_uri) AS artwork_uri
         FROM tracks
         WHERE is_deleted = 0
-        GROUP BY title, artist
+        GROUP BY title COLLATE NOCASE, artist COLLATE NOCASE
         ORDER BY title COLLATE NOCASE ASC
         "#,
     )
@@ -84,7 +84,11 @@ pub async fn get_albums(pool: &SqlitePool) -> Result<Vec<Album>, String> {
         .map(|row| {
             let title: String = row.get("title");
             let artist: String = row.get("artist");
-            let id = format!("{title}_{artist}");
+            let id = format!(
+                "album:{}:{}",
+                hex::encode(title.to_lowercase()),
+                hex::encode(artist.to_lowercase())
+            );
             Album {
                 id,
                 title,
@@ -109,7 +113,7 @@ pub async fn get_artists(pool: &SqlitePool) -> Result<Vec<Artist>, String> {
             MAX(artwork_uri) AS artwork_uri
         FROM tracks
         WHERE is_deleted = 0
-        GROUP BY name
+        GROUP BY name COLLATE NOCASE
         ORDER BY name COLLATE NOCASE ASC
         "#,
     )
@@ -121,7 +125,7 @@ pub async fn get_artists(pool: &SqlitePool) -> Result<Vec<Artist>, String> {
         .into_iter()
         .map(|row| {
             let name: String = row.get("name");
-            let id = name.clone();
+            let id = format!("artist:{}", hex::encode(name.to_lowercase()));
             Artist {
                 id,
                 name,
@@ -266,6 +270,56 @@ pub async fn toggle_track_liked(pool: &SqlitePool, track_id: &str) -> Result<boo
     Ok(new_liked)
 }
 
+pub async fn unlike_tracks(pool: &SqlitePool, track_ids: &[String]) -> Result<usize, String> {
+    if track_ids.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Database error beginning transaction: {e}"))?;
+
+    let mut count = 0;
+    for tid in track_ids {
+        let deleted = sqlx::query("DELETE FROM liked_tracks WHERE track_id = ?")
+            .bind(tid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to unlike track: {e}"))?;
+
+        if deleted.rows_affected() > 0 {
+            count += 1;
+            let trk_row = sqlx::query(
+                "SELECT title, artist, album, duration_ms, content_hash FROM tracks WHERE id = ?",
+            )
+            .bind(tid)
+            .fetch_optional(&mut *tx)
+            .await
+            .unwrap_or(None);
+
+            if let Some(r) = trk_row {
+                let _ = crate::services::sync::outbox::OutboxService::record_track_like_status(
+                    &mut *tx,
+                    tid,
+                    r.get::<Option<String>, _>("content_hash").as_deref(),
+                    &r.get::<String, _>("title"),
+                    &r.get::<String, _>("artist"),
+                    &r.get::<String, _>("album"),
+                    r.get::<i64, _>("duration_ms"),
+                    false,
+                )
+                .await;
+            }
+        }
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit unlike tracks: {e}"))?;
+
+    Ok(count)
+}
+
 pub async fn get_playlists(pool: &SqlitePool) -> Result<Vec<Playlist>, String> {
     let rows = sqlx::query(
         r#"
@@ -276,7 +330,7 @@ pub async fn get_playlists(pool: &SqlitePool) -> Result<Vec<Playlist>, String> {
             p.artwork_uri,
             p.source_provider,
             p.created_at,
-            (SELECT COUNT(*) FROM playlist_tracks pt LEFT JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND (t.id IS NULL OR t.is_deleted = 0)) AS track_count
+            (SELECT COUNT(*) FROM playlist_tracks pt LEFT JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND (t.is_deleted IS NULL OR t.is_deleted = 0)) AS track_count
         FROM playlists p
         WHERE p.is_deleted = 0
         ORDER BY p.created_at DESC
@@ -310,15 +364,23 @@ pub async fn get_playlist_tracks(
     let rows = sqlx::query(
         r#"
         SELECT
-            COALESCE(t.id, pt.id) AS id,
+            CASE
+                WHEN t.id IS NULL AND pt.provider_track_id IS NOT NULL
+                THEN 'ytmusic:' || pt.provider_track_id
+                ELSE COALESCE(t.id, pt.id)
+            END AS id,
             COALESCE(t.title, pt.title, 'Unknown Title') AS title,
             COALESCE(t.artist, pt.artist, 'Unknown Artist') AS artist,
             COALESCE(t.album, pt.album, '') AS album,
             t.album_artist,
             COALESCE(t.duration_ms, pt.duration_ms, 0) AS duration_ms,
-            t.artwork_uri,
-            CASE WHEN t.id IS NOT NULL THEN t.source_kind ELSE 'remote_sync' END AS source_kind,
-            t.provider_id,
+            COALESCE(t.artwork_uri, pt.artwork_uri) AS artwork_uri,
+            CASE
+                WHEN t.id IS NOT NULL THEN t.source_kind
+                WHEN pt.provider_track_id IS NOT NULL THEN 'provider'
+                ELSE 'remote_sync'
+            END AS source_kind,
+            COALESCE(t.provider_id, pt.provider_id) AS provider_id,
             t.file_uri,
             t.release_year,
             t.track_number,
@@ -328,9 +390,9 @@ pub async fn get_playlist_tracks(
             COALESCE(t.date_added, pt.added_at) AS date_added,
             CASE WHEN l.track_id IS NOT NULL THEN 1 ELSE 0 END AS is_liked
         FROM playlist_tracks pt
-        LEFT JOIN tracks t ON pt.track_id = t.id AND t.is_deleted = 0
+        LEFT JOIN tracks t ON pt.track_id = t.id
         LEFT JOIN liked_tracks l ON t.id = l.track_id
-        WHERE pt.playlist_id = ?
+        WHERE pt.playlist_id = ? AND (t.is_deleted IS NULL OR t.is_deleted = 0)
         ORDER BY pt.position ASC
         "#,
     )
@@ -534,6 +596,256 @@ pub async fn add_track_to_playlist(
     Ok(entry_id)
 }
 
+/// Appends a catalogue entry (no local audio file) to a playlist. The entry
+/// keeps its own snapshot so the playlist renders even offline, and carries
+/// the provider id the player needs to resolve a stream.
+#[allow(clippy::too_many_arguments)]
+pub async fn add_provider_track_to_playlist(
+    pool: &SqlitePool,
+    playlist_id: &str,
+    provider_id: &str,
+    provider_track_id: &str,
+    title: &str,
+    artist: &str,
+    album: &str,
+    duration_ms: i64,
+    artwork_uri: Option<&str>,
+) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start transaction: {e}"))?;
+
+    let next_pos: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_tracks WHERE playlist_id = ?",
+    )
+    .bind(playlist_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to determine next position: {e}"))?;
+
+    let entry_id = format!("plt-{}", Uuid::new_v4());
+    let cloud_track_id = format!("{provider_id}:{provider_track_id}");
+    sqlx::query(
+        r#"
+        INSERT INTO playlist_tracks (
+            id, playlist_id, track_id, cloud_track_id, title, artist, album, duration_ms,
+            position, provider_id, provider_track_id, artwork_uri
+        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&entry_id)
+    .bind(playlist_id)
+    .bind(&cloud_track_id)
+    .bind(title)
+    .bind(artist)
+    .bind(album)
+    .bind(duration_ms)
+    .bind(next_pos)
+    .bind(provider_id)
+    .bind(provider_track_id)
+    .bind(artwork_uri)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to add catalogue track to playlist: {e}"))?;
+
+    let _ = crate::services::sync::outbox::OutboxService::record_track_add(
+        &mut *tx,
+        playlist_id,
+        &entry_id,
+        &cloud_track_id,
+        title,
+        artist,
+        album,
+        duration_ms,
+        None,
+        next_pos,
+    )
+    .await;
+
+    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(playlist_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to update playlist timestamp: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit provider track transaction: {e}"))?;
+
+    Ok(())
+}
+
+/// Finds a local track for a track that came from another service. The title
+/// must match exactly (case and surrounding whitespace ignored) and, when the
+/// caller knows the artist, at least one artist token must overlap. A title
+/// match alone is never enough, so a different recording is never substituted.
+pub async fn find_local_track_id(pool: &SqlitePool, title: &str, artist: &str) -> Option<String> {
+    let rows = sqlx::query(
+        "SELECT id, artist FROM tracks WHERE is_deleted = 0 AND lower(trim(title)) = lower(trim(?)) LIMIT 8",
+    )
+    .bind(title)
+    .fetch_all(pool)
+    .await
+    .ok()?;
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    let tokens: Vec<String> = artist
+        .to_lowercase()
+        .split([',', '&', ';', '/', ' '])
+        .map(str::trim)
+        .filter(|token| token.chars().count() > 2)
+        .map(|token| token.to_string())
+        .collect();
+
+    let mut title_only: Option<String> = None;
+    for row in rows {
+        let id: String = row.get("id");
+        let track_artist: String = row.get::<String, _>("artist").to_lowercase();
+        if tokens.iter().any(|token| track_artist.contains(token)) {
+            return Some(id);
+        }
+        title_only.get_or_insert(id);
+    }
+
+    if tokens.is_empty() { title_only } else { None }
+}
+
+/// Remembers that a track actually started playing. Repeats update the
+/// timestamp and count instead of creating duplicate rows.
+pub async fn record_recent_play(
+    pool: &SqlitePool,
+    track: &crate::domain::Track,
+) -> Result<(), String> {
+    // If local track, verify and query authoritative data from tracks table and increment play_count
+    let (title, artist, album, duration_ms, artwork_uri, source_kind, provider_id) = if track
+        .source_kind
+        == "local"
+        || !track.id.starts_with("ytmusic:")
+    {
+        let row = sqlx::query(
+                "SELECT title, artist, album, duration_ms, artwork_uri FROM tracks WHERE id = ? AND is_deleted = 0",
+            )
+            .bind(&track.id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("Failed to fetch track for history: {e}"))?;
+
+        if let Some(r) = row {
+            let _ = sqlx::query("UPDATE tracks SET play_count = play_count + 1 WHERE id = ?")
+                .bind(&track.id)
+                .execute(pool)
+                .await;
+
+            (
+                r.get::<String, _>("title"),
+                r.get::<String, _>("artist"),
+                r.get::<String, _>("album"),
+                r.get::<i64, _>("duration_ms"),
+                r.get::<Option<String>, _>("artwork_uri"),
+                "local".to_string(),
+                None,
+            )
+        } else {
+            (
+                track.title.clone(),
+                track.artist.clone(),
+                track.album.clone(),
+                track.duration_ms,
+                track.artwork_uri.clone(),
+                track.source_kind.clone(),
+                track.provider_id.clone(),
+            )
+        }
+    } else {
+        (
+            track.title.clone(),
+            track.artist.clone(),
+            track.album.clone(),
+            track.duration_ms,
+            track.artwork_uri.clone(),
+            track.source_kind.clone(),
+            track.provider_id.clone(),
+        )
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO recent_plays (
+            track_id, source_kind, title, artist, album, duration_ms,
+            artwork_uri, provider_id, play_count, played_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+        ON CONFLICT(track_id) DO UPDATE SET
+            source_kind = excluded.source_kind,
+            title = excluded.title,
+            artist = excluded.artist,
+            album = excluded.album,
+            duration_ms = excluded.duration_ms,
+            artwork_uri = COALESCE(excluded.artwork_uri, recent_plays.artwork_uri),
+            provider_id = COALESCE(excluded.provider_id, recent_plays.provider_id),
+            play_count = recent_plays.play_count + 1,
+            played_at = CURRENT_TIMESTAMP
+        "#,
+    )
+    .bind(&track.id)
+    .bind(source_kind)
+    .bind(title)
+    .bind(artist)
+    .bind(album)
+    .bind(duration_ms)
+    .bind(artwork_uri)
+    .bind(provider_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to record playback history: {e}"))?;
+
+    Ok(())
+}
+
+/// Most recently played tracks, newest first. Catalogue entries are included
+/// with the snapshot they had when they played.
+pub async fn get_recent_plays(pool: &SqlitePool, limit: i64) -> Result<Vec<Track>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT track_id, source_kind, title, artist, album, duration_ms,
+               artwork_uri, provider_id, play_count, played_at
+        FROM recent_plays
+        ORDER BY played_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(limit.clamp(1, 200))
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to read playback history: {e}"))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| Track {
+            id: row.get("track_id"),
+            title: row.get("title"),
+            artist: row.get("artist"),
+            album: row.get("album"),
+            album_artist: None,
+            duration_ms: row.get("duration_ms"),
+            artwork_uri: row.get("artwork_uri"),
+            source_kind: row.get("source_kind"),
+            provider_id: row.get("provider_id"),
+            file_uri: None,
+            release_year: None,
+            track_number: None,
+            disc_number: None,
+            genre: None,
+            is_liked: false,
+            play_count: row.get("play_count"),
+            date_added: row.get("played_at"),
+        })
+        .collect())
+}
+
 pub async fn remove_track_from_playlist(
     pool: &SqlitePool,
     playlist_id: &str,
@@ -618,6 +930,88 @@ pub async fn remove_track_from_playlist(
     tx.commit()
         .await
         .map_err(|e| format!("Failed to commit transaction: {e}"))?;
+
+    Ok(())
+}
+
+pub async fn remove_tracks_from_playlist(
+    pool: &SqlitePool,
+    playlist_id: &str,
+    positions: &[i64],
+) -> Result<(), String> {
+    if positions.is_empty() {
+        return Ok(());
+    }
+
+    let playlist_exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM playlists WHERE id = ? AND is_deleted = 0")
+            .bind(playlist_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("Failed to verify playlist: {e}"))?;
+
+    if playlist_exists.is_none() {
+        return Err(format!("Playlist '{playlist_id}' not found or deleted"));
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start transaction: {e}"))?;
+
+    for &pos in positions {
+        let entry: Option<(String, i64)> = sqlx::query_as(
+            "SELECT id, position FROM playlist_tracks WHERE playlist_id = ? AND position = ?",
+        )
+        .bind(playlist_id)
+        .bind(pos)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to query playlist track: {e}"))?;
+
+        if let Some((entry_id, position)) = entry {
+            sqlx::query("DELETE FROM playlist_tracks WHERE id = ?")
+                .bind(&entry_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("Failed to delete playlist track: {e}"))?;
+
+            let _ = crate::services::sync::outbox::OutboxService::record_track_remove(
+                &mut *tx,
+                playlist_id,
+                &entry_id,
+                position,
+            )
+            .await;
+        }
+    }
+
+    // Recompact positions: 0, 1, 2...
+    let remaining_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position ASC",
+    )
+    .bind(playlist_id)
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap_or_default();
+
+    for (new_pos, entry_id) in remaining_ids.into_iter().enumerate() {
+        let _ = sqlx::query("UPDATE playlist_tracks SET position = ? WHERE id = ?")
+            .bind(new_pos as i64)
+            .bind(&entry_id)
+            .execute(&mut *tx)
+            .await;
+    }
+
+    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(playlist_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to update playlist timestamp: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit batch removal from playlist: {e}"))?;
 
     Ok(())
 }
@@ -798,7 +1192,7 @@ pub async fn update_playlist(
             p.artwork_uri,
             p.source_provider,
             p.created_at,
-            (SELECT COUNT(*) FROM playlist_tracks pt LEFT JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND (t.id IS NULL OR t.is_deleted = 0)) AS track_count
+            (SELECT COUNT(*) FROM playlist_tracks pt LEFT JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND (t.is_deleted IS NULL OR t.is_deleted = 0)) AS track_count
         FROM playlists p
         WHERE p.id = ? AND p.is_deleted = 0
         "#,
@@ -818,6 +1212,451 @@ pub async fn update_playlist(
         created_at: row.get("created_at"),
         tracks: None,
     })
+}
+
+/// Lowercased genre terms ("Rock; Pop" -> ["rock", "pop"]). A single tag can
+/// hold several genres, so each term counts on its own: a five-genre tag still
+/// matches a plain "Pop" track.
+fn genre_terms(genre: &str) -> Vec<String> {
+    genre
+        .split([';', '/', ','])
+        .map(|term| term.trim().to_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect()
+}
+
+/// Words that mark a later part of a title as a different version of the same
+/// song rather than a different song.
+const VERSION_MARKERS: &[&str] = &[
+    "remix",
+    "sped up",
+    "spedup",
+    "slowed",
+    "nightcore",
+    "live",
+    "version",
+    "edit",
+    "instrumental",
+    "acoustic",
+    "remaster",
+    "demo",
+    "reverb",
+];
+
+fn is_version_marker(segment: &str) -> bool {
+    VERSION_MARKERS
+        .iter()
+        .any(|marker| segment.contains(marker))
+}
+
+/// Reduces a title to its base name so near-identical uploads ("Song",
+/// "Song (Remix)", "Song - Sped Up") count as the same song and are never
+/// chosen as the next track.
+fn base_song_title(title: &str) -> String {
+    let mut text = String::with_capacity(title.len());
+    let mut depth = 0i32;
+    for ch in title.chars() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            _ if depth == 0 => text.push(ch),
+            _ => {}
+        }
+    }
+    let without_brackets = text.to_lowercase();
+    let mut segments = without_brackets.split(" - ");
+    let head = segments.next().unwrap_or("").trim();
+    let tail: Vec<&str> = segments.map(str::trim).collect();
+    let tail_is_version = !tail.is_empty() && tail.iter().all(|seg| is_version_marker(seg));
+    let chosen = if tail_is_version {
+        head
+    } else {
+        without_brackets.as_str()
+    };
+
+    chosen
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn primary_artist_tag(artist: &str) -> String {
+    artist
+        .split([';', ','])
+        .next()
+        .unwrap_or(artist)
+        .trim()
+        .to_lowercase()
+}
+
+/// Scores how related `candidate` is to `current` using the tags the library
+/// actually stores: shared genre terms, then the same artist, then the same
+/// album. Returns 0 for the current track and for any track with the same base
+/// title, so a near-duplicate upload can never be selected.
+pub fn similarity_score(current: &Track, candidate: &Track) -> u32 {
+    if candidate.id == current.id {
+        return 0;
+    }
+    let current_title = base_song_title(&current.title);
+    if !current_title.is_empty() && current_title == base_song_title(&candidate.title) {
+        return 0;
+    }
+
+    let mut score = 0u32;
+
+    let current_artist = primary_artist_tag(&current.artist);
+    if !current_artist.is_empty() && current_artist == primary_artist_tag(&candidate.artist) {
+        score += 8;
+    }
+
+    if !current.album.trim().is_empty()
+        && current
+            .album
+            .trim()
+            .eq_ignore_ascii_case(candidate.album.trim())
+    {
+        score += 4;
+    }
+
+    let current_terms = genre_terms(current.genre.as_deref().unwrap_or(""));
+    if !current_terms.is_empty() {
+        let mut genre_matches = 0u32;
+        for term in genre_terms(candidate.genre.as_deref().unwrap_or("")) {
+            if current_terms.contains(&term) {
+                genre_matches += 1;
+            }
+        }
+        score += (genre_matches * 3).min(6);
+    }
+
+    score
+}
+
+/// Picks the next library track to play after `current_id` ends, using the tags
+/// of the finished song. Returns `None` when nothing in the library shares a
+/// genre, artist or album with it: stopping is more honest than playing an
+/// unrelated song.
+pub async fn suggest_next_track(
+    pool: &SqlitePool,
+    current_id: &str,
+) -> Result<Option<Track>, String> {
+    let current_row = sqlx::query(
+        "SELECT id, title, artist, album, genre, play_count FROM tracks WHERE id = ? AND is_deleted = 0"
+    )
+    .bind(current_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Database error fetching current track: {e}"))?;
+
+    let Some(cur_row) = current_row else {
+        return Ok(None);
+    };
+
+    let current = Track {
+        id: cur_row.get("id"),
+        title: cur_row.get("title"),
+        artist: cur_row.get("artist"),
+        album: cur_row.get("album"),
+        album_artist: None,
+        duration_ms: 0,
+        artwork_uri: None,
+        source_kind: "local".to_string(),
+        provider_id: None,
+        file_uri: None,
+        release_year: None,
+        track_number: None,
+        disc_number: None,
+        genre: cur_row.get("genre"),
+        is_liked: false,
+        play_count: cur_row.get("play_count"),
+        date_added: String::new(),
+    };
+
+    let recent_ids: Vec<String> =
+        sqlx::query_scalar("SELECT track_id FROM recent_plays ORDER BY played_at DESC LIMIT 10")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id, source_kind, title, artist, album, album_artist,
+            duration_ms, artwork_uri, file_uri, provider_id,
+            release_year, track_number, disc_number, genre,
+            play_count, date_added
+        FROM tracks
+        WHERE is_deleted = 0
+          AND id != ?
+          AND (
+              artist = ?
+              OR (album = ? AND album != '')
+              OR (genre IS NOT NULL AND genre != '')
+          )
+        ORDER BY play_count ASC
+        LIMIT 250
+        "#,
+    )
+    .bind(current_id)
+    .bind(&current.artist)
+    .bind(&current.album)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch candidates: {e}"))?;
+
+    let candidates: Vec<Track> = rows
+        .into_iter()
+        .map(|row| Track {
+            id: row.get("id"),
+            source_kind: row.get("source_kind"),
+            title: row.get("title"),
+            artist: row.get("artist"),
+            album: row.get("album"),
+            album_artist: row.get("album_artist"),
+            duration_ms: row.get("duration_ms"),
+            artwork_uri: row.get("artwork_uri"),
+            file_uri: row.get("file_uri"),
+            provider_id: row.get("provider_id"),
+            release_year: row.get("release_year"),
+            track_number: row.get("track_number"),
+            disc_number: row.get("disc_number"),
+            genre: row.get("genre"),
+            is_liked: false,
+            play_count: row.get("play_count"),
+            date_added: row.get("date_added"),
+        })
+        .collect();
+
+    let mut best: Option<(&Track, u32)> = None;
+    for candidate in &candidates {
+        let mut score = similarity_score(&current, candidate);
+        if score == 0 {
+            continue;
+        }
+
+        if let Some(pos) = recent_ids.iter().position(|id| id == &candidate.id) {
+            let penalty = (10 - pos as u32).min(score);
+            score = score.saturating_sub(penalty);
+            if score == 0 {
+                continue;
+            }
+        }
+
+        let better = match best {
+            None => true,
+            Some((best_track, best_score)) => {
+                score > best_score
+                    || (score == best_score
+                        && (candidate.play_count < best_track.play_count
+                            || (candidate.play_count == best_track.play_count
+                                && candidate.title.to_lowercase()
+                                    < best_track.title.to_lowercase())))
+            }
+        };
+        if better {
+            best = Some((candidate, score));
+        }
+    }
+
+    Ok(best.map(|(track, _)| track.clone()))
+}
+
+/// Soft-deletes a track from the local library (`is_deleted = 1`).
+/// Also cleans up any associations in `liked_tracks`, `recent_plays`, and `playlist_tracks`,
+/// and compacts the playlist positions for any affected playlists.
+/// Note: The actual audio file on the user's filesystem is NEVER touched or deleted.
+/// Soft-deletes multiple tracks from the local library (`is_deleted = 1`) in a single transaction.
+/// Also cleans up any associations in `liked_tracks`, `recent_plays`, and `playlist_tracks`,
+/// and compacts the playlist positions for any affected playlists.
+/// Note: The actual audio files on the user's filesystem are NEVER touched or deleted.
+pub async fn delete_tracks(pool: &SqlitePool, track_ids: &[String]) -> Result<usize, String> {
+    if track_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
+    let mut deleted_count = 0;
+    let mut all_affected_playlists = std::collections::HashSet::new();
+
+    for track_id in track_ids {
+        let trk = sqlx::query(
+            "SELECT title, artist, album, duration_ms, content_hash FROM tracks WHERE id = ? AND is_deleted = 0",
+        )
+        .bind(track_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to query track: {e}"))?;
+
+        let Some(r) = trk else {
+            continue;
+        };
+
+        let title = r.get::<String, _>("title");
+        let artist = r.get::<String, _>("artist");
+        let album = r.get::<String, _>("album");
+        let duration_ms = r.get::<i64, _>("duration_ms");
+        let content_hash = r.get::<Option<String>, _>("content_hash");
+
+        // Soft delete track
+        sqlx::query("UPDATE tracks SET is_deleted = 1 WHERE id = ?")
+            .bind(track_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to soft-delete track: {e}"))?;
+
+        deleted_count += 1;
+
+        // Check if was liked, and if so record unlike in outbox
+        let was_liked = sqlx::query("SELECT 1 FROM liked_tracks WHERE track_id = ?")
+            .bind(track_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to check liked tracks: {e}"))?
+            .is_some();
+
+        if was_liked {
+            sqlx::query("DELETE FROM liked_tracks WHERE track_id = ?")
+                .bind(track_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("Failed to remove track from liked_tracks: {e}"))?;
+
+            let _ = crate::services::sync::outbox::OutboxService::record_track_like_status(
+                &mut *tx,
+                track_id,
+                content_hash.as_deref(),
+                &title,
+                &artist,
+                &album,
+                duration_ms,
+                false,
+            )
+            .await;
+        }
+
+        // Remove from recent plays
+        sqlx::query("DELETE FROM recent_plays WHERE track_id = ?")
+            .bind(track_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to remove from recent plays: {e}"))?;
+
+        // Find affected playlists
+        let affected: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT playlist_id FROM playlist_tracks WHERE track_id = ?",
+        )
+        .bind(track_id)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap_or_default();
+
+        for pid in affected {
+            all_affected_playlists.insert(pid);
+        }
+
+        // Remove from playlist_tracks
+        sqlx::query("DELETE FROM playlist_tracks WHERE track_id = ?")
+            .bind(track_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to remove track from playlists: {e}"))?;
+    }
+
+    // Recompact positions for all affected playlists once
+    for pid in &all_affected_playlists {
+        let entry_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position ASC",
+        )
+        .bind(pid)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap_or_default();
+
+        for (new_pos, entry_id) in entry_ids.into_iter().enumerate() {
+            let _ = sqlx::query("UPDATE playlist_tracks SET position = ? WHERE id = ?")
+                .bind(new_pos as i64)
+                .bind(&entry_id)
+                .execute(&mut *tx)
+                .await;
+        }
+
+        let _ = sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(pid)
+            .execute(&mut *tx)
+            .await;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit track deletions: {e}"))?;
+
+    Ok(deleted_count)
+}
+
+/// Soft-deletes a single track from the local library (`is_deleted = 1`).
+pub async fn delete_track(pool: &SqlitePool, track_id: &str) -> Result<(), String> {
+    delete_tracks(pool, &[track_id.to_string()])
+        .await
+        .map(|_| ())
+}
+
+/// Removes all tracks from a playlist without deleting the playlist itself.
+pub async fn clear_playlist_tracks(pool: &SqlitePool, playlist_id: &str) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
+    let playlist_exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM playlists WHERE id = ? AND is_deleted = 0")
+            .bind(playlist_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to verify playlist: {e}"))?;
+
+    if playlist_exists.is_none() {
+        return Err(format!("Playlist '{playlist_id}' not found or deleted"));
+    }
+
+    sqlx::query("DELETE FROM playlist_tracks WHERE playlist_id = ?")
+        .bind(playlist_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to clear playlist tracks: {e}"))?;
+
+    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(playlist_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to update playlist timestamp: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit clear playlist: {e}"))?;
+
+    Ok(())
+}
+
+pub async fn delete_recent_play(pool: &SqlitePool, track_id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM recent_plays WHERE track_id = ?")
+        .bind(track_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to delete recent play: {e}"))?;
+    Ok(())
+}
+
+pub async fn clear_recent_plays(pool: &SqlitePool) -> Result<(), String> {
+    sqlx::query("DELETE FROM recent_plays")
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to clear recent plays: {e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -845,8 +1684,210 @@ mod tests {
         .unwrap();
     }
 
+    fn empty_track(id: &str, title: &str, artist: &str, album: &str, genre: Option<&str>) -> Track {
+        Track {
+            id: id.to_string(),
+            title: title.to_string(),
+            artist: artist.to_string(),
+            album: album.to_string(),
+            album_artist: None,
+            duration_ms: 200_000,
+            artwork_uri: None,
+            source_kind: "local".to_string(),
+            provider_id: None,
+            file_uri: None,
+            release_year: None,
+            track_number: None,
+            disc_number: None,
+            genre: genre.map(str::to_string),
+            is_liked: false,
+            play_count: 0,
+            date_added: String::new(),
+        }
+    }
+
+    #[test]
+    fn similarity_prefers_shared_genre_terms() {
+        let current = empty_track("a", "Instant Crush", "Daft Punk", "RAM", Some("Rock; Pop"));
+        let shared_genre = empty_track("b", "Nightcall", "Kavinsky", "OutRun", Some("Pop"));
+        let same_artist = empty_track("c", "Get Lucky", "Daft Punk", "RAM", None);
+        let unrelated = empty_track("d", "Ambient Piece", "Someone Else", "Other", None);
+
+        assert!(similarity_score(&current, &shared_genre) > similarity_score(&current, &unrelated));
+        assert!(similarity_score(&current, &same_artist) > similarity_score(&current, &unrelated));
+        assert_eq!(similarity_score(&current, &unrelated), 0);
+        assert_eq!(similarity_score(&current, &current), 0);
+    }
+
+    #[test]
+    fn similarity_rejects_near_identical_titles() {
+        let current = empty_track("a", "Die For You", "VALORANT", "Die For You", Some("Pop"));
+        let remix = empty_track(
+            "b",
+            "Die For You (Remix)",
+            "VALORANT",
+            "Die For You",
+            Some("Pop"),
+        );
+        let sped_up = empty_track(
+            "c",
+            "Die For You - Sped Up",
+            "VALORANT",
+            "Die For You",
+            Some("Pop"),
+        );
+
+        assert_eq!(similarity_score(&current, &remix), 0);
+        assert_eq!(similarity_score(&current, &sped_up), 0);
+    }
+
+    #[tokio::test]
+    async fn suggest_next_track_uses_tags_and_never_repeats_the_name() {
+        let pool = create_test_db().await;
+        for (id, title, artist, album, genre) in [
+            ("seed", "Die For You", "VALORANT", "Die For You", "Pop"),
+            (
+                "dup",
+                "Die For You (Remix)",
+                "VALORANT",
+                "Die For You",
+                "Pop",
+            ),
+            ("pop", "Sugar", "Maroon 5", "V", "Pop"),
+            ("rock", "Bones", "Imagine Dragons", "Mercury", "Rock"),
+        ] {
+            sqlx::query(
+                "INSERT INTO tracks (id, source_kind, title, artist, album, genre) VALUES (?, 'local', ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(title)
+            .bind(artist)
+            .bind(album)
+            .bind(genre)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let next = suggest_next_track(&pool, "seed").await.unwrap();
+        assert_eq!(next.map(|track| track.id), Some("pop".to_string()));
+    }
+
+    #[tokio::test]
+    async fn suggest_next_track_returns_none_without_related_tags() {
+        let pool = create_test_db().await;
+        for (id, title, artist, album, genre) in [
+            ("seed", "Sea Song", "A", "One", "Ambient"),
+            ("other", "Metal Song", "B", "Two", "Metal"),
+        ] {
+            sqlx::query(
+                "INSERT INTO tracks (id, source_kind, title, artist, album, genre) VALUES (?, 'local', ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(title)
+            .bind(artist)
+            .bind(album)
+            .bind(genre)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        assert!(suggest_next_track(&pool, "seed").await.unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn test_playlist_lifecycle() {
+        let pool = create_test_db().await;
+        let playlist = create_playlist(&pool, "Imported", "Imported from Spotify")
+            .await
+            .unwrap();
+
+        add_provider_track_to_playlist(
+            &pool,
+            &playlist.id,
+            "youtube_music",
+            "dQw4w9WgXcQ",
+            "Never Gonna Give You Up",
+            "Rick Astley",
+            "Whenever You Need Somebody",
+            213_000,
+            Some("https://example.test/cover.jpg"),
+        )
+        .await
+        .unwrap();
+
+        let tracks = get_playlist_tracks(&pool, &playlist.id).await.unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "ytmusic:dQw4w9WgXcQ");
+        assert_eq!(tracks[0].source_kind, "provider");
+        assert_eq!(tracks[0].provider_id.as_deref(), Some("youtube_music"));
+        assert_eq!(tracks[0].title, "Never Gonna Give You Up");
+        assert_eq!(
+            tracks[0].artwork_uri.as_deref(),
+            Some("https://example.test/cover.jpg")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_local_track_id_requires_artist_overlap() {
+        let pool = create_test_db().await;
+        sqlx::query(
+            "INSERT INTO tracks (id, source_kind, title, artist, album) VALUES ('t1', 'local', 'Instant Crush', 'Daft Punk', 'Random Access Memories')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            find_local_track_id(&pool, "Instant Crush", "Daft Punk, Julian Casablancas").await,
+            Some("t1".to_string())
+        );
+        assert_eq!(
+            find_local_track_id(&pool, "Instant Crush", "Some Cover Band").await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recent_plays_records_and_dedupes() {
+        let pool = create_test_db().await;
+        let track = crate::domain::Track {
+            id: "ytmusic:dQw4w9WgXcQ".to_string(),
+            title: "Never Gonna Give You Up".to_string(),
+            artist: "Rick Astley".to_string(),
+            album: String::new(),
+            album_artist: None,
+            duration_ms: 213_000,
+            artwork_uri: Some("https://example.test/cover.jpg".to_string()),
+            source_kind: "provider".to_string(),
+            provider_id: Some("youtube_music".to_string()),
+            file_uri: None,
+            release_year: None,
+            track_number: None,
+            disc_number: None,
+            genre: None,
+            is_liked: false,
+            play_count: 0,
+            date_added: String::new(),
+        };
+
+        record_recent_play(&pool, &track).await.unwrap();
+        record_recent_play(&pool, &track).await.unwrap();
+
+        let rows = get_recent_plays(&pool, 10).await.unwrap();
+        assert_eq!(rows.len(), 1, "a replay must update, not duplicate");
+        assert_eq!(rows[0].id, "ytmusic:dQw4w9WgXcQ");
+        assert_eq!(rows[0].source_kind, "provider");
+        assert_eq!(rows[0].play_count, 2);
+        assert_eq!(
+            rows[0].artwork_uri.as_deref(),
+            Some("https://example.test/cover.jpg")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_playlist_lifecycle_original() {
         let pool = create_test_db().await;
 
         let created = create_playlist(&pool, "Night Jazz", "Late night curation")
@@ -1186,5 +2227,150 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_delete_track() {
+        let pool = create_test_db().await;
+        insert_dummy_track(&pool, "t1", "Track 1").await;
+        insert_dummy_track(&pool, "t2", "Track 2").await;
+
+        toggle_track_liked(&pool, "t1").await.unwrap();
+        assert_eq!(get_liked_tracks(&pool).await.unwrap().len(), 1);
+
+        let trk1 = empty_track("t1", "Track 1", "Artist", "Album", None);
+        record_recent_play(&pool, &trk1).await.unwrap();
+        assert_eq!(get_recent_plays(&pool, 10).await.unwrap().len(), 1);
+
+        let pl = create_playlist(&pool, "Test PL", "Desc").await.unwrap();
+        add_track_to_playlist(&pool, &pl.id, "t1").await.unwrap();
+        add_track_to_playlist(&pool, &pl.id, "t2").await.unwrap();
+        assert_eq!(get_playlist_tracks(&pool, &pl.id).await.unwrap().len(), 2);
+
+        delete_track(&pool, "t1").await.unwrap();
+
+        let all_tracks = get_all_tracks(&pool).await.unwrap();
+        assert_eq!(all_tracks.len(), 1);
+        assert_eq!(all_tracks[0].id, "t2");
+
+        assert_eq!(get_liked_tracks(&pool).await.unwrap().len(), 0);
+        assert_eq!(get_recent_plays(&pool, 10).await.unwrap().len(), 0);
+
+        let pl_tracks = get_playlist_tracks(&pool, &pl.id).await.unwrap();
+        assert_eq!(pl_tracks.len(), 1);
+        assert_eq!(pl_tracks[0].id, "t2");
+    }
+
+    #[tokio::test]
+    async fn test_clear_playlist_tracks() {
+        let pool = create_test_db().await;
+        insert_dummy_track(&pool, "t1", "Track 1").await;
+        insert_dummy_track(&pool, "t2", "Track 2").await;
+
+        let pl = create_playlist(&pool, "My Mix", "Desc").await.unwrap();
+        add_track_to_playlist(&pool, &pl.id, "t1").await.unwrap();
+        add_track_to_playlist(&pool, &pl.id, "t2").await.unwrap();
+        assert_eq!(get_playlist_tracks(&pool, &pl.id).await.unwrap().len(), 2);
+
+        clear_playlist_tracks(&pool, &pl.id).await.unwrap();
+        assert_eq!(get_playlist_tracks(&pool, &pl.id).await.unwrap().len(), 0);
+
+        let playlists = get_playlists(&pool).await.unwrap();
+        assert_eq!(playlists.len(), 1);
+        assert_eq!(playlists[0].id, pl.id);
+    }
+
+    #[tokio::test]
+    async fn test_recent_plays_deletion() {
+        let pool = create_test_db().await;
+        let trk1 = empty_track("t1", "Track 1", "Artist", "Album", None);
+        let trk2 = empty_track("t2", "Track 2", "Artist", "Album", None);
+
+        record_recent_play(&pool, &trk1).await.unwrap();
+        record_recent_play(&pool, &trk2).await.unwrap();
+        assert_eq!(get_recent_plays(&pool, 10).await.unwrap().len(), 2);
+
+        delete_recent_play(&pool, "t1").await.unwrap();
+        let recents = get_recent_plays(&pool, 10).await.unwrap();
+        assert_eq!(recents.len(), 1);
+        assert_eq!(recents[0].id, "t2");
+
+        clear_recent_plays(&pool).await.unwrap();
+        assert_eq!(get_recent_plays(&pool, 10).await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_tracks_batch() {
+        let pool = create_test_db().await;
+        insert_dummy_track(&pool, "t1", "Track 1").await;
+        insert_dummy_track(&pool, "t2", "Track 2").await;
+        insert_dummy_track(&pool, "t3", "Track 3").await;
+
+        let pl = create_playlist(&pool, "Batch PL", "Desc").await.unwrap();
+        add_track_to_playlist(&pool, &pl.id, "t1").await.unwrap();
+        add_track_to_playlist(&pool, &pl.id, "t2").await.unwrap();
+        add_track_to_playlist(&pool, &pl.id, "t3").await.unwrap();
+
+        let count = delete_tracks(&pool, &["t1".to_string(), "t3".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let remaining = get_all_tracks(&pool).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "t2");
+
+        let pl_tracks = get_playlist_tracks(&pool, &pl.id).await.unwrap();
+        assert_eq!(pl_tracks.len(), 1);
+        assert_eq!(pl_tracks[0].id, "t2");
+    }
+
+    #[tokio::test]
+    async fn test_unlike_tracks_batch() {
+        let pool = create_test_db().await;
+        insert_dummy_track(&pool, "t1", "Track 1").await;
+        insert_dummy_track(&pool, "t2", "Track 2").await;
+        insert_dummy_track(&pool, "t3", "Track 3").await;
+
+        toggle_track_liked(&pool, "t1").await.unwrap();
+        toggle_track_liked(&pool, "t2").await.unwrap();
+        toggle_track_liked(&pool, "t3").await.unwrap();
+
+        let liked = get_liked_tracks(&pool).await.unwrap();
+        assert_eq!(liked.len(), 3);
+
+        let unliked_count = unlike_tracks(&pool, &["t1".to_string(), "t3".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(unliked_count, 2);
+
+        let remaining_liked = get_liked_tracks(&pool).await.unwrap();
+        assert_eq!(remaining_liked.len(), 1);
+        assert_eq!(remaining_liked[0].id, "t2");
+    }
+
+    #[tokio::test]
+    async fn test_remove_tracks_from_playlist_batch() {
+        let pool = create_test_db().await;
+        insert_dummy_track(&pool, "t1", "Track 1").await;
+        insert_dummy_track(&pool, "t2", "Track 2").await;
+        insert_dummy_track(&pool, "t3", "Track 3").await;
+        insert_dummy_track(&pool, "t4", "Track 4").await;
+
+        let pl = create_playlist(&pool, "Batch PL", "Desc").await.unwrap();
+        add_track_to_playlist(&pool, &pl.id, "t1").await.unwrap();
+        add_track_to_playlist(&pool, &pl.id, "t2").await.unwrap();
+        add_track_to_playlist(&pool, &pl.id, "t3").await.unwrap();
+        add_track_to_playlist(&pool, &pl.id, "t4").await.unwrap();
+
+        // Remove positions 0 (t1) and 2 (t3). Remaining should be t2 (pos 0) and t4 (pos 1).
+        remove_tracks_from_playlist(&pool, &pl.id, &[0, 2])
+            .await
+            .unwrap();
+
+        let pl_tracks = get_playlist_tracks(&pool, &pl.id).await.unwrap();
+        assert_eq!(pl_tracks.len(), 2);
+        assert_eq!(pl_tracks[0].id, "t2");
+        assert_eq!(pl_tracks[1].id, "t4");
     }
 }

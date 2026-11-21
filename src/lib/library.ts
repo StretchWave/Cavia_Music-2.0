@@ -52,9 +52,30 @@ export async function getAlbums(): Promise<Album[]> {
   return invoke<Album[]>('get_albums');
 }
 
+/**
+ * Next library track chosen from the finished track's tags (shared genre
+ * terms, then artist, then album). Null means the library holds nothing
+ * related and playback should stop there.
+ */
+export async function suggestNextTrack(trackId: string): Promise<Track | null> {
+  if (!isNativeApp()) return null;
+  return invoke<Track | null>('suggest_next_track', { trackId });
+}
+
 export async function getArtists(): Promise<Artist[]> {
   if (!isNativeApp()) return [];
   return invoke<Artist[]>('get_artists');
+}
+
+export async function getRecentPlays(): Promise<Track[]> {
+  if (!isNativeApp()) return [];
+  return invoke<Track[]>('get_recent_plays');
+}
+
+/** Records that a track started playing. Never called with a search query. */
+export async function recordRecentPlay(track: Track): Promise<void> {
+  if (!isNativeApp()) return;
+  await invoke('record_recent_play', { track });
 }
 
 export async function getLikedTracks(): Promise<Track[]> {
@@ -84,12 +105,60 @@ export async function deletePlaylist(playlistId: string): Promise<void> {
   return invoke<void>('delete_playlist', { playlistId });
 }
 
+export async function clearPlaylistTracks(playlistId: string): Promise<void> {
+  return invoke<void>('clear_playlist_tracks', { playlistId });
+}
+
+export async function deleteTrack(trackId: string): Promise<void> {
+  return invoke<void>('delete_track', { trackId });
+}
+
+export async function deleteTracks(trackIds: string[]): Promise<number> {
+  return invoke<number>('delete_tracks', { trackIds });
+}
+
+export async function unlikeTracks(trackIds: string[]): Promise<number> {
+  return invoke<number>('unlike_tracks', { trackIds });
+}
+
+export async function clearRecentPlays(): Promise<void> {
+  return invoke<void>('clear_recent_plays');
+}
+
+export async function deleteRecentPlay(trackId: string): Promise<void> {
+  return invoke<void>('delete_recent_play', { trackId });
+}
+
 export async function addTrackToPlaylist(playlistId: string, trackId: string): Promise<string> {
   return invoke<string>('add_track_to_playlist', { playlistId, trackId });
 }
 
+export async function addProviderTrackToPlaylist(
+  playlistId: string,
+  track: Track
+): Promise<void> {
+  const providerTrackId = track.id.replace(/^ytmusic:/, '');
+  return invoke<void>('add_provider_track_to_playlist', {
+    playlistId,
+    providerId: track.providerId || 'youtube_music',
+    providerTrackId,
+    title: track.title,
+    artist: track.artist,
+    album: track.album || '',
+    durationMs: track.durationMs || 0,
+    artworkUri: track.artworkUri || null,
+  });
+}
+
 export async function removeTrackFromPlaylist(playlistId: string, position: number): Promise<void> {
   return invoke<void>('remove_track_from_playlist', { playlistId, position });
+}
+
+export async function removeTracksFromPlaylist(
+  playlistId: string,
+  positions: number[]
+): Promise<void> {
+  return invoke<void>('remove_tracks_from_playlist', { playlistId, positions });
 }
 
 export async function reorderPlaylistTracks(

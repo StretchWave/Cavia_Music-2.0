@@ -79,6 +79,7 @@ impl SupabaseRestClient {
         supabase_url: &str,
         anon_key: &str,
         access_token: &str,
+        user_id: &str,
         device_id: &str,
         device_name: &str,
         platform: &str,
@@ -87,10 +88,10 @@ impl SupabaseRestClient {
         let endpoint = format!("{clean_url}/rest/v1/cloud_devices");
 
         let body = serde_json::json!({
+            "user_id": user_id,
             "device_id": device_id,
             "device_name": device_name,
-            "platform": platform,
-            "last_seen_at": "now()"
+            "platform": platform
         });
 
         let resp = self
@@ -105,7 +106,11 @@ impl SupabaseRestClient {
             .await
             .map_err(|e| format!("Failed to register device: {e}"))?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err("Your session has expired. Please sign in again.".to_string());
+        }
+        if !status.is_success() {
             let err = resp.text().await.unwrap_or_default();
             return Err(format!("Device registration failed: {err}"));
         }
@@ -118,6 +123,7 @@ impl SupabaseRestClient {
         supabase_url: &str,
         anon_key: &str,
         access_token: &str,
+        user_id: &str,
         device_id: &str,
         operation_id: &str,
         entity_type: &str,
@@ -126,10 +132,14 @@ impl SupabaseRestClient {
         payload: &serde_json::Value,
     ) -> Result<(), String> {
         let clean_url = supabase_url.trim_end_matches('/');
-        let endpoint = format!("{clean_url}/rest/v1/cloud_sync_events");
+        // PostgREST needs the unique key named explicitly: without on_conflict a
+        // retried push returns 409 and the outbox entry would never clear.
+        let endpoint =
+            format!("{clean_url}/rest/v1/cloud_sync_events?on_conflict=user_id,operation_id");
 
         let body = serde_json::json!({
             "operation_id": operation_id,
+            "user_id": user_id,
             "device_id": device_id,
             "entity_type": entity_type,
             "entity_id": entity_id,
@@ -150,6 +160,9 @@ impl SupabaseRestClient {
             .map_err(|e| format!("Network error pushing sync event: {e}"))?;
 
         let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err("Your session has expired. Please sign in again.".to_string());
+        }
         if !status.is_success() {
             let err = resp.text().await.unwrap_or_default();
             return Err(format!("Failed to push sync event ({status}): {err}"));
@@ -163,19 +176,19 @@ impl SupabaseRestClient {
                     .get("description")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let updated_at = payload
-                    .get("clientUpdatedAt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("now()");
+                let updated_at = payload.get("clientUpdatedAt").and_then(|v| v.as_str());
 
                 let pl_endpoint = format!("{clean_url}/rest/v1/cloud_playlists");
-                let pl_body = serde_json::json!({
+                let mut pl_body = serde_json::json!({
                     "id": entity_id,
+                    "user_id": user_id,
                     "name": name,
                     "description": desc,
-                    "is_deleted": false,
-                    "client_updated_at": updated_at
+                    "is_deleted": false
                 });
+                if let Some(updated_at) = updated_at {
+                    pl_body["client_updated_at"] = serde_json::json!(updated_at);
+                }
 
                 let _ = self
                     .client
@@ -229,6 +242,7 @@ impl SupabaseRestClient {
                 let pt_endpoint = format!("{clean_url}/rest/v1/cloud_playlist_tracks");
                 let pt_body = serde_json::json!({
                     "id": entity_id,
+                    "user_id": user_id,
                     "playlist_id": pl_id,
                     "cloud_track_id": cloud_track_id,
                     "title": title,
@@ -281,6 +295,7 @@ impl SupabaseRestClient {
 
                 let lt_endpoint = format!("{clean_url}/rest/v1/cloud_liked_tracks");
                 let lt_body = serde_json::json!({
+                    "user_id": user_id,
                     "cloud_track_id": entity_id,
                     "title": title,
                     "artist": artist,
@@ -329,7 +344,11 @@ impl SupabaseRestClient {
             .await
             .map_err(|e| format!("Failed to pull sync events: {e}"))?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err("Your session has expired. Please sign in again.".to_string());
+        }
+        if !status.is_success() {
             let err = resp.text().await.unwrap_or_default();
             return Err(format!("Pull events query failed: {err}"));
         }

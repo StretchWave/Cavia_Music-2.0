@@ -26,7 +26,7 @@ import { Button } from '../../components/Button';
 import { Modal } from '../../components/Modal';
 import type { PlatformHealth } from '../../lib/platform';
 import type { MotionSetting } from '../../lib/motion';
-import type { SyncAccountStatus, SyncConfigDTO } from '../../lib/types';
+import type { SyncAccountStatus } from '../../lib/types';
 import {
   getArtworkCacheSummary,
   cleanOrphanedArtwork,
@@ -45,8 +45,6 @@ import {
   toggleSync,
   syncNow,
   deleteCloudData,
-  getSyncConfig,
-  setSyncConfig,
 } from '../../lib/sync';
 
 interface SettingsViewProps {
@@ -88,7 +86,6 @@ export const SettingsView = memo(function SettingsView({
 
   // Cloud sync
   const [syncStatus, setSyncStatus] = useState<SyncAccountStatus | null>(null);
-  const [, setSyncConfigState] = useState<SyncConfigDTO | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -97,9 +94,6 @@ export const SettingsView = memo(function SettingsView({
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [showDeleteCloudModal, setShowDeleteCloudModal] = useState(false);
   const [isDeletingCloud, setIsDeletingCloud] = useState(false);
-  const [configUrlInput, setConfigUrlInput] = useState('');
-  const [configKeyInput, setConfigKeyInput] = useState('');
-  const [isSavingConfig, setIsSavingConfig] = useState(false);
 
   const fetchArtworkSummary = async () => {
     setArtworkLoading(true);
@@ -116,13 +110,8 @@ export const SettingsView = memo(function SettingsView({
 
   const fetchSyncInfo = async () => {
     try {
-      const [status, cfg] = await Promise.all([getSyncStatus(), getSyncConfig()]);
+      const status = await getSyncStatus();
       setSyncStatus(status);
-      setSyncConfigState(cfg);
-      if (cfg) {
-        setConfigUrlInput(cfg.supabaseUrl);
-        setConfigKeyInput(cfg.supabaseAnonKey);
-      }
     } catch (e) {
       console.error('Failed to load sync info:', e);
     }
@@ -147,15 +136,10 @@ export const SettingsView = memo(function SettingsView({
         if (active) setArtworkError(err instanceof Error ? err.message : String(err));
       });
 
-    Promise.all([getSyncStatus(), getSyncConfig()])
-      .then(([status, cfg]) => {
+    getSyncStatus()
+      .then((status) => {
         if (!active) return;
         setSyncStatus(status);
-        setSyncConfigState(cfg);
-        if (cfg) {
-          setConfigUrlInput(cfg.supabaseUrl);
-          setConfigKeyInput(cfg.supabaseAnonKey);
-        }
       })
       .catch((e) => console.error('Failed to load sync info:', e));
 
@@ -167,12 +151,13 @@ export const SettingsView = memo(function SettingsView({
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!authEmail.trim() || !authPassword) return;
+    const password = authPassword;
+    setAuthPassword('');
     setIsAuthenticating(true);
     setSyncError(null);
     try {
-      const status = await syncLogin(authEmail.trim(), authPassword);
+      const status = await syncLogin(authEmail.trim(), password);
       setSyncStatus(status);
-      setAuthPassword('');
       setSyncSuccessMsg('Signed in');
       setTimeout(() => setSyncSuccessMsg(null), 3000);
     } catch (err) {
@@ -184,12 +169,13 @@ export const SettingsView = memo(function SettingsView({
 
   const handleSignup = async () => {
     if (!authEmail.trim() || !authPassword) return;
+    const password = authPassword;
+    setAuthPassword('');
     setIsAuthenticating(true);
     setSyncError(null);
     try {
-      const status = await syncSignup(authEmail.trim(), authPassword);
+      const status = await syncSignup(authEmail.trim(), password);
       setSyncStatus(status);
-      setAuthPassword('');
       setSyncSuccessMsg('Account created');
       setTimeout(() => setSyncSuccessMsg(null), 3000);
     } catch (err) {
@@ -249,21 +235,6 @@ export const SettingsView = memo(function SettingsView({
       setSyncError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsDeletingCloud(false);
-    }
-  };
-
-  const handleSaveConfig = async () => {
-    setIsSavingConfig(true);
-    setSyncError(null);
-    try {
-      await setSyncConfig(configUrlInput.trim(), configKeyInput.trim());
-      setSyncSuccessMsg('Supabase configuration saved');
-      setTimeout(() => setSyncSuccessMsg(null), 3000);
-      await fetchSyncInfo();
-    } catch (err) {
-      setSyncError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setIsSavingConfig(false);
     }
   };
 
@@ -704,6 +675,13 @@ export const SettingsView = memo(function SettingsView({
                 </div>
               </div>
 
+              {syncStatus && !syncStatus.backendConfigured && (
+                <p className="text-muted-xs" role="status">
+                  Account sync is unavailable right now. Everything else in Cavia keeps working
+                  offline.
+                </p>
+              )}
+
               {syncStatus?.authenticated ? (
                 <div className="settings-stack">
                   <div className="setting-status-line">
@@ -898,50 +876,6 @@ export const SettingsView = memo(function SettingsView({
               )}
             </div>
 
-            <div className="settings-card">
-              <div className="card-head">
-                <HardDrive size={18} className="card-icon text-muted" />
-                <div>
-                  <h3>Supabase configuration</h3>
-                  <p>Public endpoint and anonymous key.</p>
-                </div>
-              </div>
-
-              <div className="settings-stack settings-stack-narrow">
-                <div className="form-field">
-                  <label htmlFor="supabase-url">Project URL</label>
-                  <input
-                    id="supabase-url"
-                    type="text"
-                    className="cavia-text-input font-mono"
-                    placeholder="https://your-project.supabase.co"
-                    value={configUrlInput}
-                    onChange={(e) => setConfigUrlInput(e.target.value)}
-                    disabled={isSavingConfig}
-                  />
-                </div>
-
-                <div className="form-field">
-                  <label htmlFor="supabase-key">Anonymous key</label>
-                  <input
-                    id="supabase-key"
-                    type="password"
-                    className="cavia-text-input font-mono"
-                    placeholder="eyJhbGciOi…"
-                    value={configKeyInput}
-                    onChange={(e) => setConfigKeyInput(e.target.value)}
-                    disabled={isSavingConfig}
-                  />
-                  <p className="text-muted-xs">Never use a service-role key here.</p>
-                </div>
-
-                <div>
-                  <Button variant="outline" size="sm" onClick={handleSaveConfig} disabled={isSavingConfig}>
-                    {isSavingConfig ? 'Saving…' : 'Save configuration'}
-                  </Button>
-                </div>
-              </div>
-            </div>
           </section>
 
           <section

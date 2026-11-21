@@ -18,6 +18,11 @@ export async function searchYouTubeMusic(query: string): Promise<YtMusicTrack[]>
   return invoke<YtMusicTrack[]>('ytmusic_search', { query: trimmed });
 }
 
+export async function fetchRelatedYouTubeMusic(videoId: string): Promise<YtMusicTrack[]> {
+  if (!isTauri()) return [];
+  return invoke<YtMusicTrack[]>('ytmusic_related', { videoId });
+}
+
 export async function playYouTubeMusic(track: YtMusicTrack): Promise<void> {
   return invoke<void>('ytmusic_play', {
     videoId: track.videoId,

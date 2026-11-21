@@ -13,7 +13,9 @@ use walkdir::WalkDir;
 use crate::domain::{ScanProgress, ScanResult};
 use crate::services::metadata::extract_metadata;
 
-const SUPPORTED_EXTENSIONS: &[&str] = &["flac", "mp3", "wav", "m4a", "aac", "ogg", "aiff", "alac"];
+const SUPPORTED_EXTENSIONS: &[&str] = &[
+    "flac", "mp3", "wav", "m4a", "aac", "ogg", "opus", "aiff", "wma",
+];
 
 pub fn calculate_file_hash(path: &Path) -> Result<String, std::io::Error> {
     let mut file = File::open(path)?;
@@ -34,7 +36,7 @@ fn determine_mime_type(ext: &str) -> &'static str {
         "flac" => "audio/flac",
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",
-        "m4a" | "aac" | "alac" => "audio/mp4",
+        "m4a" | "aac" => "audio/mp4",
         "ogg" => "audio/ogg",
         "opus" => "audio/opus",
         "aiff" => "audio/aiff",
@@ -252,6 +254,27 @@ where
             Err(_) => 0,
         };
 
+        // Incremental check: if the exact file_uri already exists in the database with matching size,
+        // we can safely skip recalculating the full SHA-256 hash.
+        let existing_by_uri = sqlx::query(
+            "SELECT id, content_hash, file_size_bytes, is_deleted FROM tracks WHERE file_uri = ? LIMIT 1",
+        )
+        .bind(&file_path_str)
+        .fetch_optional(&pool)
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(row) = existing_by_uri {
+            let existing_size: i64 = row.get("file_size_bytes");
+            if existing_size == file_size_bytes && file_size_bytes > 0 {
+                // Same file at same path and unchanged size.
+                // Keep soft-deleted files soft-deleted and avoid re-indexing.
+                duplicates_count += 1;
+                continue;
+            }
+        }
+
         let content_hash = match calculate_file_hash(&path) {
             Ok(h) => h,
             Err(e) => {
@@ -282,6 +305,7 @@ where
         if let Some(row) = existing_by_hash {
             let existing_id: String = row.get("id");
             let existing_uri: Option<String> = row.get("file_uri");
+            let is_del: i32 = row.get("is_deleted");
 
             let existing_file_exists = existing_uri
                 .as_deref()
@@ -289,14 +313,19 @@ where
                 .unwrap_or(false);
 
             if !existing_file_exists {
-                // Audio file was moved or renamed! Update its file_uri.
-                let _ = sqlx::query("UPDATE tracks SET file_uri = ?, is_deleted = 0 WHERE id = ?")
+                // Audio file was moved or renamed! Update its file_uri while preserving is_deleted
+                // (do not resurrect tracks deliberately deleted by the user).
+                let _ = sqlx::query("UPDATE tracks SET file_uri = ? WHERE id = ?")
                     .bind(&file_path_str)
                     .bind(&existing_id)
                     .execute(&pool)
                     .await;
 
-                new_tracks_count += 1;
+                if is_del == 0 {
+                    new_tracks_count += 1;
+                } else {
+                    duplicates_count += 1;
+                }
                 continue;
             } else if existing_uri.as_deref() == Some(&file_path_str) {
                 // Exact same file already imported
@@ -502,9 +531,9 @@ mod tests {
         assert!(SUPPORTED_EXTENSIONS.contains(&"mp3"));
         assert!(SUPPORTED_EXTENSIONS.contains(&"wav"));
         assert!(SUPPORTED_EXTENSIONS.contains(&"aiff"));
-        assert!(SUPPORTED_EXTENSIONS.contains(&"alac"));
-        assert!(!SUPPORTED_EXTENSIONS.contains(&"wma"));
-        assert!(!SUPPORTED_EXTENSIONS.contains(&"opus"));
+        assert!(!SUPPORTED_EXTENSIONS.contains(&"alac"));
+        assert!(SUPPORTED_EXTENSIONS.contains(&"wma"));
+        assert!(SUPPORTED_EXTENSIONS.contains(&"opus"));
         assert!(!SUPPORTED_EXTENSIONS.contains(&"exe"));
         assert!(!SUPPORTED_EXTENSIONS.contains(&"txt"));
     }
