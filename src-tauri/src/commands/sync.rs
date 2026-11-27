@@ -2,6 +2,38 @@ use crate::services::sync::{SyncAccountStatus, SyncConfigDTO, SyncResult};
 use crate::state::AppState;
 use tauri::State;
 
+/// Performs an ephemeral credential-store round trip without exposing its value.
+/// Android uses this command for device/emulator verification of Keystore access.
+#[tauri::command]
+pub fn credential_storage_self_test(state: State<'_, AppState>) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        let account = format!("self-test-{}", uuid::Uuid::new_v4());
+        let secret = format!("cavia-credential-round-trip-{}", uuid::Uuid::new_v4());
+        if let Err(error) = state
+            .credentials
+            .set("com.cavia.music.self-test", &account, &secret)
+        {
+            let _ = state
+                .credentials
+                .delete("com.cavia.music.self-test", &account);
+            return Err(error);
+        }
+        let read_result = state.credentials.get("com.cavia.music.self-test", &account);
+        let delete_result = state
+            .credentials
+            .delete("com.cavia.music.self-test", &account);
+        delete_result?;
+        return Ok(read_result? == Some(secret));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = state;
+        Err("Credential self-test is only available on Android".into())
+    }
+}
+
 #[tauri::command]
 pub async fn sync_get_status(state: State<'_, AppState>) -> Result<SyncAccountStatus, String> {
     state.sync.get_status().await
@@ -47,7 +79,7 @@ pub async fn sync_delete_cloud_data(state: State<'_, AppState>) -> Result<(), St
 
 #[tauri::command]
 pub async fn sync_get_config(state: State<'_, AppState>) -> Result<SyncConfigDTO, String> {
-    let (url, anon_key) = state.sync.get_config().await;
+    let (url, anon_key) = state.sync.get_config().await?;
     let is_configured = !url.is_empty() && !anon_key.is_empty();
     Ok(SyncConfigDTO {
         supabase_url: url,

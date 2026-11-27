@@ -21,16 +21,15 @@ import {
   deleteRecentPlay,
   formatArtworkUri,
   getRecentPlays,
-  searchLibrary,
 } from '../../lib/library';
 import {
   formatOnlineDuration,
   isOnlineSearchAvailable,
   playYouTubeMusic,
-  searchYouTubeMusic,
   type YtMusicTrack,
 } from '../../lib/ytmusic';
-import type { Album, Artist, Playlist, SearchCategory, SearchResultsDTO, Track } from '../../lib/types';
+import type { Album, Artist, Playlist, SearchCategory, Track } from '../../lib/types';
+import { useSearchCatalog } from './useSearchCatalog';
 
 export interface SearchViewProps {
   isBackendReady?: boolean;
@@ -71,11 +70,7 @@ export function SearchView({
   isPlaying = false,
 }: SearchViewProps) {
   const [query, setQuery] = useState('');
-  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [category, setCategory] = useState<SearchCategory>('all');
-  const [results, setResults] = useState<SearchResultsDTO | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
   const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null);
   const [selectedArtist, setSelectedArtist] = useState<Artist | null>(null);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
@@ -85,93 +80,31 @@ export function SearchView({
 
   // YouTube Music catalogue results. These are online, never persisted into the
   // local library, and only shown for All/Tracks where they make sense.
-  const [onlineResults, setOnlineResults] = useState<YtMusicTrack[]>([]);
-  const [onlineLoading, setOnlineLoading] = useState(false);
-  const [onlineError, setOnlineError] = useState<string | null>(null);
-  const [onlineRetryToken, setOnlineRetryToken] = useState(0);
   const [playingOnlineId, setPlayingOnlineId] = useState<string | null>(null);
   const onlineAvailable = isOnlineSearchAvailable();
-
-  const requestIdRef = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const {
+    debouncedQuery,
+    setDebouncedQuery,
+    results,
+    setResults,
+    isLoading,
+    searchError,
+    onlineResults,
+    onlineLoading,
+    onlineError,
+    setOnlineError,
+    retryOnlineSearch,
+  } = useSearchCatalog(query, category, onlineAvailable);
 
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
   useEffect(() => {
-    const timer = setTimeout(() => setDebouncedQuery(query), 180);
-    return () => clearTimeout(timer);
-  }, [query]);
-
-  useEffect(() => {
-    const trimmed = debouncedQuery.trim();
-
-    if (!trimmed) {
-      requestIdRef.current += 1;
-      setResults(null);
-      setIsLoading(false);
-      setSearchError(null);
-      return;
-    }
-
-    let active = true;
-    const requestId = ++requestIdRef.current;
-    setIsLoading(true);
-    setSearchError(null);
-
-    searchLibrary(trimmed, category)
-      .then((data) => {
-        if (!active || requestId !== requestIdRef.current) return;
-        setResults(data);
-        setIsLoading(false);
-      })
-      .catch((err) => {
-        if (!active || requestId !== requestIdRef.current) return;
-        setSearchError(err instanceof Error ? err.message : String(err));
-        setIsLoading(false);
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [debouncedQuery, category]);
-
-  useEffect(() => {
     setSelectedAlbum(null);
     setSelectedArtist(null);
   }, [debouncedQuery, category]);
-
-  useEffect(() => {
-    const trimmed = debouncedQuery.trim();
-    if (!trimmed || !onlineAvailable) {
-      setOnlineResults([]);
-      setOnlineLoading(false);
-      setOnlineError(null);
-      return;
-    }
-
-    let active = true;
-    setOnlineLoading(true);
-    setOnlineError(null);
-
-    searchYouTubeMusic(trimmed)
-      .then((items) => {
-        if (!active) return;
-        setOnlineResults(items);
-        setOnlineLoading(false);
-      })
-      .catch((err: unknown) => {
-        if (!active) return;
-        setOnlineResults([]);
-        setOnlineError(err instanceof Error ? err.message : String(err));
-        setOnlineLoading(false);
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [debouncedQuery, onlineRetryToken, onlineAvailable]);
 
   useEffect(() => {
     if (!isBackendReady) return;
@@ -577,7 +510,7 @@ export function SearchView({
             <div className="yt-result-error" role="alert">
               <XCircle size={16} />
               <span>{onlineError}</span>
-              <Button variant="outline" size="sm" onClick={() => setOnlineRetryToken((value) => value + 1)}>
+              <Button variant="outline" size="sm" onClick={retryOnlineSearch}>
                 Retry
               </Button>
             </div>

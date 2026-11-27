@@ -7,7 +7,10 @@
 //! - Android: Media3 ExoPlayer with MediaSessionService.
 //! - iOS: AVPlayer with MPNowPlayingInfoCenter.
 
+#[cfg(target_os = "android")]
+pub mod android_media3;
 pub mod mobile_stubs;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod rodio_backend;
 
 #[cfg(feature = "desktop-mpv")]
@@ -84,6 +87,14 @@ impl AudioCapabilities {
 pub trait AudioBackend: Send {
     fn name(&self) -> &'static str;
     fn load(&mut self, file_path: &str, start_ms: u64) -> Result<(), PlaybackError>;
+    fn set_metadata(
+        &mut self,
+        _title: &str,
+        _artist: &str,
+        _album: &str,
+    ) -> Result<(), PlaybackError> {
+        Ok(())
+    }
     fn play(&mut self) -> Result<(), PlaybackError>;
     fn pause(&mut self) -> Result<(), PlaybackError>;
     fn resume(&mut self) -> Result<(), PlaybackError>;
@@ -106,25 +117,36 @@ pub trait AudioBackend: Send {
     fn is_device_ready(&self) -> bool {
         true
     }
+    fn poll(&mut self) {}
     fn try_init_device(&mut self) -> Result<(), PlaybackError> {
         Ok(())
     }
 }
 
 /// Factory initializing the active platform audio backend.
-pub fn create_platform_backend() -> Result<Box<dyn AudioBackend>, PlaybackError> {
+pub fn create_platform_backend(
+    app_handle: Option<tauri::AppHandle>,
+) -> Result<Box<dyn AudioBackend>, PlaybackError> {
     #[cfg(target_os = "android")]
     {
-        return Ok(Box::new(mobile_stubs::AndroidMedia3Backend::new()));
+        return Ok(Box::new(android_media3::AndroidMedia3Backend::new(
+            app_handle.ok_or_else(|| {
+                PlaybackError::BackendUnavailable(
+                    "Android playback requires the native Media3 plugin to be initialized.".into(),
+                )
+            })?,
+        )));
     }
 
     #[cfg(target_os = "ios")]
     {
+        let _ = app_handle;
         return Ok(Box::new(mobile_stubs::IosAvPlayerBackend::new()));
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
+        let _ = app_handle;
         // Desktop default: zero-dependency Rodio native backend
         match rodio_backend::RodioBackend::new() {
             Ok(backend) => Ok(Box::new(backend)),

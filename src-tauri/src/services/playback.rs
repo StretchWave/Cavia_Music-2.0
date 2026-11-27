@@ -349,8 +349,10 @@ pub struct PlaybackCore {
     smtc_status: SmtcStatus,
     smtc_error: Option<String>,
     device_error: Option<String>,
+    last_device_retry: Instant,
     last_persist: Instant,
     last_media_sync: Instant,
+    last_backend_status: PlaybackStatus,
     persistence_tx: Option<PersistenceSender>,
     snapshot_cache: Arc<RwLock<PlaybackSnapshot>>,
     cmd_tx: Option<std::sync::mpsc::Sender<PlaybackCommand>>,
@@ -368,6 +370,7 @@ impl PlaybackCore {
         } else {
             SmtcStatus::Unsupported
         };
+        let last_backend_status = backend.status();
         let core = Self {
             backend,
             queue: QueueManager::new(),
@@ -384,8 +387,10 @@ impl PlaybackCore {
             smtc_status: initial_smtc_status,
             smtc_error: None,
             device_error: None,
+            last_device_retry: Instant::now(),
             last_persist: Instant::now(),
             last_media_sync: Instant::now(),
+            last_backend_status,
             persistence_tx,
             snapshot_cache,
             cmd_tx: None,
@@ -533,6 +538,15 @@ impl PlaybackCore {
             self.update_snapshot_cache();
             self.emit_state();
             return Err(err);
+        }
+
+        if let Err(error) = self
+            .backend
+            .set_metadata(&track.title, &track.artist, &track.album)
+        {
+            self.last_error = Some(format!(
+                "Track loaded, but system media metadata could not be updated: {error}"
+            ));
         }
 
         // Loading succeeded: commit queue selection
@@ -901,6 +915,8 @@ impl PlaybackCore {
     pub fn clear_queue(&mut self) -> Result<(), String> {
         let _ = self.backend.stop();
         self.queue.clear();
+        self.restored_position_ms = None;
+        self.last_error = None;
         self.generation += 1;
         let _ = self.sync_media_playback_state();
         let _ = self.persist_state();
@@ -1039,7 +1055,9 @@ impl PlaybackCore {
             current_track.as_ref().map(|t| t.duration_ms).unwrap_or(0)
         };
 
-        let position_ms = if let Some(pos) = self.restored_position_ms {
+        let position_ms = if current_track.is_none() {
+            0
+        } else if let Some(pos) = self.restored_position_ms {
             pos
         } else {
             self.backend.position_ms() as i64
@@ -1060,7 +1078,9 @@ impl PlaybackCore {
             error_message: self.last_error.clone(),
             device_ready: self.backend.is_device_ready(),
             backend_health: self.compute_backend_health(),
-            system_media_controls: self.media_controls_ready,
+            system_media_controls: self.media_controls_ready
+                || (self.backend.is_device_ready()
+                    && self.backend.capabilities().system_media_controls),
             smtc_status: self.smtc_status.as_str().to_string(),
             smtc_error: self.smtc_error.clone(),
         }
@@ -1139,6 +1159,34 @@ impl PlaybackCore {
     }
 
     pub fn tick(&mut self) {
+        self.backend.poll();
+        let backend_status = self.backend.status();
+        if backend_status != self.last_backend_status {
+            self.last_backend_status = backend_status;
+            self.update_snapshot_cache();
+            self.emit_state();
+            if matches!(
+                backend_status,
+                PlaybackStatus::Paused | PlaybackStatus::Stopped
+            ) {
+                if let Err(error) = self.persist_state() {
+                    self.last_error = Some(error);
+                    self.update_snapshot_cache();
+                }
+            }
+        }
+        if !self.backend.is_device_ready() {
+            if self.last_device_retry.elapsed() >= Duration::from_secs(2) {
+                self.last_device_retry = Instant::now();
+                if let Err(error) = self.retry_device() {
+                    self.device_error = Some(error);
+                }
+            }
+            self.update_snapshot_cache();
+            self.emit_position();
+            return;
+        }
+
         if self.backend.status() == PlaybackStatus::Playing {
             if self.backend.is_ended() {
                 self.auto_advance();
@@ -1191,7 +1239,14 @@ impl PlaybackCore {
     fn persist_state(&mut self) -> Result<(), String> {
         self.last_persist = Instant::now();
         if let Some(tx) = &self.persistence_tx {
-            let position_ms = if let Some(pos) = self.restored_position_ms {
+            let current_track_id = self.queue.current_track().map(|track| track.id.clone());
+            let position_ms = if current_track_id.is_none()
+                && matches!(
+                    self.backend.status(),
+                    PlaybackStatus::Idle | PlaybackStatus::Stopped
+                ) {
+                0
+            } else if let Some(pos) = self.restored_position_ms {
                 pos
             } else {
                 self.backend.position_ms() as i64
@@ -1199,7 +1254,7 @@ impl PlaybackCore {
             let payload = PersistencePayload {
                 queue_json: serde_json::to_string(self.queue.tracks())
                     .unwrap_or_else(|_| "[]".into()),
-                current_track_id: self.queue.current_track().map(|t| t.id.clone()),
+                current_track_id,
                 position_ms,
                 repeat_mode: self.queue.repeat_mode().as_str().to_string(),
                 shuffle_enabled: if self.queue.is_shuffle() { 1 } else { 0 },
@@ -1498,8 +1553,10 @@ pub fn run_persistence_worker(
 
 impl PlaybackService {
     pub fn new(database: SqlitePool, app_handle: Option<AppHandle>) -> Result<Self, String> {
-        let backend = create_platform_backend()
+        let backend = create_platform_backend(app_handle.clone())
             .map_err(|e| format!("Failed to create audio backend: {e}"))?;
+        let backend_device_ready = backend.is_device_ready();
+        let backend_capabilities = backend.capabilities();
 
         let initial_snapshot = PlaybackSnapshot {
             generation: 1,
@@ -1514,15 +1571,16 @@ impl PlaybackService {
             playback_speed: 1.0,
             queue: Vec::new(),
             error_message: None,
-            device_ready: backend.is_device_ready(),
+            device_ready: backend_device_ready,
             backend_health: if backend.name().contains("unintegrated") {
                 "not_integrated".to_string()
-            } else if backend.is_device_ready() {
+            } else if backend_device_ready {
                 "ready".to_string()
             } else {
                 "device_unavailable".to_string()
             },
-            system_media_controls: false,
+            system_media_controls: backend_device_ready
+                && backend_capabilities.system_media_controls,
             smtc_status: if cfg!(target_os = "windows") {
                 "unavailable".to_string()
             } else {
@@ -1722,7 +1780,10 @@ impl PlaybackService {
     }
 
     pub fn persistence_health(&self) -> PersistenceHealthInfo {
-        self.persistence_health.read().unwrap().clone()
+        self.persistence_health
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     fn send_command<F>(&self, make_cmd: F) -> Result<oneshot::Receiver<Result<(), String>>, String>
@@ -1977,7 +2038,10 @@ impl PlaybackService {
     }
 
     pub fn snapshot(&self) -> PlaybackSnapshot {
-        self.snapshot_cache.read().unwrap().clone()
+        self.snapshot_cache
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub fn backend_health_status(&self) -> String {
@@ -1995,7 +2059,7 @@ impl PlaybackService {
         }
         #[cfg(target_os = "android")]
         {
-            "android_media3_unintegrated".to_string()
+            "android_media3_exoplayer".to_string()
         }
         #[cfg(target_os = "ios")]
         {
@@ -2031,7 +2095,10 @@ impl PlaybackService {
         loop {
             let mut rx = self.shutdown_watch.subscribe();
             let is_in_progress = {
-                let mut state = self.shutdown_state.lock().unwrap();
+                let mut state = self
+                    .shutdown_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 match &*state {
                     ShutdownProgress::Completed => return Ok(()),
                     ShutdownProgress::InProgress => true,
@@ -2087,7 +2154,10 @@ impl PlaybackService {
             match res {
                 Ok(()) => {
                     let join_res = self.join_workers();
-                    let mut state = self.shutdown_state.lock().unwrap();
+                    let mut state = self
+                        .shutdown_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     if let Err(e) = join_res {
                         *state = ShutdownProgress::Failed(e.clone());
                         let _ = self
@@ -2102,7 +2172,10 @@ impl PlaybackService {
                 }
                 Err(err_msg) => {
                     self.shutdown_flag.store(false, Ordering::SeqCst);
-                    let mut state = self.shutdown_state.lock().unwrap();
+                    let mut state = self
+                        .shutdown_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     *state = ShutdownProgress::Failed(err_msg.clone());
                     let _ = self
                         .shutdown_watch
@@ -2257,6 +2330,38 @@ pub mod tests {
         assert_eq!(core.queue.current_index(), Some(0));
         assert_eq!(core.queue.current_track().unwrap().id, "1");
         assert!(core.last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_clear_queue_resets_restored_and_backend_positions() {
+        let backend = Box::new(TestMockBackend {
+            status: PlaybackStatus::Playing,
+            duration_ms: 1000,
+            position_ms: 700,
+            should_fail_load: false,
+        });
+        let mut core = new_test_core(backend);
+        core.queue.set_queue(
+            vec![dummy_track("1", "Temporary", Some("C:/temporary.wav"))],
+            Some("1"),
+        );
+        core.restored_position_ms = Some(900);
+        let (tx, rx) = std::sync::mpsc::channel();
+        core.persistence_tx = Some(tx);
+
+        core.clear_queue().unwrap();
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.queue.is_empty());
+        assert!(snapshot.current_track.is_none());
+        assert_eq!(snapshot.position_ms, 0);
+        assert_eq!(core.restored_position_ms, None);
+        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            PersistenceMsg::State(payload) => assert_eq!(payload.position_ms, 0),
+            PersistenceMsg::Flush(_) | PersistenceMsg::Shutdown(_) => {
+                panic!("unexpected persistence message")
+            }
+        }
     }
 
     #[tokio::test]

@@ -28,7 +28,7 @@ tauri-build = { version = "2.7.2", features = [] }
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 tauri = { version = "2.12.3", features = [] }
 tauri-plugin-dialog = "2.8.4"
@@ -41,7 +41,6 @@ httpdate = "1"
 uuid = { version = "1", features = ["v4"] }
 keyring = "4.2"
 url = "2"
-rodio = { version = "0.23", default-features = true, features = ["symphonia-alac", "symphonia-aiff"] }
 souvlaki = { version = "0.9.3", default-features = false }
 
 # Desktop playback candidate. Enable only after libmpv is packaged and its
@@ -55,6 +54,14 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 default = []
 desktop-mpv = ["dep:rsmpv"]
 bench = []
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+rodio = { version = "0.23", default-features = true, features = ["symphonia-alac", "symphonia-aiff"] }
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+# Mobile playback is provided by Media3 / AVPlayer. Keep Rodio's decoder for
+# validating cached audio without linking its CPAL output backend on mobile.
+rodio = { version = "0.23", default-features = false, features = ["flac", "mp3", "mp4", "vorbis", "wav", "symphonia-alac", "symphonia-aiff"] }
 
 [profile.release]
 opt-level = 3

@@ -184,7 +184,9 @@ export function ImportsView({ onOpenPlaylist, onPlaylistCreated }: ImportsViewPr
             </div>
           )}
           <p className="imports-note">
-            Fast import creates the playlist in under a second. Audio streams are resolved in the background without downloading artwork or lyrics upfront.
+            Playlist metadata is read first, then streaming matches resolve in the background. Public
+            playlists are supported up to 1,000 tracks; playlists longer than Spotify's embed payload
+            can take a little longer before the job appears.
           </p>
         </form>
       </div>
@@ -224,6 +226,12 @@ export function ImportsView({ onOpenPlaylist, onPlaylistCreated }: ImportsViewPr
                     </div>
                     <span className="import-progress-percent">{progressPct}%</span>
                   </div>
+
+                  {job.notice && (
+                    <p className="imports-note import-job-notice" role="status">
+                      {job.notice}
+                    </p>
+                  )}
 
                   {/* Live Status Track */}
                   {job.currentTrack && isRunning && (
@@ -311,6 +319,12 @@ export function ImportsView({ onOpenPlaylist, onPlaylistCreated }: ImportsViewPr
                     </span>
                   </div>
 
+                  {job.notice && (
+                    <p className="imports-note import-job-notice" role="status">
+                      {job.notice}
+                    </p>
+                  )}
+
                   <div className="import-card-actions">
                     <Button
                       variant="secondary"
@@ -345,7 +359,9 @@ export function ImportsView({ onOpenPlaylist, onPlaylistCreated }: ImportsViewPr
           </div>
           <h3 className="imports-empty-title">No imports yet</h3>
           <p className="imports-empty-desc">
-            Paste any public Spotify playlist URL into the box above to import it. Cavia creates the playlist immediately and resolves streaming matches in the background.
+            Paste any public Spotify playlist URL into the box above to import it. Cavia reads the
+            playlist, then resolves streaming matches in the background. Public playlists are supported
+            up to 1,000 tracks.
           </p>
         </div>
       )}

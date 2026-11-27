@@ -1600,7 +1600,11 @@ mod tests {
             let p_tx = pause_tx_mutex.clone();
             let c_rx = continue_rx_mutex.clone();
             Box::pin(async move {
-                if let Some(tx) = p_tx.lock().unwrap().take() {
+                if let Some(tx) = p_tx
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+                {
                     let _ = tx.send(());
                 }
                 let mut lock = c_rx.lock().await;

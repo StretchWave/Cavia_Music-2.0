@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   AudioWaveform,
-  DownloadCloud,
   Library,
   Loader2,
   Search,
@@ -21,11 +20,6 @@ import {
   deleteTrack,
   deleteTracks,
   unlikeTracks,
-  getAlbums,
-  getArtists,
-  getLikedTracks,
-  getPlaylists,
-  getTracks,
   pickMusicFolder,
   recordRecentPlay,
   suggestNextTrack,
@@ -64,7 +58,7 @@ import {
   playYouTubeMusic,
   type YtMusicTrack,
 } from '../lib/ytmusic';
-import type { Album, Artist, Page, PlaybackState, Playlist, Track } from '../lib/types';
+import type { Album, Artist, Page, PlaybackState, Track } from '../lib/types';
 import { Button } from '../components/Button';
 import { Modal } from '../components/Modal';
 import { LibraryView } from '../features/library/LibraryView';
@@ -81,6 +75,8 @@ import { AfterglowBackdrop } from '../components/AfterglowBackdrop';
 import { useAfterglowPalette } from '../lib/useAfterglowPalette';
 import { useMotionSetting } from '../lib/motion';
 import { formatArtworkUri } from '../lib/library';
+import { useLibraryController } from './useLibraryController';
+import { useAutomaticSync } from './useAutomaticSync';
 
 const pageLabels: Record<Page, string> = {
   library: 'Library',
@@ -195,13 +191,6 @@ export function App() {
   const [page, setPage] = useState<Page>(getInitialPage);
   const [health, setHealth] = useState<PlatformHealth | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
-
-  // Real library domain state (owned by Rust SQLite)
-  const [tracks, setTracks] = useState<Track[]>([]);
-  const [albums, setAlbums] = useState<Album[]>([]);
-  const [artists, setArtists] = useState<Artist[]>([]);
-  const [playlists, setPlaylists] = useState<Playlist[]>([]);
-  const [likedTracks, setLikedTracks] = useState<Track[]>([]);
   const [activeImportCount, setActiveImportCount] = useState<number>(0);
 
   useEffect(() => {
@@ -228,17 +217,6 @@ export function App() {
       unlisten?.();
     };
   }, []);
-
-  const tracksRef = useRef<Track[]>(tracks);
-  const likedTracksRef = useRef<Track[]>(likedTracks);
-
-  useEffect(() => {
-    tracksRef.current = tracks;
-  }, [tracks]);
-
-  useEffect(() => {
-    likedTracksRef.current = likedTracks;
-  }, [likedTracks]);
 
   // Scan & Import State
   const [isScanning, setIsScanning] = useState(false);
@@ -284,6 +262,22 @@ export function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef<Map<number, number>>(new Map());
+  const { scheduleAutomaticSync, cancelAutomaticSync } = useAutomaticSync();
+
+  const {
+    libraryError,
+    tracks,
+    setTracks,
+    albums,
+    artists,
+    playlists,
+    setPlaylists,
+    likedTracks,
+    setLikedTracks,
+    tracksRef,
+    likedTracksRef,
+    refreshLibrary,
+  } = useLibraryController(scheduleAutomaticSync);
 
   const dismissToast = useCallback((id: number) => {
     const timer = toastTimersRef.current.get(id);
@@ -322,28 +316,6 @@ export function App() {
     },
     [pushToast]
   );
-
-  // Reusable loader for library collections from Rust SQLite
-  const refreshLibrary = useCallback(async () => {
-    if (!isNativeApp()) return;
-    try {
-      const [nextTracks, nextAlbums, nextArtists, nextPlaylists, nextLiked] =
-        await Promise.all([
-          getTracks(),
-          getAlbums(),
-          getArtists(),
-          getPlaylists(),
-          getLikedTracks(),
-        ]);
-      setTracks(nextTracks);
-      setAlbums(nextAlbums);
-      setArtists(nextArtists);
-      setPlaylists(nextPlaylists);
-      setLikedTracks(nextLiked);
-    } catch (err) {
-      console.error('Error refreshing library from SQLite:', err);
-    }
-  }, []);
 
   // Initial load
   useEffect(() => {
@@ -570,12 +542,13 @@ export function App() {
         if (persistedLiked !== nextLiked) {
           applyLikeState(trackId, persistedLiked);
         }
+        scheduleAutomaticSync();
       } catch (err) {
         applyLikeState(trackId, wasLiked);
         pushToast('error', err instanceof Error ? err.message : String(err));
       }
     },
-    [applyLikeState, pushToast]
+    [applyLikeState, pushToast, scheduleAutomaticSync]
   );
 
   const handleCreatePlaylist = useCallback(
@@ -1237,9 +1210,8 @@ export function App() {
       : 'muted';
 
   const navItems = [
-    { label: 'Library', page: 'library' as const, icon: Library },
+    { label: 'Library', page: 'library' as const, icon: Library, badge: activeImportCount },
     { label: 'Search', page: 'search' as const, icon: Search },
-    { label: 'Imports', page: 'imports' as const, icon: DownloadCloud, badge: activeImportCount },
     { label: 'Settings', page: 'settings' as const, icon: Settings2 },
   ];
 
@@ -1276,7 +1248,7 @@ export function App() {
         <nav className="sidebar-nav">
           {navItems.map((item) => {
             const Icon = item.icon;
-            const isActive = page === item.page;
+            const isActive = page === item.page || (page === 'imports' && item.page === 'library');
             return (
               <button
                 key={item.page}
@@ -1302,11 +1274,14 @@ export function App() {
 
           <div className="topbar-actions">
             <span
-              className={`core-status-dot status-${statusTone}`}
+              className={`core-status-chip status-${statusTone}`}
               title={statusLabel}
-              aria-label={statusLabel}
-              role="img"
-            />
+              role="status"
+              aria-label={`Core status: ${statusLabel}`}
+            >
+              <span className={`core-status-dot status-${statusTone}`} aria-hidden="true" />
+              <span className="core-status-label">{statusLabel}</span>
+            </span>
           </div>
         </header>
 
@@ -1372,10 +1347,12 @@ export function App() {
           ))}
         </div>
 
-        <div className="cavia-page-scroll" key={page} tabIndex={-1}>
+        <div className="cavia-page-scroll" key={page} data-page={page} tabIndex={-1}>
           {page === 'library' && (
             <LibraryView
               connectionError={connectionError}
+              libraryError={libraryError}
+              onRetryLibrary={refreshLibrary}
               tracks={tracks}
               albums={albums}
               artists={artists}
@@ -1408,6 +1385,8 @@ export function App() {
               onAddAlbumToPlaylist={handleOpenAddAlbumToPlaylist}
               onPlayNext={handlePlayNext}
               onNavigateToImports={() => setPage('imports')}
+              activeImportCount={activeImportCount}
+              onOpenImportActivity={() => setPage('imports')}
             />
           )}
 
@@ -1449,6 +1428,11 @@ export function App() {
               onDensityChange={setDensity}
               motion={motion}
               onMotionChange={setMotion}
+              onSyncConfigurationChanged={(enabled) => {
+                if (enabled) {
+                  scheduleAutomaticSync(250);
+                } else cancelAutomaticSync();
+              }}
             />
           )}
         </div>
@@ -1520,6 +1504,7 @@ export function App() {
         currentTrack={playback.currentTrack}
         playbackPositionMs={playback.positionMs}
         trackDurationMs={playback.durationMs}
+        reducedMotion={motion !== 'full'}
         onSeek={handleSeek}
       />
 
@@ -1535,7 +1520,7 @@ export function App() {
       <nav className="cavia-mobile-nav" aria-label="Mobile navigation">
         {navItems.map((item) => {
           const Icon = item.icon;
-          const isActive = page === item.page;
+          const isActive = page === item.page || (page === 'imports' && item.page === 'library');
           return (
             <button
               key={item.page}

@@ -18,15 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Playlist & Favorites Management**: Complete local playlist CRUD, transactional track addition, accessible reordering, collision-proof compaction removal, and liked song synchronization.
 - **Windows Media Controls (SMTC)**: Native Windows System Media Transport Controls integration supporting media keyboard keys, lock screen widgets, and thumbnail display.
 - **Responsive Layout Engine**: Responsive multi-viewport interface adapting across 8 device classes from compact mobile (360px) to ultra-wide desktop (1920px).
-- **Accessibility & Interaction Suite**: Full keyboard navigation with roving tabindex, ARIA live regions, focus trapping in drawers/modals, WCAG 2.5.3 label-in-name compliance, and 0 axe-core automated violations.
+- **Accessibility & Interaction Suite**: Keyboard navigation, ARIA announcements, modal focus handling, and responsive controls. A current WCAG conformance audit is not claimed.
 - **Optional Account & Cloud Synchronization**: Opt-in multi-device sync for playlists and liked tracks via Supabase Auth & PostgreSQL with Row-Level Security and OS Credential Manager protection.
 - **Standalone Windows Installer**: Self-contained NSIS installer (`currentUser` install, no administrator rights required) with clean uninstaller and upgrade data preservation.
 - **CI/CD Build Automation**: GitHub Actions workflows for continuous integration (`ci.yml`) and multi-platform packaging (`release.yml`) for Windows, macOS, and Android.
 
 ### Changed
-- **Performance Optimization**: Decoupled high-frequency playback position updates from root component state, reducing steady-state re-renders during playback from 4/s to 0/s.
-- **Database Indexing**: Optimized scanner database queries with composite indexes, accelerating 50k-track duplicate lookups by 147× (from 9.56ms to 0.04ms).
-- **Binary Footprint**: Optimized release compiler settings with Thin-LTO and symbol stripping, reducing native executable footprint by 62.6% (from 34.72MB to 13.00MB).
+- **Performance Optimization**: Playback position updates are separated from root component state. No comparable before/after render benchmark is currently recorded.
+- **Database Indexing**: Scanner queries use composite indexes. No reproducible 50,000-track timing benchmark is currently recorded.
+- **Binary Footprint**: Release compiler settings include size-oriented optimizations. The historical executable-size comparison has not been reproduced for the current build.
 - **Editorial Obsidian Aesthetic**: Standardized container constraints, grooved vinyl centerpiece animation, and typography hierarchy across all 15 views.
 
 ### Fixed
@@ -37,4 +37,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - **Strict Privacy**: Zero telemetry, zero analytics SDKs, and zero behavioral tracking.
 - **Local-Only Audio**: User audio files and filesystem directory paths never leave the local machine.
-- **Credential Protection**: Refresh tokens stored exclusively in native OS Secure Storage (Windows Credential Manager / macOS Keychain / Android KeyStore / iOS Keychain).
+- **Credential Protection**: Windows refresh tokens use Windows Credential Manager. Android uses Android Keystore-backed AES-GCM storage (emulator round-trip verified). macOS runtime storage is unverified; iOS Keychain is not integrated. Credential failures do not fall back to plaintext storage.

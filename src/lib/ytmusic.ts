@@ -11,11 +11,32 @@ export interface YtMusicTrack {
 
 export const isOnlineSearchAvailable = (): boolean => isTauri();
 
-export async function searchYouTubeMusic(query: string): Promise<YtMusicTrack[]> {
+function getSearchLocale(): { region: string; language: string } {
+  try {
+    const locale = new Intl.Locale(navigator.language || 'en-US');
+    return {
+      region: locale.region?.slice(0, 2).toUpperCase() || 'US',
+      language: locale.language.slice(0, 3).toLowerCase() || 'en',
+    };
+  } catch {
+    return { region: 'US', language: 'en' };
+  }
+}
+
+export async function searchYouTubeMusic(query: string, requestId: string): Promise<YtMusicTrack[]> {
   if (!isTauri()) return [];
   const trimmed = query.trim();
   if (!trimmed) return [];
-  return invoke<YtMusicTrack[]>('ytmusic_search', { query: trimmed });
+  return invoke<YtMusicTrack[]>('ytmusic_search', {
+    query: trimmed,
+    requestId,
+    ...getSearchLocale(),
+  });
+}
+
+export async function cancelYouTubeMusicSearch(requestId: string): Promise<void> {
+  if (!isTauri()) return;
+  return invoke<void>('ytmusic_cancel_search', { requestId });
 }
 
 export async function fetchRelatedYouTubeMusic(videoId: string): Promise<YtMusicTrack[]> {

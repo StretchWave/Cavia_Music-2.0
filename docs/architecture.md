@@ -30,7 +30,7 @@ Rust application core
   ├── Repositories / SQLite (SQLx)
   ├── Secure token references
   └── Platform adapters
-       ├── Windows/macOS audio backend (libmpv candidate)
+       ├── Windows/macOS audio backend (Rodio + CPAL + Symphonia)
        ├── Android audio backend (Media3 / ExoPlayer)
        ├── iOS audio backend (AVPlayer)
        ├── File picker / sandbox staging
@@ -80,6 +80,12 @@ A desktop path is not interchangeable with a mobile URI:
 - iOS document pickers may return `file://` URLs with sandbox/security-scope constraints.
 
 The import boundary must stage/read from these native references using platform-safe APIs, then expose an app-managed URI to the cross-platform domain. Never pass a `content://` URI to a normal filesystem API and assume it is a path.
+
+Android currently implements this boundary with Storage Access Framework folder selection and bounded app-private staging (`files/music-imports/<id>`). It stages supported audio files to temporary `.part` files before atomic rename, then the Rust library scanner indexes the staged paths. Android playback uses a Media3 `ExoPlayer` in a `MediaSessionService`; a Rust `AudioBackend` adapter remains the playback actor's only interface. This flow was exercised on an Android 16 x86_64 emulator with a temporary WAV fixture. Physical-device output, background behavior, media-session transport actions and other codecs remain unverified.
+
+iOS is not integrated yet. A future native adapter must stage security-scoped document URLs into app-managed storage, configure `AVAudioSession`, publish Now Playing metadata and remote commands, and implement `AudioBackend` through Tauri's Swift mobile-plugin bridge. The iOS target must remain reported unavailable until that adapter is built and exercised on iOS hardware or a simulator.
+
+Windows refresh tokens use Windows Credential Manager. Android stores refresh tokens as AES-GCM encrypted app preferences with a non-exportable key in Android Keystore; the set/get/delete round trip was verified on an Android 16 x86_64 emulator. Physical-device storage and Supabase authentication are still unverified. iOS Keychain storage is not integrated, so iOS credential operations fail closed and never fall back to plaintext SQLite.
 
 ## State and events
 

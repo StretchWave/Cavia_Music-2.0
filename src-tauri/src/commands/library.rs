@@ -18,6 +18,31 @@ pub struct LibrarySummary {
 }
 
 #[tauri::command]
+pub async fn pick_android_music_folder(app: AppHandle) -> Result<Option<String>, String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let handle = app.state::<crate::audio::android_media3::Media3PluginHandle>();
+        let result: serde_json::Value = handle
+            .0
+            .run_mobile_plugin_async("pickMusicFolder", ())
+            .await
+            .map_err(|error| format!("Android folder picker failed: {error}"))?;
+        return Ok(result
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("The Android folder picker is available only on Android.".into())
+    }
+}
+
+#[tauri::command]
 pub async fn library_summary(state: State<'_, AppState>) -> Result<LibrarySummary, String> {
     let row = sqlx::query(
         r#"SELECT

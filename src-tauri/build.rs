@@ -7,8 +7,8 @@ fn main() {
     // Use Tauri's documented "without app manifest" mode and embed exactly
     // one manifest globally: the app and every test binary get the same
     // Common-Controls v6 dependency, and there is no duplicate resource.
-    #[cfg(target_os = "windows")]
-    {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "windows" {
         let manifest_content = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <dependency>
@@ -38,10 +38,7 @@ fn main() {
             "cargo:rustc-link-arg=/MANIFESTINPUT:{}",
             manifest_path.display()
         );
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
+    } else {
         tauri_build::build();
     }
 }

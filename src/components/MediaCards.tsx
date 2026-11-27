@@ -47,6 +47,11 @@ export function AlbumCard({ album, onOpen, onPlay, playDisabled = false }: Album
         </button>
       </div>
       <span className="media-card-label">{album.title}</span>
+      <span className="media-card-sub">
+        {album.artist}
+        {album.year ? ` · ${album.year}` : ''}
+        {album.trackCount ? ` · ${album.trackCount} ${album.trackCount === 1 ? 'track' : 'tracks'}` : ''}
+      </span>
     </article>
   );
 }
@@ -107,6 +112,10 @@ export function ArtistCard({ artist, onOpen, onPlay, playDisabled = false }: Art
         </button>
       </div>
       <span className="media-card-label">{artist.name}</span>
+      <span className="media-card-sub">
+        {artist.albumCount} {artist.albumCount === 1 ? 'album' : 'albums'} · {artist.trackCount}{' '}
+        {artist.trackCount === 1 ? 'track' : 'tracks'}
+      </span>
     </article>
   );
 }

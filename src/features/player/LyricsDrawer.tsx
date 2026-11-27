@@ -27,6 +27,7 @@ interface LyricsDrawerProps {
   playbackPositionMs?: number;
   trackDurationMs?: number;
   onSeek?: (positionMs: number) => Promise<void> | void;
+  reducedMotion?: boolean;
 }
 
 export function LyricsDrawer({
@@ -36,6 +37,7 @@ export function LyricsDrawer({
   playbackPositionMs,
   trackDurationMs,
   onSeek,
+  reducedMotion = false,
 }: LyricsDrawerProps) {
   const [lyrics, setLyrics] = useState<LyricsResult | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -68,13 +70,15 @@ export function LyricsDrawer({
   const drawerRef = useRef<HTMLDivElement | null>(null);
   const previousActiveElementRef = useRef<HTMLElement | null>(null);
   const prevActiveIndexRef = useRef<number>(-1);
-  const lastActiveIndexRef = useRef<number>(-1);
   const programmaticScrollRef = useRef<boolean>(false);
   const programmaticScrollTimerRef = useRef<number | null>(null);
 
   // Subscribe directly to live position to decouple updates from parent App re-renders
   const livePos = usePlaybackPosition(playbackPositionMs ?? 0, trackDurationMs ?? 0);
-  const currentPositionMs = livePos.positionMs || (playbackPositionMs ?? 0);
+  const currentPositionMs =
+    livePos.trackId === currentTrack?.id
+      ? livePos.positionMs
+      : playbackPositionMs ?? livePos.positionMs;
 
   // Focus management and keyboard escape handler
   // Inline onClose props would otherwise re-run this effect on every parent
@@ -209,21 +213,19 @@ export function LyricsDrawer({
     if (mode !== 'synced' || !lyrics?.syncedLines || lyrics.syncedLines.length === 0) {
       return -1;
     }
-    // If playback stopped and reset position to 0 while we were already on a line,
-    // preserve the last active line so the view doesn't jump back to line 1.
-    if (currentPositionMs === 0 && lastActiveIndexRef.current > 0) {
-      return lastActiveIndexRef.current;
-    }
+    // Playback position updates arrive several times per second. Keep lookup
+    // logarithmic so long transcripts do not add linear work to each tick.
+    let low = 0;
+    let high = lyrics.syncedLines.length - 1;
     let idx = -1;
-    for (let i = 0; i < lyrics.syncedLines.length; i++) {
-      if (lyrics.syncedLines[i].timestampMs <= currentPositionMs) {
-        idx = i;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (lyrics.syncedLines[mid].timestampMs <= currentPositionMs) {
+        idx = mid;
+        low = mid + 1;
       } else {
-        break;
+        high = mid - 1;
       }
-    }
-    if (idx >= 0) {
-      lastActiveIndexRef.current = idx;
     }
     return idx;
   }, [mode, lyrics?.syncedLines, currentPositionMs]);
@@ -261,7 +263,6 @@ export function LyricsDrawer({
   // initial scroll treatment.
   useEffect(() => {
     prevActiveIndexRef.current = -1;
-    lastActiveIndexRef.current = -1;
     setIsFollowing(true);
   }, [isOpen, currentTrack?.id]);
 
@@ -276,7 +277,7 @@ export function LyricsDrawer({
   // Restrained auto-scrolling: only triggers when the active line index
   // changes, and only while the reader is following the active line.
   useEffect(() => {
-    if (!isOpen || mode !== 'synced' || activeIndex === -1) {
+    if (!isOpen || mode !== 'synced') {
       prevActiveIndexRef.current = activeIndex;
       return;
     }
@@ -289,10 +290,11 @@ export function LyricsDrawer({
     if (!isFollowing) return;
 
     const prefersReducedMotion =
+      reducedMotion ||
       typeof window !== 'undefined' &&
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     scrollToActiveLine(prefersReducedMotion ? 'auto' : 'smooth');
-  }, [activeIndex, isOpen, mode, isFollowing, scrollToActiveLine]);
+  }, [activeIndex, isOpen, mode, isFollowing, reducedMotion, scrollToActiveLine]);
 
   // Pause automatic following when the reader scrolls the active line out of
   // view; resume automatically when it is visible again (or via the explicit
@@ -313,10 +315,11 @@ export function LyricsDrawer({
   const handleResumeFollowing = useCallback(() => {
     setIsFollowing(true);
     const prefersReducedMotion =
+      reducedMotion ||
       typeof window !== 'undefined' &&
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     scrollToActiveLine(prefersReducedMotion ? 'auto' : 'smooth');
-  }, [scrollToActiveLine]);
+  }, [reducedMotion, scrollToActiveLine]);
 
   // Click-to-seek handler. Clamp to the real track duration when it is known
   // so an embedded timestamp beyond the file's end cannot send an invalid
@@ -485,7 +488,7 @@ export function LyricsDrawer({
                 return (
                   <p
                     key={`${line.timestampMs}-${idx}`}
-                    ref={isActive ? activeLineRef : null}
+                    ref={isActive || (activeIndex === -1 && idx === 0) ? activeLineRef : null}
                     className={`lyrics-line clickable ${isActive ? 'active-line' : 'inactive'}`}
                     onClick={() => handleLineClick(line.timestampMs)}
                     title={`Seek to ${formatTime(line.timestampMs)}`}
@@ -498,7 +501,24 @@ export function LyricsDrawer({
                       }
                     }}
                   >
-                    {line.text}
+                    {isActive && line.wordTimings?.length ? (
+                      line.wordTimings.map((word, wordIndex) => {
+                        const nextWord = line.wordTimings?.[wordIndex + 1];
+                        const isWordActive =
+                          currentPositionMs >= word.timestampMs &&
+                          (!nextWord || currentPositionMs < nextWord.timestampMs);
+                        return (
+                          <span
+                            key={`${word.timestampMs}-${wordIndex}`}
+                            className={isWordActive ? 'lyrics-word-active' : 'lyrics-word-upcoming'}
+                          >
+                            {word.text}
+                          </span>
+                        );
+                      })
+                    ) : (
+                      line.text
+                    )}
                   </p>
                 );
               })}

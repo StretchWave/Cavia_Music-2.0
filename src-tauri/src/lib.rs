@@ -72,8 +72,10 @@ pub fn resolve_app_data_dir(platform_dir: PathBuf) -> PathBuf {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_dialog::init());
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(audio::android_media3::init());
+    let app = builder
         .setup(|app| {
             let platform_dir = app.path().app_data_dir().unwrap_or_default();
             let app_data_dir = resolve_app_data_dir(platform_dir);
@@ -108,7 +110,9 @@ pub fn run() {
             // Restore saved playback state from SQLite. This runs on the
             // synchronous setup thread; the persistence worker owns its own
             // runtime, so no ambient Tokio context is required.
-            let _ = tauri::async_runtime::block_on(playback.restore_saved_state());
+            if let Err(err) = tauri::async_runtime::block_on(playback.restore_saved_state()) {
+                eprintln!("[Cavia Startup] Could not restore saved playback state: {err}");
+            }
 
             #[cfg(target_os = "windows")]
             {
@@ -134,8 +138,16 @@ pub fn run() {
             let artwork =
                 services::artwork::ArtworkService::new(pool.clone(), artworks_dir.clone());
 
+            #[cfg(target_os = "android")]
+            let credential_store = services::credentials::KeyringStore::new(
+                app.state::<audio::android_media3::Media3PluginHandle>()
+                    .0
+                    .clone(),
+            );
+            #[cfg(not(target_os = "android"))]
+            let credential_store = services::credentials::KeyringStore::new();
             let credentials: Arc<dyn services::credentials::CredentialStore> =
-                Arc::new(services::credentials::KeyringStore::new());
+                Arc::new(credential_store);
 
             let sync = Arc::new(services::sync::SyncEngine::new(
                 pool.clone(),
@@ -183,6 +195,7 @@ pub fn run() {
             commands::spotify::import_cancel_and_delete,
             commands::spotify::spotify_import_playlist,
             commands::ytmusic::ytmusic_search,
+            commands::ytmusic::ytmusic_cancel_search,
             commands::ytmusic::ytmusic_related,
             commands::ytmusic::ytmusic_play,
             commands::library::library_summary,
@@ -212,8 +225,10 @@ pub fn run() {
             commands::library::update_playlist,
             commands::library::search_library,
             commands::library::scan_music_directory,
+            commands::library::pick_android_music_folder,
             commands::library::cancel_scan,
             commands::sync::sync_get_status,
+            commands::sync::credential_storage_self_test,
             commands::sync::sync_signup,
             commands::sync::sync_login,
             commands::sync::sync_logout,

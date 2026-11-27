@@ -1,38 +1,28 @@
 {
-    "application":  "Cavia Music",
-    "version":  "2.0.0",
-    "build_date":  "2026-11-20T08:59:54Z",
-    "commit_sha":  "bde7a53f060714f8ed77d9277247400b6e34e35c",
-    "platforms":  [
-                      {
-                          "platform":  "windows-x64",
-                          "architecture":  "x86_64-pc-windows-msvc",
-                          "format":  "nsis-setup",
-                          "filename":  "Cavia Music_2.0.0_x64-setup.exe",
-                          "file_size_bytes":  4432132,
-                          "file_size_mb":  4.23,
-                          "sha256":  "34489BD0213B70ACBEAAFDA93796BD5151B5289BE15E6044662E4B1FBECF596F",
-                          "verification_status":  "empirically_verified"
-                      },
-                      {
-                          "platform":  "macos-universal",
-                          "architecture":  "universal-apple-darwin",
-                          "format":  "dmg",
-                          "filename":  "Cavia Music_2.0.0_universal.dmg",
-                          "file_size_bytes":  null,
-                          "file_size_mb":  null,
-                          "sha256":  "deferred_to_macos_ci_runner",
-                          "verification_status":  "ci_automated_hardware_deferred"
-                      },
-                      {
-                          "platform":  "android-universal",
-                          "architecture":  "aarch64, armv7, x86_64",
-                          "format":  "apk",
-                          "filename":  "app-universal-release-unsigned.apk",
-                          "file_size_bytes":  null,
-                          "file_size_mb":  null,
-                          "sha256":  "deferred_to_android_ci_runner",
-                          "verification_status":  "ci_automated_hardware_deferred"
-                      }
-                  ]
+  "application": "Cavia Music",
+  "version": "2.0.0",
+  "build_date": "2026-11-20T08:59:54Z",
+  "commit_sha": "bde7a53f060714f8ed77d9277247400b6e34e35c",
+  "platforms": [
+    {
+      "platform": "windows-x64",
+      "architecture": "x86_64-pc-windows-msvc",
+      "format": "nsis-setup",
+      "filename": "Cavia Music_2.0.0_x64-setup.exe",
+      "file_size_bytes": 4432132,
+      "file_size_mb": 4.23,
+      "sha256": "34489BD0213B70ACBEAAFDA93796BD5151B5289BE15E6044662E4B1FBECF596F",
+      "verification_status": "empirically_verified"
+    },
+    {
+      "platform": "macos-universal",
+      "architecture": "universal-apple-darwin",
+      "format": "dmg",
+      "filename": "Cavia Music_2.0.0_universal.dmg",
+      "file_size_bytes": null,
+      "file_size_mb": null,
+      "sha256": "deferred_to_macos_ci_runner",
+      "verification_status": "ci_automated_hardware_deferred"
+    }
+  ]
 }

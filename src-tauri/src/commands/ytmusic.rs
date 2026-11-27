@@ -8,6 +8,9 @@ use crate::state::AppState;
 pub async fn ytmusic_search(
     state: State<'_, AppState>,
     query: String,
+    region: Option<String>,
+    language: Option<String>,
+    request_id: String,
 ) -> Result<Vec<YtMusicTrack>, String> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
@@ -16,7 +19,59 @@ pub async fn ytmusic_search(
     if trimmed.chars().count() > 200 {
         return Err("Search query is too long".into());
     }
-    state.ytmusic.search(trimmed).await
+    let region = normalize_region(region.as_deref());
+    let language = normalize_locale_part(language.as_deref(), 3, "en");
+    let cancellation = state.ytmusic.begin_search(&request_id)?;
+    let result = tokio::select! {
+        result = state.ytmusic.search_with_locale(trimmed, &region, &language) => result,
+        _ = cancellation => Err("YouTube Music search cancelled".into()),
+    };
+    state.ytmusic.finish_search(&request_id);
+    result
+}
+
+#[tauri::command]
+pub fn ytmusic_cancel_search(state: State<'_, AppState>, request_id: String) -> Result<(), String> {
+    state.ytmusic.cancel_search(&request_id)
+}
+
+fn normalize_locale_part(value: Option<&str>, max_len: usize, fallback: &str) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= max_len
+                && value
+                    .chars()
+                    .all(|character| character.is_ascii_alphabetic())
+        })
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn normalize_region(value: Option<&str>) -> String {
+    normalize_locale_part(value, 2, "US").to_ascii_uppercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_locale_part, normalize_region};
+
+    #[test]
+    fn locale_parts_are_normalized_and_bounded() {
+        assert_eq!(normalize_locale_part(Some("in"), 2, "US"), "in");
+        assert_eq!(normalize_locale_part(Some("EN"), 3, "en"), "en");
+        assert_eq!(normalize_locale_part(Some("../../"), 2, "US"), "US");
+        assert_eq!(normalize_locale_part(Some("IND"), 2, "US"), "US");
+        assert_eq!(normalize_locale_part(None, 3, "en"), "en");
+    }
+
+    #[test]
+    fn youtube_music_country_code_is_uppercase() {
+        assert_eq!(normalize_region(Some("in")), "IN");
+        assert_eq!(normalize_region(Some("us")), "US");
+        assert_eq!(normalize_region(None), "US");
+    }
 }
 
 /// Tracks YouTube Music would play after `video_id`. The UI uses this as a

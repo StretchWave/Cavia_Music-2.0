@@ -2,7 +2,7 @@
 
 **Document Version**: 2.0.0  
 **Scope**: Milestone 5.6 Final Release Readiness  
-**Target Architectures**: Windows, macOS, Android, iOS  
+**Current Verification Targets**: Windows desktop and Android
 
 ---
 
@@ -63,7 +63,8 @@
 | **Artwork Images** | `<app_data>/artworks/<hash>.<ext>` | **NEVER** | N/A | High-resolution cover display | "Clean Orphaned Artwork" in Settings |
 | **Lyrics (Embedded)** | `<app_data>/cavia-library.sqlite3` | **NEVER** | N/A | Synchronized LRC / plain display | Clear lyrics cache in Settings |
 | **Lyrics (Remote)** | `<app_data>/cavia-library.sqlite3` | **Cached from LRCLIB** | `lrclib.net` (incoming) | Synchronized LRC display | Clear lyrics cache in Settings |
-| **Auth Tokens** | OS Credential Manager (Keyring) | **To Auth Provider** (TLS 1.3) | Supabase Auth | Session maintenance | Sign out in Settings |
+| **YouTube Music search and playback** | Query results remain ephemeral; fetched playback audio is cached under app data and is not added to the local library | Search terms and selected provider video ID sent over HTTPS; provider audio bytes received | YouTube Music public endpoints | Search and playback | App cache controls; no provider account credentials or cookies are sent |
+| **Auth Tokens** | Windows Credential Manager; Android Keystore protected AES-GCM preferences | **To Auth Provider** over HTTPS | Supabase Auth | Session maintenance | Sign out in Settings |
 | **Device IDs** | **NOT COLLECTED** | **NEVER** | N/A | N/A | N/A |
 | **Telemetry / Logs**| Standard OS stdout/stderr | **NEVER** | N/A | Local debugging | Flushed upon process exit |
 
@@ -72,14 +73,10 @@
 ## 3. Cryptographic Storage & Security Measures
 
 ### 3.1 Platform Secure Storage (`keyring`)
-Authentication refresh tokens are strictly segregated from unencrypted SQLite database files:
-- **Windows**: Stored via Windows Credential Manager (`wincred` API).
-- **macOS**: Stored in Apple Keychain (`SecItemAdd` / `SecItemCopyMatching`).
-- **Android**: Stored in Android KeyStore / EncryptedSharedPreferences.
-- **iOS**: Stored in iOS Keychain Services with `kSecAttrAccessibleAfterFirstUnlock`.
+Authentication refresh tokens are segregated from SQLite. Windows uses the Rust `keyring` crate with Windows Credential Manager. Android encrypts preferences with AES-GCM and protects the key with Android Keystore; a round-trip check passed on the Android 16 x86_64 emulator, while physical-device behavior remains unverified. Android sync can now use secure credential storage, but live Supabase authentication and sync have not been verified on the emulator.
 
 ### 3.2 Transit Encryption
-All outbound network calls require **HTTPS with TLS 1.3** and mandatory certificate validation. Cleartext HTTP connections are rejected by native network drivers and blocked by Tauri's Content Security Policy.
+Outbound provider and sync calls use HTTPS with certificate validation and bounded request timeouts. Cleartext HTTP connections are blocked by the app's transport configuration and Tauri Content Security Policy.
 
 ### 3.3 Relational Database Isolation
 The SQLite database is configured with:

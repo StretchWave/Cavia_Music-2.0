@@ -14,9 +14,9 @@ pub struct SpotifyImportResult {
     pub skipped: Vec<String>,
 }
 
-/// Starts an asynchronous Spotify playlist import. The playlist and all track
-/// shells are created immediately in SQLite (< 1s), and matching runs in the
-/// background with live progress events.
+/// Starts an asynchronous Spotify playlist import. Playlist metadata is read
+/// first, then all track shells are inserted in one SQLite transaction; matching
+/// runs in the background with live progress events.
 #[tauri::command]
 pub async fn spotify_start_import(
     app: AppHandle,

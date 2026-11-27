@@ -7,7 +7,8 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
-    host: '0.0.0.0',
+    // Loopback by default; set TAURI_DEV_HOST for physical-device testing.
+    host: process.env.TAURI_DEV_HOST || '127.0.0.1',
     hmr: process.env.TAURI_DEV_HOST ? { host: process.env.TAURI_DEV_HOST } : undefined,
     watch: { ignored: ['**/src-tauri/**'] },
   },

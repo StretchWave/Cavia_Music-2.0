@@ -175,6 +175,7 @@ export function ExpandedPlayer({
     <div
       ref={overlayRef}
       className="cavia-expanded-player-overlay"
+      data-status={status}
       role="dialog"
       aria-modal="true"
       aria-label="Expanded player"
@@ -310,7 +311,7 @@ export function ExpandedPlayer({
             <IconButton
               label="Previous track"
               icon={<Rewind size={22} />}
-              disabled={!isBackendReady}
+              disabled={!isBackendReady || !currentTrack}
               onClick={onPrevious}
               title="Previous track"
               size="lg"
@@ -319,7 +320,7 @@ export function ExpandedPlayer({
             <button
               type="button"
               className="expanded-main-play-btn"
-              disabled={!isBackendReady}
+              disabled={!isBackendReady || !currentTrack}
               onClick={onTogglePlay}
               title={isPlaying ? 'Pause' : 'Play'}
               aria-label={isPlaying ? 'Pause' : 'Play'}
@@ -330,7 +331,7 @@ export function ExpandedPlayer({
             <IconButton
               label="Next track"
               icon={<FastForward size={22} />}
-              disabled={!isBackendReady}
+              disabled={!isBackendReady || !currentTrack}
               onClick={onNext}
               title="Next track"
               size="lg"

@@ -4,6 +4,12 @@
 //! Track records are immediately inserted into SQLite (fast import),
 //! and matching against the local library and YouTube Music runs in a
 //! manageable background worker with pause/cancel controls.
+//!
+//! The embed payload carries at most 100 tracks. For longer playlists the
+//! ordered track URIs come from Spotify's anonymous spclient endpoint (using
+//! the short-lived token embedded in the same page), and metadata for the
+//! overflow is read from each track's public embed page. Imports stop at
+//! [`MAX_IMPORT_TRACKS`] so a single link cannot open an unbounded job.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,6 +24,15 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use uuid::Uuid;
 
 const EMBED_URL: &str = "https://open.spotify.com/embed/playlist";
+const EMBED_TRACK_URL: &str = "https://open.spotify.com/embed/track";
+const SPCLIENT_URL: &str = "https://spclient.wg.spotify.com/playlist/v2/playlist";
+
+/// The public embed payload stops at this many tracks.
+const EMBED_TRACK_LIMIT: usize = 100;
+/// Upper bound for one import.
+const MAX_IMPORT_TRACKS: usize = 1000;
+/// Parallel track-metadata requests when reading past the embed cap.
+const TRACK_FETCH_CONCURRENCY: usize = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +50,19 @@ pub struct SpotifyPlaylist {
     pub name: String,
     pub description: String,
     pub tracks: Vec<SpotifyTrack>,
+    /// How many tracks Spotify reports for the playlist before Cavia's cap.
+    #[serde(skip)]
+    pub provider_total: usize,
+    /// Tracks listed by Spotify whose public metadata could not be read.
+    #[serde(skip)]
+    pub unreadable_tracks: usize,
+    /// True when Spotify lists more tracks than [`MAX_IMPORT_TRACKS`].
+    #[serde(skip)]
+    pub truncated: bool,
+    /// True when the full-list endpoint was unavailable and the embed page
+    /// exposed only its first page of tracks.
+    #[serde(skip)]
+    pub partial_embed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +90,8 @@ pub struct ImportJob {
     pub current_track: Option<String>,
     pub status: ImportStatus,
     pub error: Option<String>,
+    /// Honest note about tracks Spotify listed but Cavia could not import.
+    pub notice: Option<String>,
     pub created_at_ms: u64,
 }
 
@@ -117,8 +147,167 @@ impl SpotifyImportService {
             .await
             .map_err(|e| format!("Could not read the Spotify page: {e}"))?;
 
-        parse_playlist(&html, &id)
+        let mut parsed = parse_playlist(&html, &id)?;
+
+        // The embed page stops at ~100 tracks. Read the full ordered track
+        // list from spclient and fill in anything the embed omitted from
+        // individual track embeds. When spclient is unavailable this quietly
+        // keeps the embed tracks rather than failing the import.
+        let mut provider_total = parsed.playlist.tracks.len();
+        let mut unreadable_tracks = 0;
+        let mut read_full_list = false;
+        if let Some(token) = parsed.access_token.clone() {
+            if let Ok((ids, total)) = self.fetch_playlist_track_ids(&id, &token).await {
+                read_full_list = true;
+                provider_total = total;
+                if ids.len() > parsed.playlist.tracks.len() {
+                    unreadable_tracks = self.fill_overflow_tracks(&mut parsed, ids).await;
+                }
+            }
+        }
+
+        parsed.playlist.partial_embed =
+            !read_full_list && parsed.playlist.tracks.len() >= EMBED_TRACK_LIMIT;
+        parsed.playlist.truncated = provider_total > MAX_IMPORT_TRACKS;
+        parsed.playlist.provider_total = provider_total;
+        parsed.playlist.unreadable_tracks = unreadable_tracks;
+        parsed.playlist.tracks.truncate(MAX_IMPORT_TRACKS);
+        Ok(parsed.playlist)
     }
+
+    /// Reads the complete, ordered track list for a playlist through Spotify's
+    /// anonymous spclient endpoint.
+    async fn fetch_playlist_track_ids(
+        &self,
+        playlist_id: &str,
+        token: &str,
+    ) -> Result<(Vec<String>, usize), String> {
+        let response = self
+            .client
+            .get(format!("{SPCLIENT_URL}/{playlist_id}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| format!("Spotify track list is unreachable: {e}"))?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "Spotify track list returned status {}",
+                response.status().as_u16()
+            ));
+        }
+
+        let value: Value = response
+            .json()
+            .await
+            .map_err(|e| format!("Could not read the Spotify track list: {e}"))?;
+
+        let items = value
+            .get("contents")
+            .and_then(|contents| contents.get("items"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Spotify track list had no items".to_string())?;
+
+        let ids: Vec<String> = items
+            .iter()
+            .filter_map(|item| item.get("uri").and_then(Value::as_str))
+            .filter_map(|uri| uri.strip_prefix("spotify:track:"))
+            .take(MAX_IMPORT_TRACKS)
+            .map(str::to_string)
+            .collect();
+
+        if ids.is_empty() {
+            return Err("Spotify track list had no tracks".into());
+        }
+
+        let total = value
+            .get("length")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(items.len())
+            .max(ids.len());
+
+        Ok((ids, total))
+    }
+
+    /// Rebuilds the playlist in spclient order, fetching metadata for tracks
+    /// the 100-track embed payload did not include.
+    async fn fill_overflow_tracks(&self, parsed: &mut ParsedPlaylist, ids: Vec<String>) -> usize {
+        let known: HashMap<String, SpotifyTrack> = parsed
+            .playlist
+            .tracks
+            .iter()
+            .zip(parsed.track_ids.iter())
+            .filter_map(|(track, id)| id.as_ref().map(|id| (id.clone(), track.clone())))
+            .collect();
+
+        let mut missing: Vec<String> = ids
+            .iter()
+            .filter(|id| !known.contains_key(*id))
+            .cloned()
+            .collect();
+        missing.sort_unstable();
+        missing.dedup();
+        missing.truncate(MAX_IMPORT_TRACKS.saturating_sub(known.len()));
+
+        let mut fetched: HashMap<String, SpotifyTrack> = HashMap::new();
+        for chunk in missing.chunks(TRACK_FETCH_CONCURRENCY) {
+            let mut handles = Vec::with_capacity(chunk.len());
+            for id in chunk {
+                let client = self.client.clone();
+                let id = id.clone();
+                handles.push(tokio::spawn(async move {
+                    fetch_embed_track(&client, &id)
+                        .await
+                        .map(|track| (id, track))
+                }));
+            }
+            for handle in handles {
+                if let Ok(Some((id, track))) = handle.await {
+                    fetched.insert(id, track);
+                }
+            }
+            if chunk.len() == TRACK_FETCH_CONCURRENCY {
+                // Courteous spacing so a large playlist does not burst Spotify.
+                tokio::time::sleep(Duration::from_millis(80)).await;
+            }
+        }
+
+        let expected = ids.len().min(MAX_IMPORT_TRACKS);
+        let mut ordered = Vec::with_capacity(expected);
+        for id in ids.into_iter().take(MAX_IMPORT_TRACKS) {
+            if let Some(track) = known.get(&id).or_else(|| fetched.get(&id)) {
+                ordered.push(track.clone());
+            }
+        }
+
+        let unreadable = expected.saturating_sub(ordered.len());
+        parsed.playlist.tracks = ordered;
+        parsed.track_ids.clear();
+        unreadable
+    }
+}
+
+/// Metadata for one track read from its public embed page.
+async fn fetch_embed_track(client: &reqwest::Client, track_id: &str) -> Option<SpotifyTrack> {
+    let response = client
+        .get(format!("{EMBED_TRACK_URL}/{track_id}"))
+        .header("Accept", "text/html")
+        .send()
+        .await
+        .ok()?;
+
+    if !response.status().is_success() {
+        return None;
+    }
+
+    let html = response.text().await.ok()?;
+    let json_text =
+        extract_next_data(&html).or_else(|| extract_script_json(&html, "application/json"))?;
+    let value: Value = serde_json::from_str(&json_text).ok()?;
+    let entity = find_track_entity(&value)?;
+    parse_track_entity(entity)
 }
 
 /// Accepts `open.spotify.com/playlist/<id>`, `spotify:playlist:<id>` and bare
@@ -145,7 +334,15 @@ pub fn playlist_id_from_url(input: &str) -> Option<String> {
     valid.then(|| candidate.to_string())
 }
 
-fn parse_playlist(html: &str, fallback_id: &str) -> Result<SpotifyPlaylist, String> {
+/// One parsed embed payload: public tracks plus the internals needed to
+/// paginate past the embed cap (track ids and the anonymous session token).
+struct ParsedPlaylist {
+    playlist: SpotifyPlaylist,
+    track_ids: Vec<Option<String>>,
+    access_token: Option<String>,
+}
+
+fn parse_playlist(html: &str, fallback_id: &str) -> Result<ParsedPlaylist, String> {
     let json_text = extract_next_data(html)
         .or_else(|| extract_script_json(html, "application/json"))
         .ok_or_else(|| "Spotify returned a page without playlist data".to_string())?;
@@ -169,9 +366,11 @@ fn parse_playlist(html: &str, fallback_id: &str) -> Result<SpotifyPlaylist, Stri
         .to_string();
 
     let mut tracks = Vec::new();
+    let mut track_ids = Vec::new();
     if let Some(list) = entity.get("trackList").and_then(Value::as_array) {
         for item in list {
             if let Some(track) = parse_track(item) {
+                track_ids.push(track_id_from_value(item));
                 tracks.push(track);
             }
         }
@@ -181,11 +380,117 @@ fn parse_playlist(html: &str, fallback_id: &str) -> Result<SpotifyPlaylist, Stri
         return Err("Spotify returned a playlist with no readable tracks".into());
     }
 
-    Ok(SpotifyPlaylist {
-        id: fallback_id.to_string(),
-        name,
-        description,
-        tracks,
+    let provider_total = tracks.len();
+    Ok(ParsedPlaylist {
+        playlist: SpotifyPlaylist {
+            id: fallback_id.to_string(),
+            name,
+            description,
+            tracks,
+            provider_total,
+            unreadable_tracks: 0,
+            truncated: false,
+            partial_embed: false,
+        },
+        track_ids,
+        access_token: extract_access_token(&value),
+    })
+}
+
+fn track_id_from_value(item: &Value) -> Option<String> {
+    item.get("uri")
+        .and_then(Value::as_str)
+        .and_then(|uri| uri.strip_prefix("spotify:track:"))
+        .map(str::to_string)
+}
+
+/// The embed page carries a short-lived anonymous token used by its own
+/// player. Spotify has shipped three shapes for this path over time.
+fn extract_access_token(value: &Value) -> Option<String> {
+    const PATHS: [&[&str]; 3] = [
+        &["props", "pageProps", "state", "settings", "session"],
+        &["props", "pageProps", "settings", "session"],
+        &["props", "pageProps", "session"],
+    ];
+
+    for path in PATHS {
+        let mut current = value;
+        let mut found = true;
+        for key in path {
+            match current.get(key) {
+                Some(next) => current = next,
+                None => {
+                    found = false;
+                    break;
+                }
+            }
+        }
+        if !found {
+            continue;
+        }
+        if let Some(token) = current.get("accessToken").and_then(Value::as_str) {
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn find_track_entity(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("track") && map.contains_key("name")
+            {
+                return Some(value);
+            }
+            for child in map.values() {
+                if let Some(found) = find_track_entity(child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items.iter().find_map(find_track_entity),
+        _ => None,
+    }
+}
+
+/// Parses the single-track entity shape used by `/embed/track/{id}`.
+fn parse_track_entity(entity: &Value) -> Option<SpotifyTrack> {
+    let title = entity
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+
+    let artist = entity
+        .get("artists")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            entity
+                .get("subtitle")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+
+    let duration_ms = entity.get("duration").and_then(Value::as_i64).unwrap_or(0);
+
+    Some(SpotifyTrack {
+        title: title.to_string(),
+        artist,
+        album: String::new(),
+        duration_ms,
     })
 }
 
@@ -336,8 +641,10 @@ impl ImportManager {
         }
     }
 
-    /// Fast import: fetches Spotify embed metadata and inserts all tracks into
-    /// the database in a single transaction (< 1 second), then spawns the background worker.
+    /// Fetches playlist metadata, inserts every readable track into the
+    /// database in one transaction, then spawns the background matching worker.
+    /// Most playlists resolve in about a second; playlists larger than the
+    /// embed payload take longer while the remaining public track pages are read.
     pub async fn start_import(&self, app: AppHandle, url: &str) -> Result<ImportJob, String> {
         self.start_import_internal(Some(app), url).await
     }
@@ -353,6 +660,28 @@ impl ImportManager {
         if remote.tracks.is_empty() {
             return Err("Spotify returned a playlist with no readable tracks".into());
         }
+
+        let notice = if remote.truncated {
+            Some(format!(
+                "Spotify lists {} tracks. Cavia imported the first {} because one import is capped at {}.",
+                remote.provider_total,
+                remote.tracks.len(),
+                MAX_IMPORT_TRACKS
+            ))
+        } else if remote.partial_embed {
+            Some(
+                "Spotify's public page exposed only its first 100 tracks, so this import may be \
+                 incomplete. Try again later for the full playlist."
+                    .to_string(),
+            )
+        } else if remote.unreadable_tracks > 0 {
+            Some(format!(
+                "{} Spotify tracks could not be read and were left out of this import.",
+                remote.unreadable_tracks
+            ))
+        } else {
+            None
+        };
 
         let desc = if remote.description.is_empty() {
             "Imported from Spotify".to_string()
@@ -416,6 +745,7 @@ impl ImportManager {
             current_track: None,
             status: ImportStatus::Running,
             error: None,
+            notice,
             created_at_ms,
         };
 
@@ -876,12 +1206,39 @@ mod tests {
     fn reads_embed_payload() {
         let html = r#"<html><body><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"state":{"data":{"entity":{"name":"Night drive","subtitle":"Made by Cavia","trackList":[{"title":"Instant Crush","subtitle":"Daft Punk","duration":337000},{"title":"Get Lucky","subtitle":"Daft Punk, Pharrell Williams","duration":369000}]}}}}}}</script></body></html>"#;
 
-        let playlist =
-            parse_playlist(html, "37i9dQZF1DXcBWIGoYBM5M").expect("payload should parse");
+        let parsed = parse_playlist(html, "37i9dQZF1DXcBWIGoYBM5M").expect("payload should parse");
+        let playlist = parsed.playlist;
         assert_eq!(playlist.name, "Night drive");
         assert_eq!(playlist.tracks.len(), 2);
         assert_eq!(playlist.tracks[0].title, "Instant Crush");
         assert_eq!(playlist.tracks[0].artist, "Daft Punk");
         assert_eq!(playlist.tracks[0].duration_ms, 337_000);
+        assert_eq!(playlist.provider_total, 2);
+        assert_eq!(playlist.unreadable_tracks, 0);
+        assert!(!playlist.truncated);
+        assert!(!playlist.partial_embed);
+    }
+
+    #[test]
+    fn reads_anonymous_token_and_track_ids() {
+        let html = r#"<html><body><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"state":{"settings":{"session":{"accessToken":"anon-token"}},"data":{"entity":{"name":"Long list","trackList":[{"uri":"spotify:track:abc123","title":"One","subtitle":"Artist","duration":1000}]}}}}}}</script></body></html>"#;
+
+        let parsed = parse_playlist(html, "playlist-id").expect("payload should parse");
+        assert_eq!(parsed.access_token.as_deref(), Some("anon-token"));
+        assert_eq!(parsed.track_ids, vec![Some("abc123".to_string())]);
+    }
+
+    #[test]
+    fn reads_single_track_embed_entity() {
+        let html = r#"<html><body><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"state":{"data":{"entity":{"type":"track","name":"Never Tear Us Apart","duration":184586,"artists":[{"name":"INXS"}]}}}}}}</script></body></html>"#;
+
+        let json_text = extract_next_data(html).expect("embedded json");
+        let value: Value = serde_json::from_str(&json_text).expect("valid json");
+        let entity = find_track_entity(&value).expect("track entity");
+        let track = parse_track_entity(entity).expect("track should parse");
+
+        assert_eq!(track.title, "Never Tear Us Apart");
+        assert_eq!(track.artist, "INXS");
+        assert_eq!(track.duration_ms, 184_586);
     }
 }

@@ -27,13 +27,10 @@ To enable optional cloud synchronization for a Cavia deployment:
    - The `user_id` columns default to `auth.uid()`, and `cloud_playlists.client_updated_at` defaults to `now()`, so a client insert can never create a row owned by another account.
 
    The live project (`wycltgbzbhvnfavwxgpm`) already has this schema applied. Email confirmation is disabled on it because the desktop client authenticates with email + password and expects a session immediately; enable confirmation only once transactional email is configured.
-3. **Configure Environment Variables**:
-   - In `.env` (or via the Settings UI in Cavia):
-     ```env
-     VITE_SUPABASE_URL=https://your-project.supabase.co
-     VITE_SUPABASE_ANON_KEY=eyJhbGciOi...
-     ```
-   - Only the public `anon` key is permitted.
+3. **Configure the Client**:
+   - Open **Settings → Account → Sync backend** in the installed app and paste the project URL and the publishable `anon` key. The project URL must use `https://` (plain `http://` is accepted only for a loopback development project), and only the public anon key is permitted.
+   - The anon key is stored in the local app database because it is publishable by design. The account refresh token is stored separately in the OS credential manager.
+   - A development shell may instead export `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` before launching the Rust process. Variables in `.env` are not read by the packaged application.
 
 ---
 
@@ -62,4 +59,10 @@ To enable optional cloud synchronization for a Cavia deployment:
 - **Deletions**: Soft-deleted locally with `is_deleted = 1` and recorded in `sync_tombstones`. When remote events arrive for an entity with a tombstone, older edits are discarded to prevent resurrection.
 - **Reordering**: Ordered by position index with two-phase collision avoidance. In concurrent sync, server monotonic event sequence assigns canonical order.
 - **Track Linking**: When an unavailable remote track's exact audio file (SHA-256 `content_hash`) is later scanned locally, Cavia links the local track ID, immediately enabling local playback.
+
+## 5. Automatic Sync Lifecycle
+
+When sync is enabled and an account is authenticated, the desktop client schedules a debounced sync after the library loads or refreshes. It also schedules one when the app becomes visible again, the network returns, or the user completes sign-in or enables sync in Settings. Repeated triggers replace the pending debounce timer. A Rust-side async mutex serializes automatic and manual sync calls so they cannot push the same outbox batch concurrently.
+
+Failed attempts are retried with exponential delays capped at five minutes. Outbox entries remain in SQLite until the existing acknowledgment path marks them complete. When sync is disabled or the account is signed out, the client does not start a network sync; disabling sync also clears a pending automatic retry.
 

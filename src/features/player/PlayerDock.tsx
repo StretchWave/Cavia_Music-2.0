@@ -66,6 +66,7 @@ export function PlayerDock({
   const positionMs = livePos.positionMs ?? playback.positionMs;
   const durationMs = livePos.durationMs ?? playback.durationMs;
   const isPlaying = status === 'playing';
+  const hasCurrentTrack = Boolean(currentTrack);
   const [scrubPosition, setScrubPosition] = useState<number | null>(null);
   const [volumeDraft, setVolumeDraft] = useState<number | null>(null);
 
@@ -95,7 +96,12 @@ export function PlayerDock({
               : 'Audio engine standby';
 
   return (
-    <footer className="cavia-player-dock" aria-label="Audio player">
+    <footer
+      className="cavia-player-dock"
+      aria-label="Audio player"
+      data-status={status}
+      data-has-track={currentTrack ? 'true' : 'false'}
+    >
       <div className="dock-track-section">
         <button
           type="button"
@@ -110,6 +116,13 @@ export function PlayerDock({
               className="dock-artwork-img"
               fallbackIcon={<Disc3 size={18} aria-hidden="true" />}
             />
+            {isPlaying && (
+              <span className="dock-art-live" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </span>
+            )}
           </div>
 
           <div className="dock-track-info">
@@ -144,7 +157,7 @@ export function PlayerDock({
           <IconButton
             label="Previous track"
             icon={<Rewind size={16} />}
-            disabled={!isBackendReady}
+            disabled={!isBackendReady || !hasCurrentTrack}
             onClick={onPrevious}
             title="Previous track"
             size="sm"
@@ -153,9 +166,9 @@ export function PlayerDock({
           <button
             type="button"
             className="dock-play-btn"
-            disabled={!isBackendReady}
+            disabled={!isBackendReady || !hasCurrentTrack}
             onClick={onTogglePlay}
-            title={!isBackendReady ? engineTooltip : isPlaying ? 'Pause' : 'Play'}
+            title={!isBackendReady ? engineTooltip : hasCurrentTrack ? (isPlaying ? 'Pause' : 'Play') : 'Select a track to play'}
             aria-label={isPlaying ? 'Pause' : 'Play'}
           >
             {isPlaying ? <Pause size={18} /> : <Play size={18} className="play-triangle" />}
@@ -164,7 +177,7 @@ export function PlayerDock({
           <IconButton
             label="Next track"
             icon={<FastForward size={16} />}
-            disabled={!isBackendReady}
+            disabled={!isBackendReady || !hasCurrentTrack}
             onClick={onNext}
             title="Next track"
             size="sm"
@@ -288,6 +301,13 @@ export function PlayerDock({
               className="mobile-mini-art-img"
               fallbackIcon={<Headphones size={16} />}
             />
+            {isPlaying && (
+              <span className="dock-art-live mobile" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </span>
+            )}
           </div>
           <div className="mobile-mini-info">
             <strong>{currentTrack?.title ?? 'No audio loaded'}</strong>
@@ -304,9 +324,9 @@ export function PlayerDock({
           <button
             type="button"
             className="mobile-mini-play"
-            disabled={!isBackendReady}
+            disabled={!isBackendReady || !hasCurrentTrack}
             onClick={onTogglePlay}
-            title={isPlaying ? 'Pause' : 'Play'}
+            title={hasCurrentTrack ? (isPlaying ? 'Pause' : 'Play') : 'Select a track to play'}
             aria-label={isPlaying ? 'Pause' : 'Play'}
           >
             {isPlaying ? <Pause size={16} /> : <Play size={16} />}
@@ -314,7 +334,7 @@ export function PlayerDock({
           <button
             type="button"
             className="mobile-mini-next"
-            disabled={!isBackendReady}
+            disabled={!isBackendReady || !hasCurrentTrack}
             onClick={onNext}
             aria-label="Next track"
             title="Next track"

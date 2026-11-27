@@ -7,56 +7,104 @@ use crate::services::credentials::{
 };
 use sqlx::{Row, SqlitePool};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub struct SyncEngine {
     pool: SqlitePool,
     auth: SupabaseAuthClient,
     client: SupabaseRestClient,
     credentials: Arc<dyn CredentialStore>,
+    sync_lock: Mutex<()>,
+}
+
+/// Validates a user-supplied Supabase project URL and publishable key before
+/// either is stored or used for requests. HTTPS is required; plain HTTP is
+/// accepted only for a loopback development project.
+fn normalize_sync_config(url: &str, anon_key: &str) -> Result<(String, String), String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("Enter your Supabase project URL.".to_string());
+    }
+
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|_| "That is not a valid Supabase project URL.".to_string())?;
+    let is_loopback = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    let scheme_ok = parsed.scheme() == "https" || (is_loopback && parsed.scheme() == "http");
+    if !scheme_ok {
+        return Err("The sync endpoint must use https:// (http:// only for localhost).".into());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("The sync endpoint must not contain credentials.".to_string());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("Use the project URL only, without a query or fragment.".to_string());
+    }
+    if parsed.path() != "/" && !parsed.path().is_empty() {
+        return Err("Use the project URL only, without an API path.".to_string());
+    }
+
+    let key = anon_key.trim();
+    if key.is_empty() {
+        return Err("Enter the publishable anon key for this project.".to_string());
+    }
+    if key.chars().any(char::is_whitespace) {
+        return Err("The anon key must not contain whitespace.".to_string());
+    }
+
+    Ok((parsed.origin().ascii_serialization(), key.to_string()))
 }
 
 impl SyncEngine {
+    async fn note_sync_error(&self, message: &str) {
+        let _ = sqlx::query(
+            "UPDATE sync_state SET last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+        )
+        .bind(message)
+        .execute(&self.pool)
+        .await;
+    }
+
     pub fn new(pool: SqlitePool, credentials: Arc<dyn CredentialStore>) -> Self {
         Self {
             pool,
             auth: SupabaseAuthClient::new(),
             client: SupabaseRestClient::new(),
             credentials,
+            sync_lock: Mutex::new(()),
         }
     }
 
-    pub async fn get_config(&self) -> (String, String) {
-        // Read from app_settings or environment variables
-        let url: Option<String> =
+    pub async fn get_config(&self) -> Result<(String, String), String> {
+        // Read from app_settings, then fall back to development shell variables.
+        let url_json: Option<String> =
             sqlx::query_scalar("SELECT value_json FROM app_settings WHERE key = 'supabase_url'")
                 .fetch_optional(&self.pool)
                 .await
-                .ok()
-                .flatten()
-                .and_then(|v: String| serde_json::from_str::<String>(&v).ok());
+                .map_err(|e| format!("Database error reading the sync endpoint: {e}"))?;
 
-        let key: Option<String> = sqlx::query_scalar(
+        let key_json: Option<String> = sqlx::query_scalar(
             "SELECT value_json FROM app_settings WHERE key = 'supabase_anon_key'",
         )
         .fetch_optional(&self.pool)
         .await
-        .ok()
-        .flatten()
-        .and_then(|v: String| serde_json::from_str::<String>(&v).ok());
+        .map_err(|e| format!("Database error reading the sync credential: {e}"))?;
 
-        let url = url
+        let url = url_json
+            .and_then(|v| serde_json::from_str::<String>(&v).ok())
             .or_else(|| std::env::var("VITE_SUPABASE_URL").ok())
             .unwrap_or_default();
-        let key = key
+        let key = key_json
+            .and_then(|v| serde_json::from_str::<String>(&v).ok())
             .or_else(|| std::env::var("VITE_SUPABASE_ANON_KEY").ok())
             .unwrap_or_default();
 
-        (url, key)
+        Ok((url, key))
     }
 
     pub async fn set_config(&self, url: &str, anon_key: &str) -> Result<(), String> {
-        let url_json = serde_json::to_string(url).map_err(|e| e.to_string())?;
-        let key_json = serde_json::to_string(anon_key).map_err(|e| e.to_string())?;
+        let (url, anon_key) = normalize_sync_config(url, anon_key)?;
+        let url_json = serde_json::to_string(&url).map_err(|e| e.to_string())?;
+        let key_json = serde_json::to_string(&anon_key).map_err(|e| e.to_string())?;
 
         sqlx::query("INSERT OR REPLACE INTO app_settings (key, value_json, updated_at) VALUES ('supabase_url', ?, CURRENT_TIMESTAMP)")
             .bind(url_json)
@@ -70,11 +118,19 @@ impl SyncEngine {
             .await
             .map_err(|e| format!("Failed to save the sync credential: {e}"))?;
 
+        // A corrected endpoint supersedes whatever the previous configuration
+        // reported; do not leave a stale failure on the Account card.
+        let _ = sqlx::query(
+            "UPDATE sync_state SET last_error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+        )
+        .execute(&self.pool)
+        .await;
+
         Ok(())
     }
 
     pub async fn get_status(&self) -> Result<SyncAccountStatus, String> {
-        let (url, key) = self.get_config().await;
+        let (url, key) = self.get_config().await?;
         let is_configured = !url.is_empty() && !key.is_empty();
 
         let row = sqlx::query(
@@ -99,12 +155,11 @@ impl SyncEngine {
 
         let pending_count = OutboxService::get_pending_count(&self.pool)
             .await
-            .unwrap_or(0);
+            .map_err(|e| format!("Database error counting pending changes: {e}"))?;
         let has_refresh_token = self
             .credentials
             .get(CAVIA_CREDENTIAL_SERVICE, SUPABASE_REFRESH_TOKEN_ACCOUNT)
-            .ok()
-            .flatten()
+            .map_err(|e| format!("Secure credential storage is unavailable: {e}"))?
             .is_some();
 
         Ok(SyncAccountStatus {
@@ -121,7 +176,7 @@ impl SyncEngine {
     }
 
     pub async fn signup(&self, email: &str, password: &str) -> Result<SyncAccountStatus, String> {
-        let (url, key) = self.get_config().await;
+        let (url, key) = self.get_config().await?;
         if url.is_empty() || key.is_empty() {
             return Err("Account sync is not available in this build.".to_string());
         }
@@ -153,14 +208,17 @@ impl SyncEngine {
         .await
         .map_err(|e| format!("Failed to save account state: {e}"))?;
 
-        // Perform initial merge so existing local data gets scheduled to sync
-        let _ = self.initial_merge().await;
+        // Perform initial merge so existing local data gets scheduled to sync.
+        if let Err(err) = self.initial_merge().await {
+            self.note_sync_error(&format!("Signed in, but the local merge failed: {err}"))
+                .await;
+        }
 
         self.get_status().await
     }
 
     pub async fn login(&self, email: &str, password: &str) -> Result<SyncAccountStatus, String> {
-        let (url, key) = self.get_config().await;
+        let (url, key) = self.get_config().await?;
         if url.is_empty() || key.is_empty() {
             return Err("Account sync is not available in this build.".to_string());
         }
@@ -192,9 +250,9 @@ impl SyncEngine {
         .await
         .map_err(|e| format!("Failed to save account state: {e}"))?;
 
-        // Register device
+        // Register device (non-fatal: local sync still works without it).
         let status = self.get_status().await?;
-        let _ = self
+        if let Err(err) = self
             .client
             .register_device(
                 &url,
@@ -205,26 +263,37 @@ impl SyncEngine {
                 "Cavia Desktop",
                 std::env::consts::OS,
             )
-            .await;
+            .await
+        {
+            self.note_sync_error(&format!("Device registration failed: {err}"))
+                .await;
+        }
 
-        // Perform initial merge for local data
-        let _ = self.initial_merge().await;
+        // Perform initial merge for local data.
+        if let Err(err) = self.initial_merge().await {
+            self.note_sync_error(&format!("Signed in, but the local merge failed: {err}"))
+                .await;
+        }
 
         self.get_status().await
     }
 
     pub async fn logout(&self) -> Result<(), String> {
-        let (url, key) = self.get_config().await;
+        let (url, key) = self.get_config().await?;
         if let Some(token) = self.auth.get_valid_cached_token().await {
             if !url.is_empty() && !key.is_empty() {
                 let _ = self.auth.logout(&url, &key, &token).await;
             }
         }
 
-        // Remove refresh token from secure storage
-        let _ = self
-            .credentials
-            .delete(CAVIA_CREDENTIAL_SERVICE, SUPABASE_REFRESH_TOKEN_ACCOUNT);
+        // Remove the refresh token from secure storage before reporting a
+        // successful sign-out. A keychain failure must not leave a usable
+        // token behind while the UI says the account is gone.
+        self.credentials
+            .delete(CAVIA_CREDENTIAL_SERVICE, SUPABASE_REFRESH_TOKEN_ACCOUNT)
+            .map_err(|e| {
+                format!("Could not remove the secure session token; you are still signed in: {e}")
+            })?;
         self.auth.clear_cached_session().await;
 
         // Update SQLite sync_state (never deletes local tracks or playlists)
@@ -264,7 +333,7 @@ impl SyncEngine {
             return Ok(token);
         }
 
-        let (url, key) = self.get_config().await;
+        let (url, key) = self.get_config().await?;
         if url.is_empty() || key.is_empty() {
             return Err("Account sync is not available right now.".to_string());
         }
@@ -278,19 +347,25 @@ impl SyncEngine {
 
         let auth_resp = self.auth.refresh(&url, &key, &refresh_token).await?;
 
-        // Update refresh token if rotated
+        // Update refresh token if rotated. Failing to persist it would leave a
+        // stale token in the keychain and break the next session, so surface it.
         if auth_resp.refresh_token != refresh_token {
-            let _ = self.credentials.set(
-                CAVIA_CREDENTIAL_SERVICE,
-                SUPABASE_REFRESH_TOKEN_ACCOUNT,
-                &auth_resp.refresh_token,
-            );
+            self.credentials
+                .set(
+                    CAVIA_CREDENTIAL_SERVICE,
+                    SUPABASE_REFRESH_TOKEN_ACCOUNT,
+                    &auth_resp.refresh_token,
+                )
+                .map_err(|e| format!("Could not store the refreshed secure session: {e}"))?;
         }
 
         Ok(auth_resp.access_token)
     }
 
     pub async fn sync(&self) -> Result<SyncResult, String> {
+        // Serialize manual and automatic sync requests so the same outbox
+        // batch cannot be pushed concurrently by multiple triggers.
+        let _sync_guard = self.sync_lock.lock().await;
         let status = self.get_status().await?;
         if !status.sync_enabled {
             return Ok(SyncResult {
@@ -301,7 +376,7 @@ impl SyncEngine {
             });
         }
 
-        let (url, key) = self.get_config().await;
+        let (url, key) = self.get_config().await?;
         if url.is_empty() || key.is_empty() {
             return Ok(SyncResult {
                 pushed_count: 0,
@@ -824,7 +899,7 @@ impl SyncEngine {
     }
 
     pub async fn delete_cloud_data(&self) -> Result<(), String> {
-        let (url, key) = self.get_config().await;
+        let (url, key) = self.get_config().await?;
         if url.is_empty() || key.is_empty() {
             return Err("Account sync is not available right now".to_string());
         }
@@ -852,5 +927,80 @@ impl SyncEngine {
         .map_err(|e| format!("Failed to reset local sync cursor: {e}"))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::{SyncEngine, normalize_sync_config};
+    use crate::services::credentials::InMemoryCredentialStore;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[test]
+    fn accepts_https_project_url_and_key() {
+        let (url, key) =
+            normalize_sync_config(" https://example.supabase.co/ ", " sb_publishable_abc ")
+                .expect("valid config");
+        assert_eq!(url, "https://example.supabase.co");
+        assert_eq!(key, "sb_publishable_abc");
+    }
+
+    #[test]
+    fn allows_loopback_http_for_development() {
+        let (url, _) = normalize_sync_config("http://127.0.0.1:54321", "key")
+            .expect("loopback http should be allowed");
+        assert_eq!(url, "http://127.0.0.1:54321");
+    }
+
+    #[test]
+    fn rejects_plain_http_credentials_and_api_paths() {
+        assert!(normalize_sync_config("http://example.com", "key").is_err());
+        assert!(normalize_sync_config("https://user:pass@example.com", "key").is_err());
+        assert!(normalize_sync_config("https://example.com/rest/v1", "key").is_err());
+        assert!(normalize_sync_config("https://example.com/?x=1", "key").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_or_whitespace_keys() {
+        assert!(normalize_sync_config("https://example.com", "").is_err());
+        assert!(normalize_sync_config("https://example.com", "a b").is_err());
+    }
+
+    #[tokio::test]
+    async fn sync_lock_serializes_automatic_and_manual_triggers() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory database");
+        let engine = Arc::new(SyncEngine::new(
+            pool,
+            Arc::new(InMemoryCredentialStore::new()),
+        ));
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+
+        for _ in 0..4 {
+            let engine = Arc::clone(&engine);
+            let active = Arc::clone(&active);
+            let maximum = Arc::clone(&maximum);
+            tasks.push(tokio::spawn(async move {
+                let _guard = engine.sync_lock.lock().await;
+                let running = active.fetch_add(1, Ordering::SeqCst) + 1;
+                maximum.fetch_max(running, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+
+        for task in tasks {
+            task.await.expect("sync trigger task");
+        }
+        assert_eq!(maximum.load(Ordering::SeqCst), 1);
     }
 }

@@ -91,7 +91,7 @@ export function Slider({
 
   return (
     <div
-      className={`cavia-slider-wrap ${disabled ? 'disabled' : ''} ${className}`}
+      className={`cavia-slider-wrap ${disabled ? 'disabled' : ''} ${isInteracting ? 'is-dragging' : ''} ${className}`}
       style={{ '--slider-fill': `${percentage}%` } as CSSProperties}
     >
       {showFill && <span className="cavia-slider-fill" aria-hidden="true" />}

@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub use cache::{CachedLyrics, compute_track_signature, get_cached_lyrics, save_cached_lyrics};
 pub use embedded::{EmbeddedLyricsResult, extract_embedded_lyrics};
 pub use lrclib::{LrclibClient, LrclibError, LrclibResult};
-pub use parser::{LyricsLine, ParsedLrc, is_likely_lrc, parse_lrc};
+pub use parser::{LyricsLine, LyricsWordTiming, ParsedLrc, is_likely_lrc, parse_lrc};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1267,6 +1267,10 @@ mod tests {
             synced_lines: Some(vec![LyricsLine {
                 timestamp_ms: 1000,
                 text: "Line".to_string(),
+                word_timings: Some(vec![LyricsWordTiming {
+                    timestamp_ms: 1200,
+                    text: "Line ".to_string(),
+                }]),
             }]),
             is_instrumental: false,
         };
@@ -1274,6 +1278,10 @@ mod tests {
         assert_eq!(json["trackId"], "track-1");
         assert_eq!(json["plainLyrics"], "Line");
         assert_eq!(json["syncedLines"][0]["timestampMs"], 1000);
+        assert_eq!(
+            json["syncedLines"][0]["wordTimings"][0]["timestampMs"],
+            1200
+        );
         assert_eq!(json["isInstrumental"], false);
         assert!(json.get("track_id").is_none());
     }

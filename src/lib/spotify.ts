@@ -15,6 +15,8 @@ export interface ImportJob {
   currentTrack?: string | null;
   status: ImportStatus;
   error?: string | null;
+  /** Present when Spotify listed more tracks than Cavia could import. */
+  notice?: string | null;
   createdAtMs: number;
 }
 
@@ -30,9 +32,11 @@ export interface SpotifyImportResult {
 export const isSpotifyImportAvailable = (): boolean => isTauri();
 
 /**
- * Starts a fast asynchronous Spotify playlist import. The playlist and all track
- * shells are created in SQLite in under a second; matching against the local library
- * and YouTube Music runs in the background.
+ * Starts an asynchronous Spotify playlist import. Playlist metadata is read
+ * first, then the playlist and its track shells are written in one SQLite
+ * transaction; matching against the local library and YouTube Music runs in
+ * the background. Playlists larger than Spotify's ~100-track embed payload
+ * can take longer before the job appears.
  */
 export async function startSpotifyImport(url: string): Promise<ImportJob> {
   if (!isTauri()) {

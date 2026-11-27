@@ -9,7 +9,7 @@ All platform implementations follow one Cavia playback contract (`AudioBackend` 
 | Windows | Native Rodio (CPAL WASAPI + Symphonia) | Windows SMTC (`souvlaki`) | MIT / Apache-2.0 | **Implemented and runtime-verified**: local UI transport, media-key Play/Pause, persistence, restore |
 | macOS | Native Rodio (CPAL CoreAudio + Symphonia) | Standby / deferred | MIT / Apache-2.0 | Compiled only; not runtime-verified |
 | Windows (alt) | libmpv via `rsmpv` (feature `desktop-mpv`) | Windows SMTC | GPLv3 / LGPLv2.1+ | Evaluated / optional feature; not bundled |
-| Android | Native Media3 ExoPlayer (planned) | MediaSessionService + foreground notification | Apache-2.0 | **Not integrated** — stub returns `BackendUnavailable`, health `not_integrated` |
+| Android | Media3 ExoPlayer through a Rust playback-contract adapter | MediaSessionService + system MediaSession | Apache-2.0 | Local WAV plus live YouTube Music cache-then-decode playback verified on Android 16 x86_64 emulator; physical device/background behavior unverified |
 | iOS | Native AVPlayer (planned) | `MPNowPlayingInfoCenter` + `MPRemoteCommandCenter` | Apple SDK | **Not integrated** — stub returns `BackendUnavailable`, health `not_integrated` |
 
 ---
@@ -23,7 +23,7 @@ All platform implementations follow one Cavia playback contract (`AudioBackend` 
 - **Shutdown:** `RunEvent::ExitRequested` prevents immediate exit, calls `PlaybackService::shutdown()`, and on failure prevents exit, logs error to stderr, resets shutdown flag, and emits `app:shutdown-error` to the webview with `retry_shutdown` and `force_exit` recovery options. An atomic `command_gate` serializes command submissions to eliminate races; concurrent callers await `ShutdownProgress` without duplicate executions; the audio actor stops its loop only upon successful shutdown commit.
 - **Periodic persistence:** while Playing, the actor saves at most once every 5 s. Pause, stop, track changes and application exit flush explicitly.
 - **Position semantics & restore resilience:** `media_ms = wall_clock * speed_factor`, with seek-aware adaptation. When restored from SQLite, `restored_position_ms` preserves the saved position even if the audio file or external volume is missing or fails to decode. `snapshot()` and `persist_state()` prioritize `restored_position_ms` over zeroed backend position, preventing zero-overwrites when media is temporarily unavailable. Full queue metadata is restored even from unmounted volumes.
-- **Device resilience:** startup without an output device is non-fatal; the app remains usable and reports `device_unavailable`. A manual retry re-opens the device. **Mid-stream disconnect detection and automatic recovery are not implemented.**
+- **Device resilience:** startup without an output device is non-fatal; the app remains usable and reports `device_unavailable`. Rodio's CPAL error callback marks a failed output stream unavailable. The playback actor retries reopening it every two seconds and the backend restores the current track and position when possible. This recovery path is implemented but has not been verified by physically disconnecting and restoring hardware on Windows or macOS.
 - **Seeking:** `player.try_seek(Duration)` uses Symphonia's container seek index; failures return an honest `SeekError` rather than decoding from the start.
 - **Codecs:** FLAC, ALAC, MP3, WAV, AAC/M4A, Ogg Vorbis, AIFF. WMA/Opus are excluded from discovery rather than silently failing.
 - **Tests:** real fixtures for FLAC, MP3, AAC/M4A, ALAC/M4A, AIFF and a 30 s FLAC; decode/seek and long-seek latency tests. All tests that require physical audio output hardware are explicitly marked `#[ignore = "requires a physical audio output device"]` and assert device readiness.
@@ -46,13 +46,16 @@ All platform implementations follow one Cavia playback contract (`AudioBackend` 
 
 | Capability | Windows | macOS | Android | iOS |
 |---|---|---|---|---|
-| Local files (FLAC/ALAC/MP3/WAV/AAC/OGG/AIFF) | Supported, runtime-verified | Compiled only | Not integrated | Not integrated |
+| Local files (FLAC/ALAC/MP3/WAV/AAC/OGG/AIFF) | Supported, runtime-verified | Compiled only | Media3 adapter and SAF staging; WAV import/play verified on emulator; other codecs unverified | Not integrated |
 | Non-blocking demuxer seeking | Supported, verified | Compiled only | Not integrated | Not integrated |
-| Mid-stream device disconnect recovery | **Unsupported** (manual retry only) | **Unsupported** | N/A | N/A |
+| Mid-stream device disconnect recovery | Implemented; hardware runtime-unverified | Same Rodio code; runtime-unverified | N/A | N/A |
 | Startup without output device | Supported, verified | Same code, unverified | N/A | N/A |
 | Progressive HTTPS / HLS / DASH | Standby | Standby | Not implemented | Not implemented |
-| Background playback | Process open | Process open, unverified | Standby | Standby |
-| System media controls | SMTC initialized; Play/Pause verified; Seek/Next/Previous mapped but not exercised | Standby | Standby | Standby |
+| YouTube Music catalogue search | Live search verified in Windows runtime | Out of scope in this pass | Live search verified on Android 16 x86_64 emulator | Out of scope in this pass |
+| YouTube Music audio | Search, resolve, cache and decode verified; Windows device playback for a provider result not separately exercised | Out of scope in this pass | Cache-then-decode playback verified through Media3; no progressive stream | Out of scope in this pass |
+| Background playback | Process open | Out of scope in this pass | MediaSessionService registered and active during foreground playback; backgrounding behavior unverified | Out of scope in this pass |
+| System media controls | SMTC initialized; Play/Pause verified; Seek/Next/Previous mapped but not exercised | Out of scope in this pass | MediaSession registered; transport actions unverified | Out of scope in this pass |
+| Secure refresh-token storage | Windows Credential Manager adapter wired; see current verification matrix | Out of scope in this pass | Android Keystore + AES-GCM encrypted preferences; emulator round-trip verified | Out of scope in this pass |
 | Gapless / crossfade | Standby | Standby | Standby | Standby |
 
-**Scope note:** Windows was exercised with a real UI and OS media keys. macOS, Android and iOS were not run. Device-disconnect resilience is explicitly unsupported, not merely unverified.
+**Scope note:** Windows was exercised with a real UI and OS media keys. On Android 16 emulator, SAF import staged a temporary WAV in app-private storage, the Rust scanner inserted it into SQLite, ExoPlayer reported non-zero playback position, and MediaSession registered. Physical Android output, background playback, macOS and iOS were not tested. Device-disconnect recovery is implemented for the desktop Rodio backend but still requires hardware validation.

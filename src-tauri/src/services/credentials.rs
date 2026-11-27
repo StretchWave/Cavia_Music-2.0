@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
+#[cfg(target_os = "android")]
+use tauri::{Wry, plugin::PluginHandle};
 
 pub const CAVIA_CREDENTIAL_SERVICE: &str = "com.cavia.music";
 pub const SUPABASE_REFRESH_TOKEN_ACCOUNT: &str = "supabase_refresh_token";
@@ -14,14 +16,24 @@ pub trait CredentialStore: Send + Sync {
 
 /// Production credential store using OS-level secure storage (Windows Credential Manager,
 /// macOS Keychain, etc.) via the `keyring` crate.
-pub struct KeyringStore;
+pub struct KeyringStore {
+    #[cfg(target_os = "android")]
+    plugin: PluginHandle<Wry>,
+}
 
 impl KeyringStore {
+    #[cfg(not(target_os = "android"))]
     pub fn new() -> Self {
-        Self
+        Self {}
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn new(plugin: PluginHandle<Wry>) -> Self {
+        Self { plugin }
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl Default for KeyringStore {
     fn default() -> Self {
         Self::new()
@@ -30,35 +42,103 @@ impl Default for KeyringStore {
 
 impl CredentialStore for KeyringStore {
     fn get(&self, service: &str, account: &str) -> Result<Option<String>, String> {
-        let entry = keyring::Entry::new(service, account)
-            .map_err(|e| format!("Failed to initialize keyring entry for '{account}': {e}"))?;
+        #[cfg(target_os = "android")]
+        {
+            #[derive(serde::Serialize)]
+            struct Args<'a> {
+                service: &'a str,
+                account: &'a str,
+            }
+            #[derive(serde::Deserialize)]
+            struct Response {
+                found: bool,
+                secret: Option<String>,
+            }
+            let response: Response = self
+                .plugin
+                .run_mobile_plugin("credentialGet", Args { service, account })
+                .map_err(|_| "Android secure credential read failed".to_string())?;
+            return Ok(if response.found {
+                response.secret
+            } else {
+                None
+            });
+        }
 
-        match entry.get_password() {
-            Ok(secret) => Ok(Some(secret)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(format!(
-                "Failed to retrieve credential for '{account}': {e}"
-            )),
+        #[cfg(not(target_os = "android"))]
+        {
+            let entry = keyring::Entry::new(service, account)
+                .map_err(|e| format!("Failed to initialize keyring entry for '{account}': {e}"))?;
+
+            match entry.get_password() {
+                Ok(secret) => Ok(Some(secret)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(e) => Err(format!(
+                    "Failed to retrieve credential for '{account}': {e}"
+                )),
+            }
         }
     }
 
     fn set(&self, service: &str, account: &str, secret: &str) -> Result<(), String> {
-        let entry = keyring::Entry::new(service, account)
-            .map_err(|e| format!("Failed to initialize keyring entry for '{account}': {e}"))?;
+        #[cfg(target_os = "android")]
+        {
+            #[derive(serde::Serialize)]
+            struct Args<'a> {
+                service: &'a str,
+                account: &'a str,
+                secret: &'a str,
+            }
+            let _: serde_json::Value = self
+                .plugin
+                .run_mobile_plugin(
+                    "credentialSet",
+                    Args {
+                        service,
+                        account,
+                        secret,
+                    },
+                )
+                .map_err(|_| "Android secure credential write failed".to_string())?;
+            return Ok(());
+        }
 
-        entry
-            .set_password(secret)
-            .map_err(|e| format!("Failed to store credential for '{account}': {e}"))
+        #[cfg(not(target_os = "android"))]
+        {
+            let entry = keyring::Entry::new(service, account)
+                .map_err(|e| format!("Failed to initialize keyring entry for '{account}': {e}"))?;
+
+            entry
+                .set_password(secret)
+                .map_err(|e| format!("Failed to store credential for '{account}': {e}"))
+        }
     }
 
     fn delete(&self, service: &str, account: &str) -> Result<(), String> {
-        let entry = keyring::Entry::new(service, account)
-            .map_err(|e| format!("Failed to initialize keyring entry for '{account}': {e}"))?;
+        #[cfg(target_os = "android")]
+        {
+            #[derive(serde::Serialize)]
+            struct Args<'a> {
+                service: &'a str,
+                account: &'a str,
+            }
+            let _: serde_json::Value = self
+                .plugin
+                .run_mobile_plugin("credentialDelete", Args { service, account })
+                .map_err(|_| "Android secure credential deletion failed".to_string())?;
+            return Ok(());
+        }
 
-        match entry.delete_credential() {
-            Ok(()) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(format!("Failed to delete credential for '{account}': {e}")),
+        #[cfg(not(target_os = "android"))]
+        {
+            let entry = keyring::Entry::new(service, account)
+                .map_err(|e| format!("Failed to initialize keyring entry for '{account}': {e}"))?;
+
+            match entry.delete_credential() {
+                Ok(()) => Ok(()),
+                Err(keyring::Error::NoEntry) => Ok(()),
+                Err(e) => Err(format!("Failed to delete credential for '{account}': {e}")),
+            }
         }
     }
 }

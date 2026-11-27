@@ -25,6 +25,9 @@ export const isNativeApp = (): boolean => isTauri();
 
 export async function pickMusicFolder(): Promise<string | null> {
   if (!isNativeApp()) return null;
+  if (/Android/i.test(navigator.userAgent)) {
+    return invoke<string | null>('pick_android_music_folder');
+  }
   const result = await open({
     directory: true,
     multiple: false,

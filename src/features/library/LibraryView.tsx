@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   AudioWaveform,
   ChevronRight,
+  DownloadCloud,
   Disc3,
   FolderPlus,
   Heart,
@@ -38,6 +39,8 @@ type LibraryFilter = 'all' | 'tracks' | 'albums' | 'artists' | 'playlists' | 'li
 
 interface LibraryViewProps {
   connectionError: string | null;
+  libraryError: string | null;
+  onRetryLibrary: () => void;
   tracks: Track[];
   albums: Album[];
   artists: Artist[];
@@ -70,6 +73,8 @@ interface LibraryViewProps {
   onAddAlbumToPlaylist: (album: Album) => void;
   onPlayNext: (trackId: string) => void;
   onNavigateToImports?: () => void;
+  activeImportCount?: number;
+  onOpenImportActivity?: () => void;
 }
 
 const FILTERS: Array<{ id: LibraryFilter; label: string }> = [
@@ -83,6 +88,8 @@ const FILTERS: Array<{ id: LibraryFilter; label: string }> = [
 
 export function LibraryView({
   connectionError,
+  libraryError,
+  onRetryLibrary,
   tracks,
   albums,
   artists,
@@ -115,6 +122,8 @@ export function LibraryView({
   onAddAlbumToPlaylist,
   onPlayNext,
   onNavigateToImports,
+  activeImportCount = 0,
+  onOpenImportActivity,
 }: LibraryViewProps) {
   const [filter, setFilter] = useState<LibraryFilter>('all');
   const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null);
@@ -510,6 +519,15 @@ export function LibraryView({
       >
         {isScanning ? 'Scanning…' : 'Import'}
       </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        icon={<DownloadCloud size={15} />}
+        onClick={onOpenImportActivity ?? onNavigateToImports}
+        aria-label={activeImportCount > 0 ? `Import activity, ${activeImportCount} active` : 'Import activity'}
+      >
+        Activity{activeImportCount > 0 ? ` · ${activeImportCount}` : ''}
+      </Button>
       {isSpotifyImportAvailable() && (
         <Button
           variant="outline"
@@ -570,6 +588,16 @@ export function LibraryView({
         <div className="cavia-banner banner-error library-error">
           <WifiOff size={16} />
           <span>Local core communication issue: {connectionError}</span>
+        </div>
+      )}
+
+      {libraryError && (
+        <div className="cavia-banner banner-error library-error" role="alert">
+          <WifiOff size={16} />
+          <span>Could not load your library: {libraryError}</span>
+          <Button variant="outline" size="sm" onClick={onRetryLibrary}>
+            Retry
+          </Button>
         </div>
       )}
 
@@ -693,6 +721,15 @@ export function LibraryView({
                 {...trackListProps}
               />
             </section>
+          ) : libraryError ? (
+            <div className="library-empty">
+              <WifiOff size={24} />
+              <h2>Library unavailable</h2>
+              <p>Cavia could not read the local library. Your audio files are unchanged.</p>
+              <Button variant="primary" size="md" onClick={onRetryLibrary}>
+                Retry loading
+              </Button>
+            </div>
           ) : (
             <div className="library-empty">
               <Music2 size={24} />
@@ -753,6 +790,15 @@ export function LibraryView({
               onEnterManageMode={() => handleEnterManage('tracks')}
               {...trackListProps}
             />
+          ) : libraryError ? (
+            <div className="library-empty compact-empty">
+              <WifiOff size={22} />
+              <h2>Library unavailable</h2>
+              <p>Retry loading your library. Audio files are unchanged.</p>
+              <Button variant="outline" size="sm" onClick={onRetryLibrary}>
+                Retry
+              </Button>
+            </div>
           ) : (
             <div className="library-empty compact-empty">
               <Music2 size={22} />

@@ -5089,6 +5089,10 @@ a {
   flex: 1;
 }
 
+.import-job-notice {
+  color: var(--status-warn);
+}
+
 .imports-note {
   margin: 0;
   font-size: 12px;

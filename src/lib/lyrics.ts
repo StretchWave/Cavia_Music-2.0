@@ -4,6 +4,13 @@ import { isNativeApp } from './platform';
 export interface LyricsLine {
   timestampMs: number;
   text: string;
+  /** Present only when the lyric source supplied explicit inline word times. */
+  wordTimings?: LyricsWordTiming[] | null;
+}
+
+export interface LyricsWordTiming {
+  timestampMs: number;
+  text: string;
 }
 
 export type LyricsStatus = 'synced' | 'plain' | 'instrumental' | 'not_found';

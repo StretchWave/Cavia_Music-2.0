@@ -5,6 +5,15 @@ use serde::{Deserialize, Serialize};
 pub struct LyricsLine {
     pub timestamp_ms: i64,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_timings: Option<Vec<LyricsWordTiming>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LyricsWordTiming {
+    pub timestamp_ms: i64,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,6 +129,59 @@ fn parse_timestamp_tag(tag: &str) -> Option<i64> {
     None
 }
 
+/// Parses enhanced-LRC inline timestamps such as
+/// `[00:12.00]<00:12.10>Hello <00:12.45>world`. Word highlighting is enabled
+/// only when each timed segment contains one whitespace-delimited token.
+fn parse_enhanced_lyric_text(input: &str) -> (String, Option<Vec<LyricsWordTiming>>) {
+    let mut display_text = String::new();
+    let mut words = Vec::new();
+    let mut cursor = 0;
+
+    while let Some(relative_open) = input[cursor..].find('<') {
+        let open = cursor + relative_open;
+        display_text.push_str(&input[cursor..open]);
+        let Some(relative_close) = input[open + 1..].find('>') else {
+            display_text.push_str(&input[open..]);
+            cursor = input.len();
+            break;
+        };
+        let close = open + 1 + relative_close;
+        let Some(timestamp_ms) = parse_timestamp_tag(&input[open + 1..close]) else {
+            display_text.push_str(&input[open..=close]);
+            cursor = close + 1;
+            continue;
+        };
+        let text_start = close + 1;
+        let next_open = input[text_start..]
+            .find('<')
+            .map(|relative| text_start + relative)
+            .unwrap_or(input.len());
+        let text = &input[text_start..next_open];
+        display_text.push_str(text);
+        if !text.trim().is_empty() {
+            words.push(LyricsWordTiming {
+                timestamp_ms,
+                text: text.to_string(),
+            });
+        }
+        cursor = next_open;
+    }
+    if cursor < input.len() {
+        display_text.push_str(&input[cursor..]);
+    }
+
+    let word_level = (!words.is_empty()
+        && words
+            .iter()
+            .all(|word| word.text.split_whitespace().count() == 1))
+    .then_some(words);
+    (display_text.trim().to_string(), word_level)
+}
+
+fn strip_enhanced_timestamps(input: &str) -> String {
+    parse_enhanced_lyric_text(input).0
+}
+
 /// Parses an offset metadata tag like `[offset:+500]` or `[offset:-200]` in milliseconds.
 fn parse_offset_tag(line: &str) -> Option<i64> {
     let lower = line.to_lowercase();
@@ -148,9 +210,10 @@ pub fn lrc_to_plain_text(content: &str) -> String {
                 break;
             }
         }
-        let trimmed = cur.trim();
+        let clean = strip_enhanced_timestamps(cur);
+        let trimmed = clean.trim();
         if !trimmed.is_empty() {
-            plain_lines.push(trimmed);
+            plain_lines.push(trimmed.to_string());
         }
     }
 
@@ -159,7 +222,7 @@ pub fn lrc_to_plain_text(content: &str) -> String {
 
 /// Parses an LRC document into structured, timestamp-ordered lines and plain lyrics.
 pub fn parse_lrc(content: &str) -> ParsedLrc {
-    let mut raw_lines: Vec<(i64, usize, String)> = Vec::new();
+    let mut raw_lines: Vec<(i64, usize, String, Option<Vec<LyricsWordTiming>>)> = Vec::new();
     let mut offset_ms: i64 = 0;
     let mut plain_lines: Vec<String> = Vec::new();
     let mut line_seq = 0;
@@ -207,14 +270,14 @@ pub fn parse_lrc(content: &str) -> ParsedLrc {
             }
         }
 
-        let lyric_text = rest.trim().to_string();
+        let (lyric_text, word_timings) = parse_enhanced_lyric_text(rest.trim());
 
         if !timestamps.is_empty() {
             if !lyric_text.is_empty() {
                 plain_lines.push(lyric_text.clone());
             }
             for ts in timestamps {
-                raw_lines.push((ts, line_seq, lyric_text.clone()));
+                raw_lines.push((ts, line_seq, lyric_text.clone(), word_timings.clone()));
                 line_seq += 1;
             }
         } else if !lyric_text.is_empty() {
@@ -231,12 +294,21 @@ pub fn parse_lrc(content: &str) -> ParsedLrc {
         other => other,
     });
 
-    for (ts, _, text) in raw_lines {
+    for (ts, _, text, word_timings) in raw_lines {
         // Apply offset, clamping to 0 if negative
         let adjusted_ts = (ts + offset_ms).max(0);
         lines.push(LyricsLine {
             timestamp_ms: adjusted_ts,
             text,
+            word_timings: word_timings.map(|words| {
+                words
+                    .into_iter()
+                    .map(|word| LyricsWordTiming {
+                        timestamp_ms: (word.timestamp_ms + offset_ms).max(0),
+                        text: word.text,
+                    })
+                    .collect()
+            }),
         });
     }
 
@@ -275,6 +347,39 @@ mod tests {
         assert_eq!(parsed.lines[1].timestamp_ms, 8500);
         assert_eq!(parsed.lines[2].timestamp_ms, 12920);
         assert_eq!(parsed.offset_ms, 0);
+        assert!(parsed.lines[0].word_timings.is_none());
+    }
+
+    #[test]
+    fn enhanced_lrc_preserves_only_source_provided_word_timestamps() {
+        let parsed = parse_lrc("[offset:+200]\n[00:01.00]<00:01.00>Hello <00:01.50>world");
+        let line = &parsed.lines[0];
+        assert_eq!(line.text, "Hello world");
+        assert_eq!(line.timestamp_ms, 1200);
+        assert_eq!(
+            line.word_timings.as_ref().unwrap(),
+            &vec![
+                LyricsWordTiming {
+                    timestamp_ms: 1200,
+                    text: "Hello ".into(),
+                },
+                LyricsWordTiming {
+                    timestamp_ms: 1700,
+                    text: "world".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            lrc_to_plain_text("[00:01.00]<00:01.00>Hello <00:01.50>world"),
+            "Hello world"
+        );
+    }
+
+    #[test]
+    fn enhanced_lrc_does_not_claim_word_sync_for_phrase_timestamps() {
+        let parsed = parse_lrc("[00:01.00]<00:01.20>Hello dear listener");
+        assert_eq!(parsed.lines[0].text, "Hello dear listener");
+        assert!(parsed.lines[0].word_timings.is_none());
     }
 
     #[test]

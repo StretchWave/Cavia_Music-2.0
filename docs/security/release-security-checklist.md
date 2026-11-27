@@ -4,15 +4,18 @@
 **Scope**: Pre-release application security audit  
 **Application**: Cavia Music 2.0.0  
 
+> Historical audit artifact. The checked items below are not a current release sign-off. Current platform credential limits are recorded here and in `docs/legal/data-handling.md`; re-verify the remaining controls before relying on this checklist.
+
 ---
 
 ## 1. Authentication & Credential Storage
 
-- [x] **Secure Token Storage**: Refresh tokens are stored exclusively in operating system secure storage via the `keyring` crate (Windows Credential Manager, macOS Keychain, Android KeyStore, iOS Keychain).
-- [x] **Zero Plaintext Tokens**: Tokens, passwords, and API secrets are never stored in SQLite database files or plaintext settings.
-- [x] **Memory-Only Access Tokens**: Short-lived JWT access tokens reside in volatile memory and are cleared upon process shutdown.
-- [x] **Clean Sign-Out**: Disconnecting or signing out immediately purges the refresh token from OS credential storage and clears active in-memory session tokens.
-- [x] **Redaction in Diagnostics**: Application logs and error events redact authorization headers, tokens, and user credentials.
+- [x] **Windows Secure Token Storage**: The Windows credential adapter uses the OS credential manager through `keyring`.
+- [x] **No Plaintext Fallback**: Credential failures return errors; tokens are not written to SQLite or plain settings.
+- [ ] **macOS Secure Token Storage**: The code path uses the platform keyring, but runtime writes have not been verified on macOS.
+- [x] **Android Keystore Storage**: Android Keystore-backed AES-GCM storage passed a set/get/delete round-trip on the Android 16 x86_64 emulator; physical-device behavior is unverified.
+- [ ] **iOS Secure Token Storage**: Native iOS Keychain initialization is not integrated; iOS credential operations must fail closed.
+- [ ] **Memory-Only Access Tokens, Sign-Out, and Log Redaction**: Re-audit these flows on each supported platform before marking complete. This historical checklist has not independently verified the current implementation.
 
 ---
 
@@ -22,7 +25,7 @@
 - [x] **Zero Audio Data Transmission**: The sync engine synchronizes metadata and SHA-256 track content hashes only. User audio files and embedded artwork binaries are never transmitted.
 - [x] **Local Filesystem Path Privacy**: Local file paths (`file_uri`) remain exclusively in local SQLite and are never pushed to the cloud outbox.
 - [x] **Atomic Outbox Mutations**: Local mutations use transactional SQLite writes (`BEGIN IMMEDIATE`) with tombstone markers to guarantee collision-free synchronization.
-- [x] **Complete Cloud Purge**: `delete_cloud_data` executes a cascading wipe of all remote user records upon user request.
+- [ ] **Complete Cloud Purge**: The command and its provider-side behavior need a current end-to-end verification before this is marked complete.
 
 ---
 

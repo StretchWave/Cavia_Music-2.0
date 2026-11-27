@@ -26,7 +26,7 @@ import { Button } from '../../components/Button';
 import { Modal } from '../../components/Modal';
 import type { PlatformHealth } from '../../lib/platform';
 import type { MotionSetting } from '../../lib/motion';
-import type { SyncAccountStatus } from '../../lib/types';
+import type { SyncAccountStatus, SyncConfigDTO } from '../../lib/types';
 import {
   getArtworkCacheSummary,
   cleanOrphanedArtwork,
@@ -45,6 +45,8 @@ import {
   toggleSync,
   syncNow,
   deleteCloudData,
+  getSyncConfig,
+  setSyncConfig as saveSyncConfig,
 } from '../../lib/sync';
 
 interface SettingsViewProps {
@@ -53,6 +55,7 @@ interface SettingsViewProps {
   onDensityChange: (density: 'standard' | 'compact') => void;
   motion: MotionSetting;
   onMotionChange: (motion: MotionSetting) => void;
+  onSyncConfigurationChanged: (enabled: boolean) => void;
 }
 
 type SettingsSection = 'appearance' | 'audio' | 'library' | 'account' | 'about';
@@ -71,6 +74,7 @@ export const SettingsView = memo(function SettingsView({
   onDensityChange,
   motion,
   onMotionChange,
+  onSyncConfigurationChanged,
 }: SettingsViewProps) {
   const [activeSection, setActiveSection] = useState<SettingsSection>('appearance');
 
@@ -86,6 +90,10 @@ export const SettingsView = memo(function SettingsView({
 
   // Cloud sync
   const [syncStatus, setSyncStatus] = useState<SyncAccountStatus | null>(null);
+  const [syncConfig, setSyncBackendConfig] = useState<SyncConfigDTO | null>(null);
+  const [syncUrl, setSyncUrl] = useState('');
+  const [syncAnonKey, setSyncAnonKey] = useState('');
+  const [isSavingSyncConfig, setIsSavingSyncConfig] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -114,6 +122,7 @@ export const SettingsView = memo(function SettingsView({
       setSyncStatus(status);
     } catch (e) {
       console.error('Failed to load sync info:', e);
+      setSyncError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -141,12 +150,49 @@ export const SettingsView = memo(function SettingsView({
         if (!active) return;
         setSyncStatus(status);
       })
-      .catch((e) => console.error('Failed to load sync info:', e));
+      .catch((e) => {
+        if (!active) return;
+        setSyncError(e instanceof Error ? e.message : String(e));
+      });
+
+    getSyncConfig()
+      .then((config) => {
+        if (!active) return;
+        setSyncBackendConfig(config);
+        setSyncUrl(config.supabaseUrl);
+        setSyncAnonKey(config.supabaseAnonKey);
+      })
+      .catch((e) => {
+        if (!active) return;
+        setSyncError(e instanceof Error ? e.message : String(e));
+      });
 
     return () => {
       active = false;
     };
   }, []);
+
+  const handleSaveSyncConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!syncUrl.trim() || !syncAnonKey.trim() || isSavingSyncConfig) return;
+
+    setIsSavingSyncConfig(true);
+    setSyncError(null);
+    try {
+      await saveSyncConfig(syncUrl.trim(), syncAnonKey.trim());
+      const [config, status] = await Promise.all([getSyncConfig(), getSyncStatus()]);
+      setSyncBackendConfig(config);
+      setSyncUrl(config.supabaseUrl);
+      setSyncAnonKey(config.supabaseAnonKey);
+      setSyncStatus(status);
+      setSyncSuccessMsg('Sync backend saved');
+      setTimeout(() => setSyncSuccessMsg(null), 3000);
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSavingSyncConfig(false);
+    }
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -158,6 +204,7 @@ export const SettingsView = memo(function SettingsView({
     try {
       const status = await syncLogin(authEmail.trim(), password);
       setSyncStatus(status);
+      onSyncConfigurationChanged(true);
       setSyncSuccessMsg('Signed in');
       setTimeout(() => setSyncSuccessMsg(null), 3000);
     } catch (err) {
@@ -176,6 +223,7 @@ export const SettingsView = memo(function SettingsView({
     try {
       const status = await syncSignup(authEmail.trim(), password);
       setSyncStatus(status);
+      onSyncConfigurationChanged(true);
       setSyncSuccessMsg('Account created');
       setTimeout(() => setSyncSuccessMsg(null), 3000);
     } catch (err) {
@@ -189,6 +237,7 @@ export const SettingsView = memo(function SettingsView({
     try {
       await syncLogout();
       await fetchSyncInfo();
+      onSyncConfigurationChanged(false);
     } catch (err) {
       setSyncError(err instanceof Error ? err.message : String(err));
     }
@@ -198,6 +247,7 @@ export const SettingsView = memo(function SettingsView({
     try {
       await toggleSync(enabled);
       await fetchSyncInfo();
+      onSyncConfigurationChanged(enabled);
     } catch (err) {
       setSyncError(err instanceof Error ? err.message : String(err));
     }
@@ -668,6 +718,74 @@ export const SettingsView = memo(function SettingsView({
 
             <div className="settings-card">
               <div className="card-head">
+                <Cloud size={18} className="card-icon" />
+                <div>
+                  <h3>Sync backend</h3>
+                  <p>Point Cavia at your Supabase project. Only the publishable anon key is accepted.</p>
+                </div>
+              </div>
+
+              <div className="setting-status-line">
+                <Badge variant={syncConfig?.isConfigured ? 'ready' : 'outline'} size="sm">
+                  {syncConfig?.isConfigured ? 'CONFIGURED' : 'NOT CONFIGURED'}
+                </Badge>
+                {syncConfig?.isConfigured && (
+                  <span className="text-muted-xs">
+                    {syncConfig.supabaseUrl}
+                  </span>
+                )}
+              </div>
+
+              <form onSubmit={handleSaveSyncConfig} className="sync-auth-form">
+                <div className="form-field">
+                  <label htmlFor="sync-backend-url">Project URL</label>
+                  <input
+                    id="sync-backend-url"
+                    type="url"
+                    className="cavia-text-input"
+                    placeholder="https://your-project.supabase.co"
+                    value={syncUrl}
+                    onChange={(e) => setSyncUrl(e.target.value)}
+                    disabled={isSavingSyncConfig}
+                    required
+                  />
+                </div>
+
+                <div className="form-field">
+                  <label htmlFor="sync-backend-key">Publishable anon key</label>
+                  <input
+                    id="sync-backend-key"
+                    type="password"
+                    className="cavia-text-input"
+                    placeholder="eyJhbGciOi…"
+                    value={syncAnonKey}
+                    onChange={(e) => setSyncAnonKey(e.target.value)}
+                    disabled={isSavingSyncConfig}
+                    autoComplete="off"
+                    required
+                  />
+                </div>
+
+                <p className="text-muted-xs">
+                  The anon key is stored in the local app database. Your session refresh token stays in
+                  the OS credential manager.
+                </p>
+
+                <div className="sync-auth-actions">
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    size="sm"
+                    disabled={isSavingSyncConfig || !syncUrl.trim() || !syncAnonKey.trim()}
+                  >
+                    {isSavingSyncConfig ? 'Saving…' : 'Save backend'}
+                  </Button>
+                </div>
+              </form>
+            </div>
+
+            <div className="settings-card">
+              <div className="card-head">
                 <User size={18} className="card-icon text-vermilion" />
                 <div>
                   <h3>Cavia account</h3>
@@ -889,7 +1007,9 @@ export const SettingsView = memo(function SettingsView({
                 <AudioWaveform size={26} className="text-vermilion" />
                 <div>
                   <h2>cavia music<span>.</span></h2>
-                  <span className="about-edition">VERSION 3.0.0 · AFTERGLOW</span>
+                  <span className="about-edition">
+                    VERSION {health?.app_version ?? '—'} · AFTERGLOW
+                  </span>
                 </div>
               </div>
 

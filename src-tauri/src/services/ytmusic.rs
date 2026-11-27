@@ -12,22 +12,30 @@
 //! account credentials and no DRM handling. When an endpoint changes the
 //! service fails with a readable error rather than guessing.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Mutex, Weak};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-const CLIENT_VERSION: &str = "1.20241127.01.00";
-const SEARCH_URL: &str = "https://music.youtube.com/youtubei/v1/search?prettyPrint=false";
-const NEXT_URL: &str = "https://music.youtube.com/youtubei/v1/next?prettyPrint=false";
-const PLAYER_URL: &str = "https://music.youtube.com/youtubei/v1/player?prettyPrint=false";
-const GUIDE_URL: &str = "https://music.youtube.com/youtubei/v1/guide?prettyPrint=false";
+const SEARCH_URL: &str = "https://music.youtube.com/youtubei/v1/search";
+const NEXT_URL: &str = "https://music.youtube.com/youtubei/v1/next";
+const PLAYER_URL: &str = "https://music.youtube.com/youtubei/v1/player";
+const GUIDE_URL: &str = "https://music.youtube.com/youtubei/v1/guide";
 const ORIGIN: &str = "https://music.youtube.com";
+const BOOTSTRAP_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const MAX_BOOTSTRAP_BYTES: usize = 2 * 1024 * 1024;
 /// Base64 `params` selecting the Songs tab of a YouTube Music search.
 const SONGS_FILTER: &str = "EgWKAQIIAWoKEAkQBRAKEAMQBA==";
+
+fn extract_bootstrap_field(html: &str, field: &str) -> Option<String> {
+    let marker = format!("\"{field}\":\"");
+    let start = html.find(&marker)? + marker.len();
+    let value = html.get(start..)?.split_once('"')?.0;
+    (!value.is_empty()).then(|| value.to_string())
+}
 
 const WEB_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0";
@@ -40,6 +48,11 @@ const MAX_AUDIO_BYTES: u64 = 80 * 1024 * 1024;
 /// Upper bound for total disk space consumed by cached audio streams (500 MB).
 /// When this threshold is exceeded, older cached streams are evicted LRU-style.
 const MAX_TOTAL_CACHE_BYTES: u64 = 500 * 1024 * 1024;
+const MAX_STREAM_ATTEMPTS: usize = 3;
+
+fn retryable_stream_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,16 +72,31 @@ pub struct ResolvedAudio {
     pub bitrate: u64,
 }
 
+struct ProviderBootstrap {
+    api_key: String,
+    client_version: String,
+}
+
 pub struct YtMusicService {
     client: reqwest::Client,
     cache_dir: PathBuf,
     visitor: Mutex<Option<String>>,
+    bootstrap: tokio::sync::OnceCell<ProviderBootstrap>,
+    cache_locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    search_cancellations: Mutex<SearchCancellationState>,
+}
+
+#[derive(Default)]
+struct SearchCancellationState {
+    active: HashMap<String, tokio::sync::oneshot::Sender<()>>,
+    cancelled: HashMap<String, SystemTime>,
 }
 
 impl YtMusicService {
     pub fn new(cache_dir: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&cache_dir)
             .map_err(|e| format!("Could not create stream cache directory: {e}"))?;
+        clean_abandoned_partials(&cache_dir);
 
         let client = reqwest::Client::builder()
             .user_agent(WEB_UA)
@@ -81,11 +109,121 @@ impl YtMusicService {
             client,
             cache_dir,
             visitor: Mutex::new(None),
+            bootstrap: tokio::sync::OnceCell::new(),
+            cache_locks: Mutex::new(HashMap::new()),
+            search_cancellations: Mutex::new(SearchCancellationState::default()),
         })
     }
 
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
+    }
+
+    pub fn begin_search(
+        &self,
+        request_id: &str,
+    ) -> Result<tokio::sync::oneshot::Receiver<()>, String> {
+        if !valid_search_request_id(request_id) {
+            return Err("Invalid YouTube Music search request id".into());
+        }
+
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let mut state = self
+            .search_cancellations
+            .lock()
+            .map_err(|_| "YouTube Music cancellation state is unavailable".to_string())?;
+        let now = SystemTime::now();
+        state.cancelled.retain(|_, cancelled_at| {
+            now.duration_since(*cancelled_at)
+                .map(|age| age <= Duration::from_secs(60))
+                .unwrap_or(true)
+        });
+        if state.cancelled.remove(request_id).is_some() {
+            let _ = cancel_tx.send(());
+            return Ok(cancel_rx);
+        }
+        if let Some(previous) = state.active.insert(request_id.to_string(), cancel_tx) {
+            let _ = previous.send(());
+        }
+        Ok(cancel_rx)
+    }
+
+    pub fn cancel_search(&self, request_id: &str) -> Result<(), String> {
+        if !valid_search_request_id(request_id) {
+            return Err("Invalid YouTube Music search request id".into());
+        }
+        let mut state = self
+            .search_cancellations
+            .lock()
+            .map_err(|_| "YouTube Music cancellation state is unavailable".to_string())?;
+        let pending = state.active.remove(request_id);
+        if let Some(cancel) = pending {
+            let _ = cancel.send(());
+        } else {
+            state
+                .cancelled
+                .insert(request_id.to_string(), SystemTime::now());
+        }
+        Ok(())
+    }
+
+    pub fn finish_search(&self, request_id: &str) {
+        if let Ok(mut state) = self.search_cancellations.lock() {
+            state.active.remove(request_id);
+            state.cancelled.remove(request_id);
+        }
+    }
+
+    async fn provider_bootstrap(&self) -> Result<&ProviderBootstrap, String> {
+        self.bootstrap
+            .get_or_try_init(|| async {
+                let mut response = self
+                    .client
+                    .get(ORIGIN)
+                    .header("User-Agent", BOOTSTRAP_UA)
+                    .send()
+                    .await
+                    .map_err(|_| "YouTube Music configuration is unreachable".to_string())?;
+                if !response.status().is_success() {
+                    return Err(format!(
+                        "YouTube Music configuration failed with status {}",
+                        response.status().as_u16()
+                    ));
+                }
+
+                let mut html = Vec::new();
+                while let Some(chunk) = response.chunk().await.map_err(|_| {
+                    "YouTube Music configuration response was interrupted".to_string()
+                })? {
+                    if html.len().saturating_add(chunk.len()) > MAX_BOOTSTRAP_BYTES {
+                        return Err("YouTube Music configuration response was too large".into());
+                    }
+                    html.extend_from_slice(&chunk);
+                }
+                let html = String::from_utf8(html)
+                    .map_err(|_| "YouTube Music configuration was not valid UTF-8".to_string())?;
+                let api_key = extract_bootstrap_field(&html, "INNERTUBE_API_KEY")
+                    .filter(|key| {
+                        (20..=128).contains(&key.len())
+                            && key
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+                    })
+                    .ok_or_else(|| "YouTube Music API configuration was not found".to_string())?;
+                let client_version = extract_bootstrap_field(&html, "INNERTUBE_CLIENT_VERSION")
+                    .filter(|version| {
+                        (8..=64).contains(&version.len())
+                            && version
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '.')
+                    })
+                    .ok_or_else(|| "YouTube Music client version was not found".to_string())?;
+                Ok(ProviderBootstrap {
+                    api_key,
+                    client_version,
+                })
+            })
+            .await
     }
 
     /// Cached visitor data. The VISIONOS player request is answered with
@@ -101,11 +239,13 @@ impl YtMusicService {
             return Some(existing);
         }
 
+        let bootstrap = self.provider_bootstrap().await.ok()?;
+
         let body = json!({
             "context": {
                 "client": {
                     "clientName": "WEB_REMIX",
-                    "clientVersion": CLIENT_VERSION,
+                    "clientVersion": bootstrap.client_version,
                     "gl": "US",
                     "hl": "en"
                 }
@@ -115,10 +255,14 @@ impl YtMusicService {
         let response = self
             .client
             .post(GUIDE_URL)
+            .query(&[
+                ("key", bootstrap.api_key.as_str()),
+                ("prettyPrint", "false"),
+            ])
             .header("Content-Type", "application/json")
             .header("Origin", ORIGIN)
             .header("X-YouTube-Client-Name", "67")
-            .header("X-YouTube-Client-Version", CLIENT_VERSION)
+            .header("X-YouTube-Client-Version", &bootstrap.client_version)
             .json(&body)
             .send()
             .await
@@ -142,28 +286,42 @@ impl YtMusicService {
     }
 
     pub async fn search(&self, query: &str) -> Result<Vec<YtMusicTrack>, String> {
+        self.search_with_locale(query, "US", "en").await
+    }
+
+    pub async fn search_with_locale(
+        &self,
+        query: &str,
+        region: &str,
+        language: &str,
+    ) -> Result<Vec<YtMusicTrack>, String> {
         // `EgWKAQIIAWoKEAkQBRAKEAMQBA==` is the "Songs" filter. Without it the
         // default response mixes shelves whose items omit the artist, because
         // the artist is implied by the shelf they came from.
-        let songs = self.search_with_params(query, Some(SONGS_FILTER)).await?;
+        let songs = self
+            .search_with_params(query, Some(SONGS_FILTER), region, language)
+            .await?;
         if !songs.is_empty() {
             return Ok(songs);
         }
-        self.search_with_params(query, None).await
+        self.search_with_params(query, None, region, language).await
     }
 
     async fn search_with_params(
         &self,
         query: &str,
         params: Option<&str>,
+        region: &str,
+        language: &str,
     ) -> Result<Vec<YtMusicTrack>, String> {
+        let bootstrap = self.provider_bootstrap().await?;
         let mut body = json!({
             "context": {
                 "client": {
                     "clientName": "WEB_REMIX",
-                    "clientVersion": CLIENT_VERSION,
-                    "gl": "US",
-                    "hl": "en"
+                    "clientVersion": bootstrap.client_version,
+                    "gl": region,
+                    "hl": language
                 }
             },
             "query": query
@@ -175,19 +333,30 @@ impl YtMusicService {
         let response = self
             .client
             .post(SEARCH_URL)
+            .query(&[
+                ("key", bootstrap.api_key.as_str()),
+                ("prettyPrint", "false"),
+            ])
             .header("Content-Type", "application/json")
             .header("Origin", ORIGIN)
             .header("X-YouTube-Client-Name", "67")
-            .header("X-YouTube-Client-Version", CLIENT_VERSION)
+            .header("X-YouTube-Client-Version", &bootstrap.client_version)
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("YouTube Music is unreachable: {e}"))?;
+            .map_err(|_| "YouTube Music search request failed".to_string())?;
 
         if !response.status().is_success() {
+            let status = response.status();
+            if should_fallback_search_filter(status, params.is_some()) {
+                // InnerTube sometimes rejects the Songs-tab params after a
+                // web-client rollout. Retry the same query without that
+                // optional filter instead of failing the whole search.
+                return Ok(Vec::new());
+            }
             return Err(format!(
                 "YouTube Music search failed with status {}",
-                response.status().as_u16()
+                status.as_u16()
             ));
         }
 
@@ -213,11 +382,12 @@ impl YtMusicService {
             return Err("Invalid YouTube Music video id".into());
         }
 
+        let bootstrap = self.provider_bootstrap().await?;
         let body = json!({
             "context": {
                 "client": {
                     "clientName": "WEB_REMIX",
-                    "clientVersion": CLIENT_VERSION,
+                    "clientVersion": bootstrap.client_version,
                     "gl": "US",
                     "hl": "en"
                 }
@@ -231,14 +401,18 @@ impl YtMusicService {
         let response = self
             .client
             .post(NEXT_URL)
+            .query(&[
+                ("key", bootstrap.api_key.as_str()),
+                ("prettyPrint", "false"),
+            ])
             .header("Content-Type", "application/json")
             .header("Origin", ORIGIN)
             .header("X-YouTube-Client-Name", "67")
-            .header("X-YouTube-Client-Version", CLIENT_VERSION)
+            .header("X-YouTube-Client-Version", &bootstrap.client_version)
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("YouTube Music radio is unreachable: {e}"))?;
+            .map_err(|_| "YouTube Music radio request failed".to_string())?;
 
         if !response.status().is_success() {
             return Err(format!(
@@ -262,6 +436,7 @@ impl YtMusicService {
     }
 
     pub async fn resolve_audio(&self, video_id: &str) -> Result<ResolvedAudio, String> {
+        let bootstrap = self.provider_bootstrap().await?;
         let visitor = self.visitor_id().await;
 
         let mut client_context = json!({
@@ -288,6 +463,10 @@ impl YtMusicService {
         let mut request = self
             .client
             .post(PLAYER_URL)
+            .query(&[
+                ("key", bootstrap.api_key.as_str()),
+                ("prettyPrint", "false"),
+            ])
             .header("Content-Type", "application/json")
             .header("Origin", ORIGIN)
             .header("User-Agent", VISIONOS_UA)
@@ -302,7 +481,7 @@ impl YtMusicService {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("YouTube Music is unreachable: {e}"))?;
+            .map_err(|_| "YouTube Music playback request failed".to_string())?;
 
         if !response.status().is_success() {
             return Err(format!(
@@ -382,68 +561,73 @@ impl YtMusicService {
     /// so seeking and duration are exact.
     pub async fn ensure_cached(&self, video_id: &str, url: &str) -> Result<PathBuf, String> {
         let path = self.cache_dir.join(format!("{video_id}.m4a"));
-        if path.metadata().map(|meta| meta.len() > 0).unwrap_or(false) {
+        let lock = {
+            let mut locks = self
+                .cache_locks
+                .lock()
+                .map_err(|_| "The stream cache lock is unavailable".to_string())?;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            locks
+                .entry(video_id.to_string())
+                .or_insert_with(|| Weak::new())
+                .upgrade()
+                .unwrap_or_else(|| {
+                    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+                    locks.insert(video_id.to_string(), std::sync::Arc::downgrade(&lock));
+                    lock
+                })
+        };
+        let _cache_guard = lock.lock().await;
+
+        if path.metadata().map(|meta| meta.len() > 0).unwrap_or(false)
+            && audio_file_is_decodable(&path)
+        {
+            // Refresh modification time on cache hits so LRU pruning reflects
+            // actual use rather than only the original download time.
+            if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
+                let now = std::time::SystemTime::now();
+                let _ = file.set_times(
+                    std::fs::FileTimes::new()
+                        .set_accessed(now)
+                        .set_modified(now),
+                );
+            }
             return Ok(path);
         }
-
-        // These media URLs advertise `rqh=1`: the server only serves them as a
-        // range response and drops a plain GET part-way through the body.
-        let mut response = self
-            .client
-            .get(url)
-            .header("User-Agent", VISIONOS_UA)
-            .header("Range", "bytes=0-")
-            .send()
-            .await
-            .map_err(|e| format!("Could not fetch the audio stream: {e}"))?;
-
-        let status = response.status();
-        if !(status.is_success() || status == reqwest::StatusCode::PARTIAL_CONTENT) {
-            return Err(format!(
-                "Could not fetch the audio stream (status {})",
-                status.as_u16()
-            ));
-        }
+        // A previously finalized but corrupt cache entry must not be served as
+        // a hit or silently leave playback pointed at invalid bytes.
+        let _ = std::fs::remove_file(&path);
 
         let partial = path.with_extension("part");
-        let mut file = std::fs::File::create(&partial)
-            .map_err(|e| format!("Could not create the stream cache file: {e}"))?;
-
-        let mut total: u64 = 0;
-        loop {
-            let chunk = match response.chunk().await {
-                Ok(Some(chunk)) => chunk,
-                Ok(None) => break,
-                Err(e) => {
-                    drop(file);
-                    let _ = std::fs::remove_file(&partial);
-                    return Err(format!("Could not read the audio stream: {e}"));
-                }
-            };
-
-            total += chunk.len() as u64;
-            if total > MAX_AUDIO_BYTES {
-                drop(file);
-                let _ = std::fs::remove_file(&partial);
-                return Err("The audio stream exceeded the cache size limit".to_string());
-            }
-
-            if let Err(e) = std::io::Write::write_all(&mut file, &chunk) {
-                drop(file);
-                let _ = std::fs::remove_file(&partial);
-                return Err(format!("Could not write the stream cache file: {e}"));
-            }
-        }
-
-        drop(file);
-
-        if total == 0 {
+        let mut download_result =
+            Err(("The audio stream could not be downloaded".to_string(), true));
+        for attempt in 0..MAX_STREAM_ATTEMPTS {
             let _ = std::fs::remove_file(&partial);
-            return Err("YouTube Music returned an empty audio stream".to_string());
+            download_result = download_audio_to_file(&self.client, url, &partial).await;
+            match &download_result {
+                Ok(()) => break,
+                Err((_, retryable)) if *retryable && attempt + 1 < MAX_STREAM_ATTEMPTS => {
+                    tokio::time::sleep(stream_retry_delay(attempt)).await;
+                }
+                Err(_) => break,
+            }
+        }
+        if let Err((message, _)) = download_result {
+            let _ = std::fs::remove_file(&partial);
+            return Err(message);
         }
 
-        std::fs::rename(&partial, &path)
-            .map_err(|e| format!("Could not finalize the stream cache file: {e}"))?;
+        if !audio_file_is_decodable(&partial) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(
+                "YouTube Music returned audio that the playback decoder could not read".to_string(),
+            );
+        }
+
+        if let Err(e) = std::fs::rename(&partial, &path) {
+            let _ = std::fs::remove_file(&partial);
+            return Err(format!("Could not finalize the stream cache file: {e}"));
+        }
 
         let _ = self.prune_cache(MAX_TOTAL_CACHE_BYTES);
 
@@ -460,7 +644,9 @@ impl YtMusicService {
         for entry in std::fs::read_dir(&self.cache_dir)? {
             let entry = entry?;
             let file_path = entry.path();
-            if file_path.is_file() {
+            // Only finalized audio objects participate in eviction. A `.part`
+            // file may be actively written by a concurrent download.
+            if file_path.is_file() && file_path.extension().is_some_and(|ext| ext == "m4a") {
                 if let Ok(meta) = file_path.metadata() {
                     let len = meta.len();
                     total_size += len;
@@ -484,6 +670,136 @@ impl YtMusicService {
         }
         Ok(())
     }
+}
+
+fn should_fallback_search_filter(status: reqwest::StatusCode, filtered: bool) -> bool {
+    filtered && status == reqwest::StatusCode::BAD_REQUEST
+}
+
+fn valid_search_request_id(request_id: &str) -> bool {
+    !request_id.is_empty()
+        && request_id.len() <= 128
+        && request_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character))
+}
+
+async fn download_audio_to_file(
+    client: &reqwest::Client,
+    url: &str,
+    partial: &Path,
+) -> Result<(), (String, bool)> {
+    let mut cleanup = PartialFileCleanup::new(partial);
+    // These media URLs advertise `rqh=1`: the server only serves them as a
+    // range response and drops a plain GET part-way through the body.
+    let mut response = client
+        .get(url)
+        .header("User-Agent", VISIONOS_UA)
+        .header("Range", "bytes=0-")
+        .send()
+        .await
+        .map_err(|e| (format!("Could not fetch the audio stream: {e}"), true))?;
+
+    let status = response.status();
+    if !(status.is_success() || status == reqwest::StatusCode::PARTIAL_CONTENT) {
+        let retryable = retryable_stream_status(status);
+        return Err((
+            format!(
+                "Could not fetch the audio stream (status {})",
+                status.as_u16()
+            ),
+            retryable,
+        ));
+    }
+
+    let mut file = std::fs::File::create(partial).map_err(|e| {
+        (
+            format!("Could not create the stream cache file: {e}"),
+            false,
+        )
+    })?;
+    let mut total: u64 = 0;
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(e) => {
+                drop(file);
+                let _ = std::fs::remove_file(partial);
+                return Err((format!("Could not read the audio stream: {e}"), true));
+            }
+        };
+        total += chunk.len() as u64;
+        if total > MAX_AUDIO_BYTES {
+            drop(file);
+            let _ = std::fs::remove_file(partial);
+            return Err((
+                "The audio stream exceeded the cache size limit".into(),
+                false,
+            ));
+        }
+        if let Err(e) = std::io::Write::write_all(&mut file, &chunk) {
+            drop(file);
+            let _ = std::fs::remove_file(partial);
+            return Err((format!("Could not write the stream cache file: {e}"), false));
+        }
+    }
+    drop(file);
+    if total == 0 {
+        return Err(("YouTube Music returned an empty audio stream".into(), true));
+    }
+    cleanup.disarm();
+    Ok(())
+}
+
+fn stream_retry_delay(attempt: usize) -> Duration {
+    Duration::from_millis(250 * (1_u64 << attempt.min(5)))
+}
+
+/// Ensures a cancelled async response body cannot leave a `.part` file behind.
+struct PartialFileCleanup {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl PartialFileCleanup {
+    fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PartialFileCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn clean_abandoned_partials(cache_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "part") {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn audio_file_is_decodable(path: &Path) -> bool {
+    std::fs::File::open(path)
+        .ok()
+        .and_then(|file| rodio::Decoder::try_from(file).ok())
+        .is_some()
 }
 
 fn flex_text(item: &Value, index: usize) -> String {
@@ -779,6 +1095,162 @@ fn collect_search_items(value: &Value, out: &mut Vec<YtMusicTrack>) {
 mod tests {
     use super::*;
     use rodio::Source;
+
+    fn test_cache_dir(label: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("cavia-ytmusic-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("create test cache");
+        path
+    }
+
+    #[tokio::test]
+    async fn cancels_active_catalogue_search() {
+        let cache_dir = test_cache_dir("search-cancel");
+        let service = YtMusicService::new(cache_dir.clone()).expect("service");
+        let cancellation = service.begin_search("search-1").expect("register request");
+
+        service.cancel_search("search-1").expect("cancel request");
+        assert!(
+            cancellation.await.is_ok(),
+            "request cancellation was not signalled"
+        );
+        service.finish_search("search-1");
+        std::fs::remove_dir_all(cache_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_received_before_registration_is_honored() {
+        let cache_dir = test_cache_dir("search-cancel-race");
+        let service = YtMusicService::new(cache_dir.clone()).expect("service");
+
+        service.cancel_search("search-2").expect("cancel request");
+        let cancellation = service.begin_search("search-2").expect("register request");
+        assert!(
+            cancellation.await.is_ok(),
+            "early cancellation was not honored"
+        );
+        service.finish_search("search-2");
+        std::fs::remove_dir_all(cache_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_hit_refreshes_lru_timestamp_without_network_access() {
+        let cache_dir = test_cache_dir("lru");
+        let service = YtMusicService::new(cache_dir.clone()).expect("service");
+        let path = cache_dir.join("dQw4w9WgXcQ.m4a");
+        let fixture = std::fs::read("tests/fixtures/audio/base.m4a").expect("read audio fixture");
+        std::fs::write(&path, fixture).expect("write cached audio");
+        let old = std::time::SystemTime::now() - Duration::from_secs(86_400);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open cached audio")
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .expect("age cached audio");
+
+        let returned = service
+            .ensure_cached("dQw4w9WgXcQ", "https://invalid.example/audio")
+            .await
+            .expect("cache hit should not request network");
+
+        assert_eq!(returned, path);
+        assert!(std::fs::metadata(&path).unwrap().modified().unwrap() > old);
+        std::fs::remove_dir_all(cache_dir).unwrap();
+    }
+
+    #[test]
+    fn pruning_ignores_partial_downloads() {
+        let cache_dir = test_cache_dir("partial");
+        let service = YtMusicService::new(cache_dir.clone()).expect("service");
+        std::fs::write(cache_dir.join("active.part"), b"partial").unwrap();
+
+        service.prune_cache(0).expect("pruning succeeds");
+
+        assert!(cache_dir.join("active.part").exists());
+        std::fs::remove_dir_all(cache_dir).unwrap();
+    }
+
+    #[test]
+    fn partial_cleanup_guard_removes_cancelled_download_file() {
+        let cache_dir = test_cache_dir("cancel-cleanup");
+        let partial = cache_dir.join("cancelled.part");
+        std::fs::write(&partial, b"interrupted response body").unwrap();
+
+        {
+            let _cleanup = PartialFileCleanup::new(&partial);
+        }
+
+        assert!(!partial.exists());
+        std::fs::remove_dir_all(cache_dir).unwrap();
+    }
+
+    #[test]
+    fn stream_retries_only_transient_http_failures_with_bounded_backoff() {
+        assert!(retryable_stream_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        ));
+        assert!(retryable_stream_status(reqwest::StatusCode::BAD_GATEWAY));
+        assert!(!retryable_stream_status(reqwest::StatusCode::NOT_FOUND));
+        assert_eq!(stream_retry_delay(0), Duration::from_millis(250));
+        assert_eq!(stream_retry_delay(1), Duration::from_millis(500));
+        assert_eq!(stream_retry_delay(8), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn rejected_songs_filter_falls_back_but_other_search_errors_do_not() {
+        assert!(should_fallback_search_filter(
+            reqwest::StatusCode::BAD_REQUEST,
+            true
+        ));
+        assert!(!should_fallback_search_filter(
+            reqwest::StatusCode::BAD_REQUEST,
+            false
+        ));
+        assert!(!should_fallback_search_filter(
+            reqwest::StatusCode::FORBIDDEN,
+            true
+        ));
+    }
+
+    #[test]
+    fn bootstrap_fields_are_extracted_without_accepting_partial_markers() {
+        let html = r#"{"INNERTUBE_API_KEY":"aBcD_0123456789-KEY","INNERTUBE_CLIENT_VERSION":"1.20261124.13.00"}"#;
+        assert_eq!(
+            extract_bootstrap_field(html, "INNERTUBE_API_KEY").as_deref(),
+            Some("aBcD_0123456789-KEY")
+        );
+        assert_eq!(
+            extract_bootstrap_field(html, "INNERTUBE_CLIENT_VERSION").as_deref(),
+            Some("1.20261124.13.00")
+        );
+        assert_eq!(extract_bootstrap_field(html, "MISSING"), None);
+        assert_eq!(
+            extract_bootstrap_field(r#"{"INNERTUBE_API_KEY":}"#, "INNERTUBE_API_KEY"),
+            None
+        );
+    }
+
+    #[test]
+    fn service_start_removes_abandoned_partial_downloads() {
+        let cache_dir = test_cache_dir("startup-cleanup");
+        let partial = cache_dir.join("dQw4w9WgXcQ.part");
+        std::fs::write(&partial, b"interrupted download").unwrap();
+
+        let _service = YtMusicService::new(cache_dir.clone()).expect("service");
+
+        assert!(!partial.exists());
+        std::fs::remove_dir_all(cache_dir).unwrap();
+    }
+
+    #[test]
+    fn cache_validation_rejects_non_audio_bytes() {
+        let cache_dir = test_cache_dir("validation");
+        let invalid = cache_dir.join("invalid.part");
+        std::fs::write(&invalid, b"not audio").unwrap();
+
+        assert!(!audio_file_is_decodable(&invalid));
+        std::fs::remove_dir_all(cache_dir).unwrap();
+    }
 
     #[test]
     fn parses_durations() {

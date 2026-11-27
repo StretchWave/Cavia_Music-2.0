@@ -1,6 +1,10 @@
 use rodio::{Decoder, MixerDeviceSink, Player, Source, stream::DeviceSinkBuilder};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use super::{AudioBackend, AudioCapabilities, PlaybackError, PlaybackStatus};
@@ -10,7 +14,7 @@ use super::{AudioBackend, AudioCapabilities, PlaybackError, PlaybackStatus};
 pub struct RodioBackend {
     sink: Option<MixerDeviceSink>,
     player: Option<Player>,
-    device_available: bool,
+    device_available: Arc<AtomicBool>,
     current_path: Option<PathBuf>,
     current_duration_ms: u64,
     status: PlaybackStatus,
@@ -23,12 +27,13 @@ pub struct RodioBackend {
 impl RodioBackend {
     pub fn new() -> Result<Self, PlaybackError> {
         let (sink, player, device_available) = match Self::init_device() {
-            Ok((s, p)) => (Some(s), Some(p), true),
+            Ok((s, p, available)) => (Some(s), Some(p), available),
             Err(e) => {
                 eprintln!("[RodioBackend] No audio output device available at startup: {e:?}");
-                (None, None, false)
+                (None, None, Arc::new(AtomicBool::new(false)))
             }
         };
+        let initially_ready = device_available.load(Ordering::Relaxed);
 
         Ok(Self {
             sink,
@@ -41,7 +46,7 @@ impl RodioBackend {
             speed: 1.0,
             seek_offset_ms: 0,
             capabilities: AudioCapabilities {
-                local_files: device_available,
+                local_files: initially_ready,
                 progressive_http: false,
                 hls: false,
                 dash: false,
@@ -55,22 +60,69 @@ impl RodioBackend {
         })
     }
 
-    fn init_device() -> Result<(MixerDeviceSink, Player), PlaybackError> {
-        let sink = DeviceSinkBuilder::open_default_sink().map_err(|e| {
-            PlaybackError::DeviceError(format!("Failed to open default audio output sink: {e:?}"))
-        })?;
+    fn init_device() -> Result<(MixerDeviceSink, Player, Arc<AtomicBool>), PlaybackError> {
+        let available = Arc::new(AtomicBool::new(true));
+        let callback_available = Arc::clone(&available);
+        let sink = DeviceSinkBuilder::from_default_device()
+            .map_err(|e| {
+                PlaybackError::DeviceError(format!("Failed to locate default audio output: {e:?}"))
+            })?
+            .with_error_callback(move |error| {
+                callback_available.store(false, Ordering::Relaxed);
+                eprintln!("[RodioBackend] Audio output stream failed: {error}");
+            })
+            .open_sink_or_fallback()
+            .map_err(|e| {
+                PlaybackError::DeviceError(format!(
+                    "Failed to open default audio output sink: {e:?}"
+                ))
+            })?;
         let player = Player::connect_new(&sink.mixer());
         player.pause();
-        Ok((sink, player))
+        Ok((sink, player, available))
     }
 
     fn ensure_player_ready(&mut self) -> Result<(), PlaybackError> {
-        if self.sink.is_none() || self.player.is_none() {
-            let (sink, player) = Self::init_device()?;
+        if !self.is_device_ready() || self.player.is_none() {
+            let resume_position = self.position_ms();
+            let previous_status = self.status;
+            self.player.take();
+            self.sink.take();
+            self.device_available.store(false, Ordering::Relaxed);
+            let (sink, _device_player, available) = Self::init_device()?;
             self.sink = Some(sink);
-            self.player = Some(player);
-            self.device_available = true;
+            self.device_available = available;
             self.capabilities.local_files = true;
+
+            let replacement = Player::connect_new(&self.sink.as_ref().unwrap().mixer());
+            replacement.pause();
+            replacement.set_volume(self.volume);
+            replacement.set_speed(self.speed);
+            if let Some(path) = self.current_path.as_ref() {
+                if path.exists() {
+                    let decoder = Decoder::try_from(File::open(path).map_err(|e| {
+                        PlaybackError::DecoderError(format!(
+                            "Could not reopen audio after device recovery: {e}"
+                        ))
+                    })?)
+                    .map_err(|e| {
+                        PlaybackError::DecoderError(format!(
+                            "Could not decode audio after device recovery: {e:?}"
+                        ))
+                    })?;
+                    replacement.append(decoder);
+                    let speed = self.speed.max(0.25) as f64;
+                    if resume_position > 0 {
+                        replacement.try_seek(Duration::from_secs_f64((resume_position as f64 / 1000.0) / speed))
+                            .map_err(|e| PlaybackError::SeekError(format!("Could not restore playback position after device recovery: {e:?}")))?;
+                    }
+                    if previous_status == PlaybackStatus::Playing {
+                        replacement.play();
+                    }
+                }
+            }
+            self.player = Some(replacement);
+            self.status = previous_status;
         }
         Ok(())
     }
@@ -78,7 +130,7 @@ impl RodioBackend {
 
 impl AudioBackend for RodioBackend {
     fn name(&self) -> &'static str {
-        if self.device_available {
+        if self.is_device_ready() {
             "rodio_native"
         } else {
             "device_unavailable"
@@ -337,7 +389,7 @@ impl AudioBackend for RodioBackend {
     }
 
     fn is_device_ready(&self) -> bool {
-        self.device_available && self.sink.is_some()
+        self.device_available.load(Ordering::Relaxed) && self.sink.is_some()
     }
 
     fn try_init_device(&mut self) -> Result<(), PlaybackError> {
@@ -388,7 +440,7 @@ pub mod tests {
 
     #[test]
     fn test_candidate_player_is_paused_during_initialization() {
-        if let Ok((_sink, player)) = RodioBackend::init_device() {
+        if let Ok((_sink, player, _available)) = RodioBackend::init_device() {
             assert!(
                 player.is_paused(),
                 "Candidate player must be paused immediately upon creation before appending audio"

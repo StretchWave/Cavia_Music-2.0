@@ -57,6 +57,7 @@ jobs:
             file = $name
             size_bytes = $size
             sha256 = $hash
+            signed = $false
           } | ConvertTo-Json | Set-Content "windows-metadata.json"
 
       - name: Upload Windows NSIS Installer
@@ -91,12 +92,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Add macOS universal targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
       - name: Build macOS DMG & App bundle
-        run: npx tauri build --bundles dmg,app
+        run: npx tauri build --target universal-apple-darwin --bundles dmg,app
 
       - name: Compute macOS Artifact Checksum & Metadata
         run: |
-          dmg_file=$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -n 1)
+          dmg_file=$(ls src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg | head -n 1)
           dmg_name=$(basename "$dmg_file")
           dmg_size=$(stat -f%z "$dmg_file")
           dmg_sha256=$(shasum -a 256 "$dmg_file" | awk '{print $1}')
@@ -109,7 +113,9 @@ jobs:
             "format": "dmg",
             "file": "$dmg_name",
             "size_bytes": $dmg_size,
-            "sha256": "$dmg_sha256"
+            "sha256": "$dmg_sha256",
+            "signed": false,
+            "notarized": false
           }
           EOF
 
@@ -118,81 +124,13 @@ jobs:
         with:
           name: cavia-music-macos-dmg
           path: |
-            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
             macos-metadata.json
-
-  build-android:
-    name: Build Android Release (APK)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Setup Node.js 22.x
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22.x
-          cache: npm
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build Android APK
-        run: npx tauri android build --apk
-
-      - name: Compute Android Artifact Checksum & Metadata
-        run: |
-          apk_file=$(find src-tauri/gen/android -name "*.apk" | head -n 1)
-          if [ -f "$apk_file" ]; then
-            apk_name=$(basename "$apk_file")
-            apk_size=$(stat -c%s "$apk_file")
-            apk_sha256=$(sha256sum "$apk_file" | awk '{print $1}')
-            
-            echo "Android APK: $apk_name ($apk_size bytes, SHA-256: $apk_sha256)"
-            
-            cat <<EOF > android-metadata.json
-            {
-              "platform": "android-universal",
-              "format": "apk",
-              "file": "$apk_name",
-              "size_bytes": $apk_size,
-              "sha256": "$apk_sha256"
-            }
-            EOF
-          fi
-
-      - name: Upload Android APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: cavia-music-android-apk
-          path: |
-            src-tauri/gen/android/app/build/outputs/apk/**/*.apk
-            android-metadata.json
 
   manifest-aggregation:
     name: Aggregate Release Manifest
-    needs: [build-windows, build-macos, build-android]
+    needs: [build-windows, build-macos]
     runs-on: ubuntu-latest
-    if: always()
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -204,9 +142,10 @@ jobs:
             const fs = require("fs");
             const path = require("path");
             
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
             const manifest = {
               app: "Cavia Music",
-              version: "2.0.0",
+              version: pkg.version,
               timestamp: new Date().toISOString(),
               git_commit: process.env.GITHUB_SHA || "unknown",
               artifacts: []
@@ -214,8 +153,7 @@ jobs:
 
             const metaFiles = [
               "cavia-music-windows-nsis/windows-metadata.json",
-              "cavia-music-macos-dmg/macos-metadata.json",
-              "cavia-music-android-apk/android-metadata.json"
+              "cavia-music-macos-dmg/macos-metadata.json"
             ];
 
             for (const f of metaFiles) {
@@ -227,6 +165,11 @@ jobs:
                   console.error("Failed to parse " + f, e);
                 }
               }
+            }
+
+            if (manifest.artifacts.length === 0) {
+              console.error("No platform metadata was produced; refusing to emit an empty release manifest.");
+              process.exit(1);
             }
 
             fs.writeFileSync("release-manifest.json", JSON.stringify(manifest, null, 2));

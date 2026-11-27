@@ -48,11 +48,15 @@ pub async fn app_health(state: State<'_, AppState>) -> Result<AppHealth, String>
 
     let active_migration = match migration_row {
         Some(r) => {
-            let ver: i64 = r.try_get("version").unwrap_or(2);
+            let ver: i64 = r.try_get("version").unwrap_or(0);
             let desc: String = r.try_get("description").unwrap_or_default();
-            format!("{ver:04}_{desc}.sql (Active)")
+            if ver > 0 {
+                format!("{ver:04}_{desc}.sql (Active)")
+            } else {
+                "Migration status unavailable".to_string()
+            }
         }
-        None => "0002_playback_state_volume.sql (Active)".to_string(),
+        None => "No migrations recorded".to_string(),
     };
 
     Ok(AppHealth {
