@@ -77,7 +77,7 @@ impl RodioBackend {
                     "Failed to open default audio output sink: {e:?}"
                 ))
             })?;
-        let player = Player::connect_new(&sink.mixer());
+        let player = Player::connect_new(sink.mixer());
         player.pause();
         Ok((sink, player, available))
     }
@@ -89,36 +89,55 @@ impl RodioBackend {
             self.player.take();
             self.sink.take();
             self.device_available.store(false, Ordering::Relaxed);
-            let (sink, _device_player, available) = Self::init_device()?;
+            self.capabilities.local_files = false;
+            self.seek_offset_ms = resume_position;
+
+            let (sink, _device_player, available) = match Self::init_device() {
+                Ok(res) => res,
+                Err(e) => {
+                    // Never leave status as Playing when player and sink are absent.
+                    if self.status == PlaybackStatus::Playing {
+                        self.status = PlaybackStatus::Paused;
+                    }
+                    return Err(e);
+                }
+            };
             self.sink = Some(sink);
             self.device_available = available;
             self.capabilities.local_files = true;
 
-            let replacement = Player::connect_new(&self.sink.as_ref().unwrap().mixer());
+            let replacement = Player::connect_new(self.sink.as_ref().unwrap().mixer());
             replacement.pause();
             replacement.set_volume(self.volume);
             replacement.set_speed(self.speed);
-            if let Some(path) = self.current_path.as_ref() {
-                if path.exists() {
-                    let decoder = Decoder::try_from(File::open(path).map_err(|e| {
-                        PlaybackError::DecoderError(format!(
-                            "Could not reopen audio after device recovery: {e}"
+            if let Some(path) = self.current_path.as_ref()
+                && path.exists()
+            {
+                let decoder = Decoder::try_from(File::open(path).map_err(|e| {
+                    PlaybackError::DecoderError(format!(
+                        "Could not reopen audio after device recovery: {e}"
+                    ))
+                })?)
+                .map_err(|e| {
+                    PlaybackError::DecoderError(format!(
+                        "Could not decode audio after device recovery: {e:?}"
+                    ))
+                })?;
+                replacement.append(decoder);
+                let speed = self.speed.max(0.25) as f64;
+                if resume_position > 0 {
+                    replacement
+                        .try_seek(Duration::from_secs_f64(
+                            (resume_position as f64 / 1000.0) / speed,
                         ))
-                    })?)
-                    .map_err(|e| {
-                        PlaybackError::DecoderError(format!(
-                            "Could not decode audio after device recovery: {e:?}"
-                        ))
-                    })?;
-                    replacement.append(decoder);
-                    let speed = self.speed.max(0.25) as f64;
-                    if resume_position > 0 {
-                        replacement.try_seek(Duration::from_secs_f64((resume_position as f64 / 1000.0) / speed))
-                            .map_err(|e| PlaybackError::SeekError(format!("Could not restore playback position after device recovery: {e:?}")))?;
-                    }
-                    if previous_status == PlaybackStatus::Playing {
-                        replacement.play();
-                    }
+                        .map_err(|e| {
+                            PlaybackError::SeekError(format!(
+                                "Could not restore playback position after device recovery: {e:?}"
+                            ))
+                        })?;
+                }
+                if previous_status == PlaybackStatus::Playing {
+                    replacement.play();
                 }
             }
             self.player = Some(replacement);
@@ -126,18 +145,13 @@ impl RodioBackend {
         }
         Ok(())
     }
-}
 
-impl AudioBackend for RodioBackend {
-    fn name(&self) -> &'static str {
-        if self.is_device_ready() {
-            "rodio_native"
-        } else {
-            "device_unavailable"
-        }
-    }
-
-    fn load(&mut self, file_path: &str, start_ms: u64) -> Result<(), PlaybackError> {
+    fn load_internal(
+        &mut self,
+        file_path: &str,
+        start_ms: u64,
+        force_paused: bool,
+    ) -> Result<(), PlaybackError> {
         let is_active_session =
             self.status == PlaybackStatus::Playing || self.status == PlaybackStatus::Paused;
         let path = Path::new(file_path);
@@ -171,7 +185,7 @@ impl AudioBackend for RodioBackend {
         let sink = self.sink.as_ref().unwrap();
 
         // Connect candidate player to the mixer in paused state to prevent audio leak
-        let player = Player::connect_new(&sink.mixer());
+        let player = Player::connect_new(sink.mixer());
         player.pause();
         player.set_volume(self.volume);
         player.set_speed(self.speed);
@@ -209,7 +223,7 @@ impl AudioBackend for RodioBackend {
             old_player.stop();
         }
 
-        let should_play = self.status != PlaybackStatus::Paused;
+        let should_play = !force_paused && self.status != PlaybackStatus::Paused;
         if should_play {
             player.play();
             self.status = PlaybackStatus::Playing;
@@ -221,6 +235,28 @@ impl AudioBackend for RodioBackend {
         self.current_duration_ms = total_dur;
         self.seek_offset_ms = clamped_start;
         Ok(())
+    }
+}
+
+impl AudioBackend for RodioBackend {
+    fn name(&self) -> &'static str {
+        if self.is_device_ready() {
+            "rodio_native"
+        } else {
+            "device_unavailable"
+        }
+    }
+
+    fn engine_id(&self) -> &'static str {
+        "rodio_native"
+    }
+
+    fn load(&mut self, file_path: &str, start_ms: u64) -> Result<(), PlaybackError> {
+        self.load_internal(file_path, start_ms, false)
+    }
+
+    fn load_paused(&mut self, file_path: &str, start_ms: u64) -> Result<(), PlaybackError> {
+        self.load_internal(file_path, start_ms, true)
     }
 
     fn play(&mut self) -> Result<(), PlaybackError> {

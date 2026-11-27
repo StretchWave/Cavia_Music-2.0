@@ -69,7 +69,13 @@ Use serializable DTOs across the Tauri boundary. Do not expose SQL rows or nativ
 
 SQLite is owned by the Rust core using SQLx. React calls use typed commands and never issues arbitrary SQL.
 
-The initial schema is in `src-tauri/migrations/0001_initial.sql`. Add forward-only migrations. Never reset the database to repair schema problems. Store imported audio in an app-managed directory only when the user chooses copy/import; otherwise preserve a permission-safe original file reference and handle moved/missing files explicitly.
+The initial schema is in `src-tauri/migrations/0001_initial.sql`. Add forward-only migrations. Never reset the database to repair schema problems. Migration `0010_fair_queue_preload_connect.sql` adds `preload_target` / `fairness_alpha` settings alongside `connect_sessions`, `connect_participants`, `connect_queue_entries`, and `connect_contribution_events`, paired with optional collaborative cloud tables in `supabase/migrations/20261127000000_cavia_connect_schema.sql`. Store imported audio in an app-managed directory only when the user chooses copy/import; otherwise preserve a permission-safe original file reference and handle moved/missing files explicitly.
+
+## Dynamic Fair Queue, Preload & Offline Fallback
+
+- **Fair Queue (`services/fair_queue.rs`) & Cavia Connect (`services/connect.rs`)**: Host holds playback authority while participants are weighted by `1 / (1 + pending + penalty)^alpha` (default `alpha = 1.0`). Soft spacing prefers at least 2 intervening participants between tracks from the same contributor. Already committed next tracks are never replaced by incoming contributions, and guest duplicates are rejected using canonical provider IDs.
+- **Sequential Preload (`services/preload.rs` & `services/ytmusic.rs`)**: Bounded concurrency-1 preload maintains `0–20` verified upcoming tracks in cache (`PreloadPill` in Now Playing when `> 0`), yields immediately to active playback resolution, protects active + window entries from `prune_cache`, and verifies late guest contributions (`PendingPreload` -> `Ready`) before splicing them into the upcoming sequence.
+- **Offline Fallback (`services/offline.rs` & `services/playback.rs`)**: Connectivity outages pause preloading cleanly, prompt the host at most once per outage, shuffle only decoder-verified cached streaming files and existing local library files without mutating original queue state, and cleanly restore the original sequence upon reconnection without immediately replaying tracks heard offline.
 
 ## Mobile-specific file access
 

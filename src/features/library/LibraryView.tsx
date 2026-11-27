@@ -1,15 +1,12 @@
-import { useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import {
   ArrowLeft,
   AudioWaveform,
   ChevronRight,
   DownloadCloud,
   Disc3,
-  FolderPlus,
   Heart,
-  Link2,
   ListMusic,
-  Loader2,
   Music2,
   Plus,
   Play,
@@ -28,11 +25,7 @@ import { TrackList } from '../../components/TrackList';
 import { AlbumCard, ArtistCard } from '../../components/MediaCards';
 import { PlaylistDetailModal } from './PlaylistDetailModal';
 import { formatArtworkUri } from '../../lib/library';
-import {
-  isSpotifyImportAvailable,
-  startSpotifyImport,
-  type SpotifyImportResult,
-} from '../../lib/spotify';
+import { getAlbumTracks, getArtistTracks } from '../../lib/trackMatching';
 import type { Album, Artist, Playlist, Track } from '../../lib/types';
 
 type LibraryFilter = 'all' | 'tracks' | 'albums' | 'artists' | 'playlists' | 'liked';
@@ -50,7 +43,7 @@ interface LibraryViewProps {
   isBackendReady: boolean;
   currentTrackId?: string;
   isPlaying: boolean;
-  onImportFolder: () => void;
+  onImportFolder?: () => void;
   isScanning: boolean;
   onCreatePlaylist: (name: string, description: string) => void;
   onDeletePlaylist?: (playlistId: string) => void;
@@ -74,7 +67,8 @@ interface LibraryViewProps {
   onPlayNext: (trackId: string) => void;
   onNavigateToImports?: () => void;
   activeImportCount?: number;
-  onOpenImportActivity?: () => void;
+  requestedPlaylistId?: string | null;
+  onRequestedPlaylistHandled?: () => void;
 }
 
 const FILTERS: Array<{ id: LibraryFilter; label: string }> = [
@@ -123,7 +117,8 @@ export function LibraryView({
   onPlayNext,
   onNavigateToImports,
   activeImportCount = 0,
-  onOpenImportActivity,
+  requestedPlaylistId,
+  onRequestedPlaylistHandled,
 }: LibraryViewProps) {
   const [filter, setFilter] = useState<LibraryFilter>('all');
   const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null);
@@ -132,15 +127,19 @@ export function LibraryView({
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
-  const [isSpotifyOpen, setIsSpotifyOpen] = useState(false);
-  const [spotifyUrl, setSpotifyUrl] = useState('');
-  const [spotifyBusy, setSpotifyBusy] = useState(false);
-  const [spotifyError, setSpotifyError] = useState<string | null>(null);
-  const [spotifyResult, setSpotifyResult] = useState<SpotifyImportResult | null>(null);
   const [playlistToDelete, setPlaylistToDelete] = useState<Playlist | null>(null);
   const [trackToDelete, setTrackToDelete] = useState<Track | null>(null);
   const [isDeletingTrack, setIsDeletingTrack] = useState(false);
   const [isDeletingPlaylist, setIsDeletingPlaylist] = useState(false);
+
+  useEffect(() => {
+    if (!requestedPlaylistId) return;
+    const match = playlists.find((playlist) => playlist.id === requestedPlaylistId);
+    if (match) {
+      setSelectedPlaylist(match);
+      onRequestedPlaylistHandled?.();
+    }
+  }, [requestedPlaylistId, playlists, onRequestedPlaylistHandled]);
 
   // Manage mode & multi-selection across library track views
   type ManageSection = 'none' | 'recent' | 'tracks' | 'liked' | 'album' | 'artist';
@@ -165,24 +164,15 @@ export function LibraryView({
     [tracks]
   );
 
-  const albumTracks = useMemo(() => {
-    if (!selectedAlbum) return [];
-    return tracks.filter(
-      (track) =>
-        track.album.toLowerCase() === selectedAlbum.title.toLowerCase() &&
-        (track.albumArtist?.toLowerCase() === selectedAlbum.artist.toLowerCase() ||
-          track.artist.toLowerCase() === selectedAlbum.artist.toLowerCase())
-    );
-  }, [selectedAlbum, tracks]);
+  const albumTracks = useMemo(
+    () => (selectedAlbum ? getAlbumTracks(tracks, selectedAlbum) : []),
+    [selectedAlbum, tracks]
+  );
 
-  const artistTracks = useMemo(() => {
-    if (!selectedArtist) return [];
-    return tracks.filter(
-      (track) =>
-        track.artist.toLowerCase() === selectedArtist.name.toLowerCase() ||
-        track.albumArtist?.toLowerCase() === selectedArtist.name.toLowerCase()
-    );
-  }, [selectedArtist, tracks]);
+  const artistTracks = useMemo(
+    () => (selectedArtist ? getArtistTracks(tracks, selectedArtist) : []),
+    [selectedArtist, tracks]
+  );
 
   const activePlaylist = selectedPlaylist
     ? playlists.find((playlist) => playlist.id === selectedPlaylist.id) ?? selectedPlaylist
@@ -226,32 +216,6 @@ export function LibraryView({
     setNewTitle('');
     setNewDesc('');
     setIsCreateOpen(false);
-  };
-
-  const openSpotifyImport = () => {
-    setSpotifyError(null);
-    setSpotifyResult(null);
-    setIsSpotifyOpen(true);
-  };
-
-  const handleSpotifyImport = async (event: FormEvent) => {
-    event.preventDefault();
-    const link = spotifyUrl.trim();
-    if (!link || spotifyBusy) return;
-
-    setSpotifyBusy(true);
-    setSpotifyError(null);
-    try {
-      await startSpotifyImport(link);
-      setIsSpotifyOpen(false);
-      setSpotifyUrl('');
-      onPlaylistUpdated?.();
-      onNavigateToImports?.();
-    } catch (err) {
-      setSpotifyError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSpotifyBusy(false);
-    }
   };
 
   const handleDeletePlaylist = (playlistId: string) => {
@@ -508,37 +472,24 @@ export function LibraryView({
     onDeleteTrack: onDeleteTrack ? (track: Track) => setTrackToDelete(track) : undefined,
   };
 
+  const totalImportActivity = activeImportCount + (isScanning ? 1 : 0);
+
   const headerActions = (
     <div className="library-actions">
       <Button
         variant="outline"
         size="sm"
-        icon={<FolderPlus size={15} />}
-        onClick={onImportFolder}
-        disabled={isScanning}
-      >
-        {isScanning ? 'Scanning…' : 'Import'}
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
         icon={<DownloadCloud size={15} />}
-        onClick={onOpenImportActivity ?? onNavigateToImports}
-        aria-label={activeImportCount > 0 ? `Import activity, ${activeImportCount} active` : 'Import activity'}
+        onClick={onNavigateToImports ?? onImportFolder}
+        title="Import local folders, Spotify playlists, or YouTube Music playlists and view progress"
+        aria-label={
+          totalImportActivity > 0
+            ? `Import music and view activity (${totalImportActivity} active)`
+            : 'Import music'
+        }
       >
-        Activity{activeImportCount > 0 ? ` · ${activeImportCount}` : ''}
+        {totalImportActivity > 0 ? `Import · ${totalImportActivity}` : 'Import'}
       </Button>
-      {isSpotifyImportAvailable() && (
-        <Button
-          variant="outline"
-          size="sm"
-          icon={<Link2 size={15} />}
-          onClick={openSpotifyImport}
-          title="Rebuild a public Spotify playlist inside Cavia"
-        >
-          Spotify
-        </Button>
-      )}
       <Button variant="primary" size="sm" icon={<Plus size={15} />} onClick={() => setIsCreateOpen(true)}>
         New playlist
       </Button>
@@ -734,15 +685,14 @@ export function LibraryView({
             <div className="library-empty">
               <Music2 size={24} />
               <h2>No tracks indexed yet</h2>
-              <p>Cavia plays audio files directly from your local disks. Select a folder to build your library.</p>
+              <p>Cavia plays local audio files directly and can import public Spotify or YouTube Music playlists.</p>
               <Button
                 variant="primary"
                 size="md"
-                icon={<FolderPlus size={16} />}
-                onClick={onImportFolder}
-                disabled={isScanning}
+                icon={<DownloadCloud size={16} />}
+                onClick={onNavigateToImports ?? onImportFolder}
               >
-                {isScanning ? 'Scanning…' : 'Add music folders'}
+                {isScanning ? 'Viewing imports…' : 'Import music'}
               </Button>
             </div>
           )}
@@ -1142,74 +1092,6 @@ export function LibraryView({
       )}
 
       </div>
-
-      <Modal
-        isOpen={isSpotifyOpen}
-        onClose={() => setIsSpotifyOpen(false)}
-        title="Import from Spotify"
-        size="sm"
-        footer={
-          <div className="modal-actions-right">
-            <Button variant="ghost" size="sm" onClick={() => setIsSpotifyOpen(false)}>
-              {spotifyResult ? 'Done' : 'Cancel'}
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              icon={spotifyBusy ? <Loader2 size={14} className="spinning" /> : <Link2 size={14} />}
-              disabled={!spotifyUrl.trim() || spotifyBusy}
-              onClick={handleSpotifyImport}
-            >
-              {spotifyBusy ? 'Importing…' : 'Import'}
-            </Button>
-          </div>
-        }
-      >
-        <form onSubmit={handleSpotifyImport} className="cavia-form">
-          <div className="form-field">
-            <label htmlFor="spotify-url">Public playlist link</label>
-            <input
-              id="spotify-url"
-              type="text"
-              required
-              autoFocus
-              placeholder="https://open.spotify.com/playlist/…"
-              value={spotifyUrl}
-              onChange={(event) => setSpotifyUrl(event.target.value)}
-              className="cavia-text-input"
-            />
-          </div>
-
-          <p className="library-muted-note">
-            No Spotify sign-in needed. Tracks already in your library are linked directly; the
-            rest are matched on YouTube Music and stream from there. Nothing leaves your device.
-          </p>
-
-          {spotifyError && (
-            <div className="cavia-banner banner-error" role="alert">
-              {spotifyError}
-            </div>
-          )}
-
-          {spotifyResult && (
-            <div className="spotify-import-summary" role="status">
-              <p>
-                <strong>{spotifyResult.playlistName}</strong> added to your playlists.
-              </p>
-              <p className="library-muted-note">
-                {spotifyResult.total} found · {spotifyResult.matchedLocal} from your library ·{' '}
-                {spotifyResult.matchedOnline} streaming · {spotifyResult.skipped.length} skipped
-              </p>
-              {spotifyResult.skipped.length > 0 && (
-                <p className="library-muted-note">
-                  Skipped (no confident match): {spotifyResult.skipped.slice(0, 4).join(', ')}
-                  {spotifyResult.skipped.length > 4 ? '…' : ''}
-                </p>
-              )}
-            </div>
-          )}
-        </form>
-      </Modal>
 
       <Modal
         isOpen={isCreateOpen}

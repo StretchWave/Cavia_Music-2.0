@@ -507,8 +507,20 @@ export function PlaylistDetailModal({
                 </div>
                 <div className="tracks-table-body" role="rowgroup">
                   {tracks.map((track, i) => {
+                    const isPendingMatch = track.providerId === 'pending';
+                    const isUnmatched = track.providerId === 'unmatched';
                     const isUnplayable =
                       track.sourceKind !== 'provider' && (!track.fileUri || track.sourceKind === 'remote_sync');
+                    const unavailableLabel = isPendingMatch
+                      ? 'Matching…'
+                      : isUnmatched
+                        ? 'No match found'
+                        : 'Unavailable locally';
+                    const unavailableTitle = isPendingMatch
+                      ? 'Background import is resolving this track against your library and catalogue.'
+                      : isUnmatched
+                        ? 'No matching local file or online stream could be confirmed.'
+                        : 'Synced from your Cavia cloud account. Audio file is not present locally on this device.';
                     const isSelected = selectedPositions.has(i);
                     return (
                       <div
@@ -516,7 +528,7 @@ export function PlaylistDetailModal({
                         className={`track-row playlist-table-grid ${isUnplayable ? 'track-row-unplayable' : ''} ${isSelected ? 'row-selected' : ''}`}
                         tabIndex={isUnplayable ? -1 : 0}
                         role="row"
-                        aria-label={`Track ${i + 1}: ${track.title} by ${track.artist}${isUnplayable ? ' (Unavailable locally)' : ''}`}
+                        aria-label={`Track ${i + 1}: ${track.title} by ${track.artist}${isUnplayable ? ` (${unavailableLabel})` : ''}`}
                         onClick={(event) => {
                           if (isManaging) {
                             if (event.shiftKey) {
@@ -537,7 +549,7 @@ export function PlaylistDetailModal({
                             const playable = tracks.filter(
                               (t) => t.sourceKind === 'provider' || (t.fileUri && t.sourceKind !== 'remote_sync')
                             );
-                            const playIndex = playable.findIndex((t) => t.id === track.id);
+                            const playIndex = playable.indexOf(track);
                             onPlayTracks?.(playable, playIndex >= 0 ? playIndex : 0, false);
                             onClose();
                           }
@@ -553,7 +565,7 @@ export function PlaylistDetailModal({
                             const playable = tracks.filter(
                               (t) => t.sourceKind === 'provider' || (t.fileUri && t.sourceKind !== 'remote_sync')
                             );
-                            const playIndex = playable.findIndex((t) => t.id === track.id);
+                            const playIndex = playable.indexOf(track);
                             onPlayTracks?.(playable, playIndex >= 0 ? playIndex : 0, false);
                             onClose();
                           }
@@ -598,9 +610,9 @@ export function PlaylistDetailModal({
                           {isUnplayable && (
                             <span
                               className="track-unavailable-badge"
-                              title="Synced from your Cavia cloud account. Audio file is not present locally on this device."
+                              title={unavailableTitle}
                             >
-                              Unavailable locally
+                              {unavailableLabel}
                             </span>
                           )}
                         </span>

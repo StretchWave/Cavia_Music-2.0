@@ -13,9 +13,7 @@ use walkdir::WalkDir;
 use crate::domain::{ScanProgress, ScanResult};
 use crate::services::metadata::extract_metadata;
 
-const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "flac", "mp3", "wav", "m4a", "aac", "ogg", "opus", "aiff", "wma",
-];
+const SUPPORTED_EXTENSIONS: &[&str] = &["flac", "mp3", "wav", "m4a", "aac", "ogg", "opus", "aiff"];
 
 pub fn calculate_file_hash(path: &Path) -> Result<String, std::io::Error> {
     let mut file = File::open(path)?;
@@ -154,8 +152,7 @@ where
 
     let _ = fs::create_dir_all(&artworks_dir);
 
-    // Phase 1: File Discovery
-    let mut audio_paths: Vec<PathBuf> = Vec::new();
+    // Phase 1: File Discovery (offloaded so synchronous WalkDir never blocks async runtime)
     let initial_progress = ScanProgress {
         phase: "discovering".to_string(),
         current_file: folder_path.to_string_lossy().to_string(),
@@ -168,38 +165,50 @@ where
     };
     on_progress(initial_progress);
 
-    for entry in WalkDir::new(&folder_path)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if cancel_flag.load(Ordering::Relaxed) {
-            on_progress(ScanProgress {
-                phase: "cancelled".to_string(),
-                current_file: String::new(),
-                discovered_count: audio_paths.len(),
-                processed_count: 0,
-                new_tracks_count: 0,
-                duplicates_count: 0,
-                errors_count: 0,
-                error_message: Some("Scan cancelled by user during discovery.".to_string()),
-            });
-            return Ok(ScanResult {
-                total_discovered: audio_paths.len(),
-                new_tracks: 0,
-                duplicates: 0,
-                errors: 0,
-                cancelled: true,
-            });
-        }
+    let discovery_root = folder_path.clone();
+    let discovery_cancel = cancel_flag.clone();
+    let (audio_paths, cancelled_during_discovery) = tokio::task::spawn_blocking(move || {
+        let mut paths = Vec::new();
+        for entry in WalkDir::new(&discovery_root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if discovery_cancel.load(Ordering::Relaxed) {
+                return (paths, true);
+            }
 
-        if entry.file_type().is_file() {
-            if let Some(ext) = entry.path().extension().and_then(|s| s.to_str()) {
+            if entry.file_type().is_file()
+                && let Some(ext) = entry.path().extension().and_then(|s| s.to_str())
+            {
                 let ext_lower = ext.to_ascii_lowercase();
                 if SUPPORTED_EXTENSIONS.contains(&ext_lower.as_str()) {
-                    audio_paths.push(entry.path().to_path_buf());
+                    paths.push(entry.path().to_path_buf());
                 }
             }
         }
+        (paths, false)
+    })
+    .await
+    .map_err(|e| format!("Audio discovery task failed: {e}"))?;
+
+    if cancelled_during_discovery {
+        on_progress(ScanProgress {
+            phase: "cancelled".to_string(),
+            current_file: String::new(),
+            discovered_count: audio_paths.len(),
+            processed_count: 0,
+            new_tracks_count: 0,
+            duplicates_count: 0,
+            errors_count: 0,
+            error_message: Some("Scan cancelled by user during discovery.".to_string()),
+        });
+        return Ok(ScanResult {
+            total_discovered: audio_paths.len(),
+            new_tracks: 0,
+            duplicates: 0,
+            errors: 0,
+            cancelled: true,
+        });
     }
 
     let total_discovered = audio_paths.len();
@@ -249,10 +258,14 @@ where
             error_message: None,
         });
 
-        let file_size_bytes = match fs::metadata(&path) {
-            Ok(m) => m.len() as i64,
-            Err(_) => 0,
-        };
+        let path_for_meta = path.clone();
+        let file_size_bytes = tokio::task::spawn_blocking(move || {
+            fs::metadata(&path_for_meta)
+                .map(|m| m.len() as i64)
+                .unwrap_or(0)
+        })
+        .await
+        .unwrap_or(0);
 
         // Incremental check: if the exact file_uri already exists in the database with matching size,
         // we can safely skip recalculating the full SHA-256 hash.
@@ -265,17 +278,29 @@ where
         .ok()
         .flatten();
 
-        if let Some(row) = existing_by_uri {
+        let existing_uri_record: Option<(String, i32)> = if let Some(row) = existing_by_uri {
+            let existing_id: String = row.get("id");
             let existing_size: i64 = row.get("file_size_bytes");
+            let is_del: i32 = row.get("is_deleted");
             if existing_size == file_size_bytes && file_size_bytes > 0 {
                 // Same file at same path and unchanged size.
                 // Keep soft-deleted files soft-deleted and avoid re-indexing.
                 duplicates_count += 1;
                 continue;
             }
-        }
+            Some((existing_id, is_del))
+        } else {
+            None
+        };
 
-        let content_hash = match calculate_file_hash(&path) {
+        let path_for_hash = path.clone();
+        let content_hash = match tokio::task::spawn_blocking(move || {
+            calculate_file_hash(&path_for_hash)
+        })
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))
+        .and_then(|res| res)
+        {
             Ok(h) => h,
             Err(e) => {
                 errors_count += 1;
@@ -305,7 +330,7 @@ where
         if let Some(row) = existing_by_hash {
             let existing_id: String = row.get("id");
             let existing_uri: Option<String> = row.get("file_uri");
-            let is_del: i32 = row.get("is_deleted");
+            let _is_del: i32 = row.get("is_deleted");
 
             let existing_file_exists = existing_uri
                 .as_deref()
@@ -321,11 +346,7 @@ where
                     .execute(&pool)
                     .await;
 
-                if is_del == 0 {
-                    new_tracks_count += 1;
-                } else {
-                    duplicates_count += 1;
-                }
+                duplicates_count += 1;
                 continue;
             } else if existing_uri.as_deref() == Some(&file_path_str) {
                 // Exact same file already imported
@@ -346,21 +367,13 @@ where
             }
         }
 
-        // 2. Check if file with exact file_uri already exists
-        let existing_by_uri = sqlx::query("SELECT id FROM tracks WHERE file_uri = ? LIMIT 1")
-            .bind(&file_path_str)
-            .fetch_optional(&pool)
+        // Extract metadata using Lofty off the async executor
+        let path_for_lofty = path.clone();
+        let metadata = match tokio::task::spawn_blocking(move || extract_metadata(&path_for_lofty))
             .await
-            .ok()
-            .flatten();
-
-        if existing_by_uri.is_some() {
-            duplicates_count += 1;
-            continue;
-        }
-
-        // Extract metadata using Lofty
-        let metadata = match extract_metadata(&path) {
+            .map_err(|e| format!("Metadata worker failed: {e}"))
+            .and_then(|res| res)
+        {
             Ok(m) => m,
             Err(e) => {
                 errors_count += 1;
@@ -377,7 +390,7 @@ where
             }
         };
 
-        // The critical section covers atomic artwork caching AND track insertion in SQLite,
+        // The critical section covers atomic artwork caching AND track insertion/update in SQLite,
         // synchronizing through the exact same op_lock that ArtworkService::clean_orphans uses.
         let (_artwork_uri, inserted_track_id, insert_res) = {
             let _artwork_guard = if metadata.picture_data.is_some() {
@@ -387,9 +400,13 @@ where
             };
 
             let mut artwork_uri: Option<String> = None;
-            if let Some((pic_bytes, ext)) = &metadata.picture_data {
-                if let Ok((_art_hash, art_path, _was_written)) =
-                    crate::services::artwork::write_artwork_atomic(&artworks_dir, pic_bytes, ext)
+            if let Some((pic_bytes, ext)) = metadata.picture_data.clone() {
+                let art_dir = artworks_dir.clone();
+                if let Ok(Ok((_art_hash, art_path, _was_written))) =
+                    tokio::task::spawn_blocking(move || {
+                        crate::services::artwork::write_artwork_atomic(&art_dir, &pic_bytes, &ext)
+                    })
+                    .await
                 {
                     artwork_uri = Some(art_path.to_string_lossy().to_string());
                 }
@@ -406,6 +423,60 @@ where
                 .unwrap_or("")
                 .to_ascii_lowercase();
             let mime_type = determine_mime_type(&ext);
+
+            if let Some((existing_id, _is_del)) = existing_uri_record {
+                // Same path whose file contents/size changed: refresh existing record in place.
+                let update_res = sqlx::query(
+                    r#"
+                    UPDATE tracks
+                    SET title = ?,
+                        artist = ?,
+                        album = ?,
+                        album_artist = ?,
+                        duration_ms = ?,
+                        artwork_uri = COALESCE(?, artwork_uri),
+                        mime_type = ?,
+                        file_size_bytes = ?,
+                        content_hash = ?,
+                        release_year = ?,
+                        track_number = ?,
+                        disc_number = ?,
+                        genre = ?
+                    WHERE id = ?
+                    "#,
+                )
+                .bind(&metadata.title)
+                .bind(&metadata.artist)
+                .bind(&metadata.album)
+                .bind(&metadata.album_artist)
+                .bind(metadata.duration_ms)
+                .bind(&artwork_uri)
+                .bind(mime_type)
+                .bind(file_size_bytes)
+                .bind(&content_hash)
+                .bind(metadata.release_year)
+                .bind(metadata.track_number)
+                .bind(metadata.disc_number)
+                .bind(&metadata.genre)
+                .bind(&existing_id)
+                .execute(&pool)
+                .await;
+                duplicates_count += 1;
+                if let Err(e) = update_res {
+                    errors_count += 1;
+                    let _ = sqlx::query(
+                        "INSERT INTO import_history (id, source_uri, content_hash, status, error_message) VALUES (?, ?, ?, 'error', ?)",
+                    )
+                    .bind(Uuid::new_v4().to_string())
+                    .bind(&file_path_str)
+                    .bind(&content_hash)
+                    .bind(format!("Database update failed: {e}"))
+                    .execute(&pool)
+                    .await;
+                }
+                continue;
+            }
+
             let track_id = format!("track-{}", Uuid::new_v4());
 
             let insert_res = sqlx::query(
@@ -532,7 +603,7 @@ mod tests {
         assert!(SUPPORTED_EXTENSIONS.contains(&"wav"));
         assert!(SUPPORTED_EXTENSIONS.contains(&"aiff"));
         assert!(!SUPPORTED_EXTENSIONS.contains(&"alac"));
-        assert!(SUPPORTED_EXTENSIONS.contains(&"wma"));
+        assert!(!SUPPORTED_EXTENSIONS.contains(&"wma"));
         assert!(SUPPORTED_EXTENSIONS.contains(&"opus"));
         assert!(!SUPPORTED_EXTENSIONS.contains(&"exe"));
         assert!(!SUPPORTED_EXTENSIONS.contains(&"txt"));
@@ -678,6 +749,82 @@ mod tests {
 
         assert!(res.cancelled, "Scan should be marked cancelled");
         assert_eq!(res.new_tracks, 0);
+
+        let _ = fs::remove_dir_all(temp_base);
+    }
+
+    #[tokio::test]
+    async fn test_scanner_reindexes_modified_file_in_place() {
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+        let temp_base = std::env::temp_dir().join(format!("cavia_test_reindex_{}", Uuid::new_v4()));
+        let music_dir = temp_base.join("music");
+        let artworks_dir = temp_base.join("artworks");
+        fs::create_dir_all(&music_dir).unwrap();
+        fs::create_dir_all(&artworks_dir).unwrap();
+
+        let wav_path = music_dir.join("editable.wav");
+        fs::write(&wav_path, create_valid_wav_bytes()).unwrap();
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let op_lock = Arc::new(Mutex::new(()));
+        let first = scan_directory_with_progress(
+            pool.clone(),
+            music_dir.clone(),
+            artworks_dir.clone(),
+            cancel_flag.clone(),
+            op_lock.clone(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.new_tracks, 1);
+
+        let original_id: String = sqlx::query_scalar("SELECT id FROM tracks LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        // Rewrite same path with different bytes & size (changed hash + file size)
+        let mut modified = create_valid_wav_bytes();
+        modified.extend_from_slice(b"updated_audio_frames_payload");
+        fs::write(&wav_path, &modified).unwrap();
+
+        let second = scan_directory_with_progress(
+            pool.clone(),
+            music_dir,
+            artworks_dir,
+            cancel_flag,
+            op_lock,
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.total_discovered, 1);
+        assert_eq!(second.errors, 0);
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks WHERE is_deleted = 0")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let current_id: String = sqlx::query_scalar("SELECT id FROM tracks LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let new_size: i64 = sqlx::query_scalar("SELECT file_size_bytes FROM tracks LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "Updated file must stay a single track row");
+        assert_eq!(
+            current_id, original_id,
+            "In-place update must preserve track id"
+        );
+        assert_eq!(new_size as usize, modified.len());
 
         let _ = fs::remove_dir_all(temp_base);
     }

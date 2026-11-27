@@ -1,21 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-
-export function formatSmtcDiagnostic(status, error, systemMediaControls) {
-  if (status === 'ready' || (!status && systemMediaControls)) {
-    return 'SMTC ACTIVE';
-  }
-  if (status === 'error') {
-    return `SMTC ERROR: ${error || 'Runtime fault'}`;
-  }
-  if (status === 'unavailable') {
-    return error ? `SMTC UNAVAILABLE: ${error}` : 'SMTC UNAVAILABLE (No active window handle)';
-  }
-  if (status === 'unsupported') {
-    return error ? `SMTC UNSUPPORTED: ${error}` : 'SMTC UNSUPPORTED';
-  }
-  return error ? `SMTC UNAVAILABLE: ${error}` : 'SMTC UNAVAILABLE';
-}
+import { formatSmtcDiagnostic } from '../src/lib/diagnostics.js';
 
 describe('SMTC Diagnostics Display & Status Contract', () => {
   it('Test A: unavailable with error displays error in Settings', () => {

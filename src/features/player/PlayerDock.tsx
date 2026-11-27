@@ -22,12 +22,17 @@ import { IconButton } from '../../components/IconButton';
 import { Slider } from '../../components/Slider';
 import { formatArtworkUri } from '../../lib/library';
 import { ArtworkImage } from '../../components/ArtworkImage';
-import type { PlaybackState } from '../../lib/types';
+import { PreloadPill } from './PreloadPill';
+import type { OfflineFallbackStatus, PlaybackState, PreloadStatusSnapshot } from '../../lib/types';
 
 interface PlayerDockProps {
   playback: PlaybackState;
   isBackendReady: boolean;
   audioBackendStatus?: 'ready' | 'device_unavailable' | 'not_integrated' | 'error' | 'unsupported' | 'initializing';
+  preloadStatus?: PreloadStatusSnapshot | null;
+  offlineStatus?: OfflineFallbackStatus | null;
+  onChangePreloadTarget?: (target: number) => void;
+  onRetryPreload?: () => void;
   onRetryDevice?: () => void;
   onOpenExpanded: () => void;
   onOpenQueue: () => void;
@@ -47,6 +52,10 @@ export function PlayerDock({
   playback,
   isBackendReady,
   audioBackendStatus,
+  preloadStatus,
+  offlineStatus,
+  onChangePreloadTarget,
+  onRetryPreload,
   onRetryDevice,
   onOpenExpanded,
   onOpenQueue,
@@ -200,6 +209,7 @@ export function PlayerDock({
             <Slider
               value={activePosition}
               max={durationMs || 100}
+              step={5000}
               onChange={setScrubPosition}
               onCommit={(newPos) => {
                 setScrubPosition(null);
@@ -252,6 +262,24 @@ export function PlayerDock({
         >
           {playbackSpeed}x
         </button>
+
+        {onChangePreloadTarget && (
+          <PreloadPill
+            status={preloadStatus ?? null}
+            onChangeTarget={onChangePreloadTarget}
+            onRetry={onRetryPreload}
+            placement="dock"
+          />
+        )}
+
+        {offlineStatus?.fallbackActive && (
+          <span
+            className="offline-dock-tag"
+            title={offlineStatus.statusMessage ?? 'Playing verified cached tracks offline'}
+          >
+            {offlineStatus.reconnectPendingFinish ? 'RESUMING' : 'OFFLINE'}
+          </span>
+        )}
 
         <div className="dock-volume-group">
           <IconButton

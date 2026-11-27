@@ -152,14 +152,33 @@ export function TrackList({
         return (
           <div
             key={track.id}
-            className={`track-row ${isCurrent ? 'active' : ''} ${isSelected ? 'row-selected' : ''}`}
+            className={`track-row ${manageMode ? 'track-row-manage' : ''} ${isCurrent ? 'active' : ''} ${isSelected ? 'row-selected' : ''}`}
           >
+            {manageMode && (
+              <button
+                type="button"
+                role="checkbox"
+                aria-checked={isSelected}
+                aria-label={`Select ${track.title}`}
+                className={`track-select-checkbox ${isSelected ? 'checked' : ''}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (event.shiftKey) {
+                    onRangeSelectTracks?.(track.id);
+                  } else {
+                    onToggleSelectTrack?.(track.id, event);
+                  }
+                }}
+              >
+                {isSelected && <Check size={11} strokeWidth={3} />}
+              </button>
+            )}
+
             <button
               type="button"
               className="track-row-main"
-              aria-label={manageMode ? `Select ${track.title}` : `Play ${track.title} by ${track.artist || 'Unknown Artist'}`}
+              aria-label={manageMode ? `Toggle selection for ${track.title}` : `Play ${track.title} by ${track.artist || 'Unknown Artist'}`}
               aria-current={isCurrent ? 'true' : undefined}
-              aria-selected={manageMode ? isSelected : undefined}
               onClick={(event: React.MouseEvent) => {
                 if (manageMode) {
                   if (event.shiftKey) {
@@ -181,38 +200,24 @@ export function TrackList({
                 }
               }}
             >
-              <span className="track-col-index" aria-hidden="true">
-                {manageMode ? (
-                  <span
-                    className={`track-select-checkbox ${isSelected ? 'checked' : ''}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (e.shiftKey) {
-                        onRangeSelectTracks?.(track.id);
-                      } else {
-                        onToggleSelectTrack?.(track.id, e);
-                      }
-                    }}
-                    role="checkbox"
-                    aria-checked={isSelected}
-                  >
-                    {isSelected && <Check size={11} strokeWidth={3} />}
-                  </span>
-                ) : isCurrent && isPlaying ? (
-                  <span className="eq-bounce">
-                    <span />
-                    <span />
-                    <span />
-                  </span>
-                ) : (
-                  <>
-                    <span className="track-index-number">{track.trackNumber || index + 1}</span>
-                    <span className="track-index-play">
-                      <Play size={11} fill="currentColor" />
+              {!manageMode && (
+                <span className="track-col-index" aria-hidden="true">
+                  {isCurrent && isPlaying ? (
+                    <span className="eq-bounce">
+                      <span />
+                      <span />
+                      <span />
                     </span>
-                  </>
-                )}
-              </span>
+                  ) : (
+                    <>
+                      <span className="track-index-number">{track.trackNumber || index + 1}</span>
+                      <span className="track-index-play">
+                        <Play size={11} fill="currentColor" />
+                      </span>
+                    </>
+                  )}
+                </span>
+              )}
 
               <span className="track-col-title">
                 {density === 'standard' && (
@@ -299,12 +304,7 @@ export function TrackList({
                     type="button"
                     role="menuitem"
                     className="track-menu-item"
-                    disabled={!onAddToPlaylist || track.sourceKind === 'provider'}
-                    title={
-                      track.sourceKind === 'provider'
-                        ? 'Streamed tracks are not stored in your library'
-                        : undefined
-                    }
+                    disabled={!onAddToPlaylist}
                     onClick={() => {
                       onAddToPlaylist?.(track);
                       closeMenu(true);

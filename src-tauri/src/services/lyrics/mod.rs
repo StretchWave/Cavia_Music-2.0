@@ -5,7 +5,6 @@ pub mod parser;
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -128,70 +127,79 @@ impl LyricsService {
             },
         };
 
-        // 2. Compute signature
-        let signature =
-            compute_track_signature(&title, &artist, &album, duration_ms, file_uri.as_deref());
+        // 2. Compute signature without blocking the async runtime executor
+        let signature = {
+            let sig_title = title.clone();
+            let sig_artist = artist.clone();
+            let sig_album = album.clone();
+            let sig_uri = file_uri.clone();
+            tokio::task::spawn_blocking(move || {
+                compute_track_signature(
+                    &sig_title,
+                    &sig_artist,
+                    &sig_album,
+                    duration_ms,
+                    sig_uri.as_deref(),
+                )
+            })
+            .await
+            .map_err(|e| format!("Failed to compute lyrics track signature: {e}"))?
+        };
 
         // 3. Check SQLite cache if not forcing refresh
-        if !force_refresh {
-            if let Ok(Some(cached)) =
+        if !force_refresh
+            && let Ok(Some(cached)) =
                 get_cached_lyrics(&self.pool, track_id, &signature, (self.now_unix)()).await
-            {
-                if cached.status == "instrumental" {
+        {
+            if cached.status == "instrumental" {
+                return Ok(LyricsResponseDTO {
+                    track_id: track_id.to_string(),
+                    status: "instrumental".to_string(),
+                    source: Some(cached.source),
+                    plain_lyrics: None,
+                    synced_lines: None,
+                    is_instrumental: true,
+                });
+            } else if cached.status == "not_found" {
+                return Ok(LyricsResponseDTO {
+                    track_id: track_id.to_string(),
+                    status: "not_found".to_string(),
+                    source: None,
+                    plain_lyrics: None,
+                    synced_lines: None,
+                    is_instrumental: false,
+                });
+            } else if cached.status == "found" {
+                if let Some(raw_lrc) = &cached.raw_synced_lyrics {
+                    let parsed = parse_lrc(raw_lrc);
                     return Ok(LyricsResponseDTO {
                         track_id: track_id.to_string(),
-                        status: "instrumental".to_string(),
+                        status: "synced".to_string(),
                         source: Some(cached.source),
-                        plain_lyrics: None,
-                        synced_lines: None,
-                        is_instrumental: true,
+                        plain_lyrics: cached.plain_lyrics.or(Some(parsed.plain_text)),
+                        synced_lines: Some(parsed.lines),
+                        is_instrumental: false,
                     });
-                } else if cached.status == "not_found" {
+                } else if let Some(plain) = &cached.plain_lyrics {
                     return Ok(LyricsResponseDTO {
                         track_id: track_id.to_string(),
-                        status: "not_found".to_string(),
-                        source: None,
-                        plain_lyrics: None,
+                        status: "plain".to_string(),
+                        source: Some(cached.source),
+                        plain_lyrics: Some(plain.clone()),
                         synced_lines: None,
                         is_instrumental: false,
                     });
-                } else if cached.status == "found" {
-                    if let Some(raw_lrc) = &cached.raw_synced_lyrics {
-                        let parsed = parse_lrc(raw_lrc);
-                        return Ok(LyricsResponseDTO {
-                            track_id: track_id.to_string(),
-                            status: "synced".to_string(),
-                            source: Some(cached.source),
-                            plain_lyrics: cached.plain_lyrics.or(Some(parsed.plain_text)),
-                            synced_lines: Some(parsed.lines),
-                            is_instrumental: false,
-                        });
-                    } else if let Some(plain) = &cached.plain_lyrics {
-                        return Ok(LyricsResponseDTO {
-                            track_id: track_id.to_string(),
-                            status: "plain".to_string(),
-                            source: Some(cached.source),
-                            plain_lyrics: Some(plain.clone()),
-                            synced_lines: None,
-                            is_instrumental: false,
-                        });
-                    }
                 }
             }
         }
 
         // 4. Inspect embedded tags (Priority 1)
         if let Some(uri) = &file_uri {
-            let path_str = if uri.starts_with("file:///") {
-                &uri[8..]
-            } else if uri.starts_with("file://") {
-                &uri[7..]
-            } else {
-                uri.as_str()
-            };
-
-            let local_path = PathBuf::from(path_str);
-            let embedded = extract_embedded_lyrics(&local_path);
+            let local_path = crate::services::artwork::local_path_from_uri(uri);
+            let embedded =
+                tokio::task::spawn_blocking(move || extract_embedded_lyrics(&local_path))
+                    .await
+                    .unwrap_or(EmbeddedLyricsResult::None);
 
             match embedded {
                 EmbeddedLyricsResult::Synced { raw_lrc } => {

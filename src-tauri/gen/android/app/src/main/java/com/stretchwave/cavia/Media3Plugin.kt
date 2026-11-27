@@ -34,6 +34,7 @@ import java.util.concurrent.Executors
 class LoadArgs {
   lateinit var path: String
   var startMs: Long = 0
+  var autoPlay: Boolean = true
 }
 
 @InvokeArg class PositionArgs { var positionMs: Long = 0 }
@@ -189,7 +190,7 @@ class Media3Plugin(private val activity: Activity) : Plugin(activity) {
         try {
           val service = CaviaPlaybackService.instance
             ?: throw IllegalStateException("Media3 playback service did not start")
-          service.load(args.path, args.startMs)
+          service.load(args.path, args.startMs, args.autoPlay)
           invoke.resolve(JSObject())
         } catch (error: Exception) { invoke.reject(error.message ?: "Unable to load audio") }
       }
@@ -285,20 +286,28 @@ class Media3Plugin(private val activity: Activity) : Plugin(activity) {
   @Command fun pause(invoke: Invoke) = respond(invoke) { it.player.pause() }
   @Command fun stop(invoke: Invoke) = respond(invoke) { it.player.stop() }
   @Command fun seek(invoke: Invoke) {
-    val args = invoke.parseArgs(PositionArgs::class.java)
-    respond(invoke) { it.player.seekTo(args.positionMs) }
+    try {
+      val args = invoke.parseArgs(PositionArgs::class.java)
+      respond(invoke) { it.player.seekTo(args.positionMs) }
+    } catch (error: Exception) { invoke.reject(error.message ?: "Invalid seek request") }
   }
   @Command fun volume(invoke: Invoke) {
-    val args = invoke.parseArgs(VolumeArgs::class.java)
-    respond(invoke) { it.player.volume = args.volume.toFloat().coerceIn(0f, 1f) }
+    try {
+      val args = invoke.parseArgs(VolumeArgs::class.java)
+      respond(invoke) { it.player.volume = args.volume.toFloat().coerceIn(0f, 1f) }
+    } catch (error: Exception) { invoke.reject(error.message ?: "Invalid volume request") }
   }
   @Command fun speed(invoke: Invoke) {
-    val args = invoke.parseArgs(SpeedArgs::class.java)
-    respond(invoke) { it.setSpeed(args.speed.toFloat()) }
+    try {
+      val args = invoke.parseArgs(SpeedArgs::class.java)
+      respond(invoke) { it.setSpeed(args.speed.toFloat()) }
+    } catch (error: Exception) { invoke.reject(error.message ?: "Invalid speed request") }
   }
   @Command fun metadata(invoke: Invoke) {
-    val args = invoke.parseArgs(MetadataArgs::class.java)
-    respond(invoke) { it.setMetadata(args.title, args.artist, args.album) }
+    try {
+      val args = invoke.parseArgs(MetadataArgs::class.java)
+      respond(invoke) { it.setMetadata(args.title, args.artist, args.album) }
+    } catch (error: Exception) { invoke.reject(error.message ?: "Invalid metadata request") }
   }
 
   @Command fun snapshot(invoke: Invoke) {
@@ -309,7 +318,6 @@ class Media3Plugin(private val activity: Activity) : Plugin(activity) {
       state.put("status", when {
         player == null -> "idle"
         player.playerError != null -> "error"
-        player.playbackState == androidx.media3.common.Player.STATE_ENDED && player.playWhenReady -> "playing"
         player.playbackState == androidx.media3.common.Player.STATE_ENDED -> "stopped"
         player.playWhenReady && player.playbackState == androidx.media3.common.Player.STATE_READY -> "playing"
         player.playbackState == androidx.media3.common.Player.STATE_BUFFERING -> "loading"

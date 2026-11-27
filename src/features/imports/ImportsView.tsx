@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import {
   DownloadCloud,
   FolderDown,
+  FolderPlus,
   Loader2,
   Pause,
   Play,
@@ -10,6 +11,7 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import { Button } from '../../components/Button';
+import type { ScanProgressEvent } from '../../lib/library';
 import {
   clearCompletedImports,
   getImportJobs,
@@ -19,20 +21,36 @@ import {
   cancelImport,
   removeImportJob,
   cancelAndDeleteImport,
-  startSpotifyImport,
+  startPlaylistImport,
   type ImportJob,
 } from '../../lib/spotify';
+import { detectPlaylistImportSource } from '../../lib/trackMatching';
 
 interface ImportsViewProps {
   onOpenPlaylist: (playlistId: string) => void;
+  onExit?: () => void;
   onPlaylistCreated?: () => void;
+  onImportFolder?: () => void;
+  isScanning?: boolean;
+  scanProgress?: ScanProgressEvent | null;
+  onCancelScan?: () => void;
 }
 
-export function ImportsView({ onOpenPlaylist, onPlaylistCreated }: ImportsViewProps) {
+export function ImportsView({
+  onOpenPlaylist,
+  onExit,
+  onPlaylistCreated,
+  onImportFolder,
+  isScanning = false,
+  scanProgress = null,
+  onCancelScan,
+}: ImportsViewProps) {
   const [jobs, setJobs] = useState<ImportJob[]>([]);
   const [url, setUrl] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const detectedSource = detectPlaylistImportSource(url);
 
   useEffect(() => {
     let unlistenProgress: (() => void) | undefined;
@@ -67,7 +85,7 @@ export function ImportsView({ onOpenPlaylist, onPlaylistCreated }: ImportsViewPr
     setError(null);
 
     try {
-      const job = await startSpotifyImport(link);
+      const job = await startPlaylistImport(link);
       setJobs((prev) => [job, ...prev]);
       setUrl('');
       onPlaylistCreated?.();
@@ -132,41 +150,128 @@ export function ImportsView({ onOpenPlaylist, onPlaylistCreated }: ImportsViewPr
 
   const activeJobs = jobs.filter((j) => j.status === 'running' || j.status === 'paused' || j.status === 'queued');
   const pastJobs = jobs.filter((j) => j.status === 'completed' || j.status === 'cancelled' || j.status === 'failed');
+  const scanPercent =
+    scanProgress && scanProgress.discoveredCount > 0
+      ? Math.min(100, Math.round((scanProgress.processedCount / scanProgress.discoveredCount) * 100))
+      : 0;
 
   return (
-    <section className="imports-view" aria-label="Playlist Imports">
+    <section className="imports-view" aria-label="Music and Playlist Imports">
       <header className="imports-header">
         <div className="imports-title-group">
           <h1 className="imports-heading">Imports</h1>
           <p className="imports-subheading">
-            Background playlist imports with asynchronous catalogue resolution. Imports continue even when minimized.
+            Add local music folders or import public Spotify and YouTube Music playlists with live background progress.
           </p>
         </div>
 
-        {pastJobs.length > 0 && (
-          <Button
-            variant="ghost"
-            size="sm"
-            icon={<Trash2 size={14} />}
-            onClick={handleClearCompleted}
-            title="Clear finished and cancelled jobs from this view"
-          >
-            Clear finished
-          </Button>
-        )}
+        <div className="imports-header-actions">
+          {pastJobs.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<Trash2 size={14} />}
+              onClick={handleClearCompleted}
+              title="Clear finished and cancelled jobs from this view"
+            >
+              Clear finished
+            </Button>
+          )}
+          {onExit && (
+            <Button
+              variant="outline"
+              size="sm"
+              icon={<X size={14} />}
+              onClick={onExit}
+              aria-label="Exit imports back to library"
+              title="Exit Imports and return to Library"
+            >
+              Exit
+            </Button>
+          )}
+        </div>
       </header>
 
-      {/* Import Form */}
+      {/* Local Folder Scan Card */}
+      <div className="imports-input-card imports-local-card">
+        <div className="import-card-top">
+          <div className="import-card-info">
+            <h2 className="import-card-title">Local Music Folders</h2>
+            <p className="imports-note">
+              Index audio files directly from your device folders (MP3, FLAC, M4A, AAC, OGG, Opus, WAV, AIFF).
+            </p>
+          </div>
+          {onImportFolder && (
+            <Button
+              variant={isScanning ? 'secondary' : 'outline'}
+              size="sm"
+              icon={isScanning ? <Loader2 size={14} className="spinning" /> : <FolderPlus size={14} />}
+              onClick={onImportFolder}
+              disabled={isScanning}
+            >
+              {isScanning ? 'Scanning…' : 'Import folder'}
+            </Button>
+          )}
+        </div>
+
+        {isScanning && scanProgress && (
+          <div className="imports-local-progress" role="status" aria-live="polite">
+            <div className="import-progress-container">
+              <div className="import-progress-bar">
+                <div
+                  className="import-progress-fill animate-progress"
+                  style={{ width: `${Math.max(4, scanPercent)}%` }}
+                />
+              </div>
+              <span className="import-progress-percent">{scanPercent}%</span>
+              {onCancelScan && (
+                <Button variant="ghost" size="sm" icon={<X size={13} />} onClick={onCancelScan}>
+                  Cancel
+                </Button>
+              )}
+            </div>
+            <div className="import-card-meta">
+              {scanProgress.phase === 'discovering'
+                ? 'Discovering audio files…'
+                : `${scanProgress.processedCount} / ${scanProgress.discoveredCount} files · ${scanProgress.newTracksCount} added · ${scanProgress.duplicatesCount} existing`}
+            </div>
+            {scanProgress.currentFile && (
+              <div className="import-current-track" title={scanProgress.currentFile}>
+                <code>{scanProgress.currentFile}</code>
+              </div>
+            )}
+          </div>
+        )}
+
+        {!isScanning && scanProgress && (scanProgress.phase === 'completed' || scanProgress.phase === 'cancelled') && (
+          <p className="imports-note" role="status">
+            Last folder scan {scanProgress.phase === 'cancelled' ? 'cancelled' : 'completed'}:{' '}
+            {scanProgress.newTracksCount} added · {scanProgress.duplicatesCount} existing ·{' '}
+            {scanProgress.errorsCount} errors
+          </p>
+        )}
+      </div>
+
+      {/* Playlist Import Form */}
       <div className="imports-input-card">
         <form onSubmit={handleSubmit} className="imports-form">
+          <div className="imports-form-header">
+            <h2 className="import-card-title">Spotify &amp; YouTube Music Playlists</h2>
+            {detectedSource && (
+              <span className={`imports-source-pill source-${detectedSource}`}>
+                {detectedSource === 'youtube_music' ? 'YouTube Music link' : 'Spotify link'}
+              </span>
+            )}
+          </div>
           <div className="imports-input-wrapper">
             <input
               type="text"
-              placeholder="Paste public Spotify playlist link (https://open.spotify.com/playlist/...)"
+              placeholder="Paste public Spotify or YouTube Music playlist link (https://open.spotify.com/playlist/... or https://music.youtube.com/playlist?list=...)"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               className="cavia-text-input imports-text-input"
               disabled={isSubmitting}
+              aria-label="Spotify or YouTube Music playlist URL"
             />
             <Button
               type="submit"
@@ -184,9 +289,8 @@ export function ImportsView({ onOpenPlaylist, onPlaylistCreated }: ImportsViewPr
             </div>
           )}
           <p className="imports-note">
-            Playlist metadata is read first, then streaming matches resolve in the background. Public
-            playlists are supported up to 1,000 tracks; playlists longer than Spotify's embed payload
-            can take a little longer before the job appears.
+            Public playlists are supported up to 1,000 tracks. Local library matches are linked first;
+            YouTube Music imports become playable immediately while local matches finish in the background.
           </p>
         </form>
       </div>
@@ -200,12 +304,18 @@ export function ImportsView({ onOpenPlaylist, onPlaylistCreated }: ImportsViewPr
               const progressPct = job.total > 0 ? Math.round((job.processed / job.total) * 100) : 0;
               const isRunning = job.status === 'running';
               const isPaused = job.status === 'paused';
+              const sourceLabel = job.source === 'youtube_music' ? 'YouTube Music' : 'Spotify';
 
               return (
                 <div key={job.id} className="import-card active-job-card">
                   <div className="import-card-top">
                     <div className="import-card-info">
-                      <h3 className="import-card-title">{job.playlistName}</h3>
+                      <div className="import-card-title-row">
+                        <h3 className="import-card-title">{job.playlistName}</h3>
+                        <span className={`imports-source-pill source-${job.source || 'spotify'}`}>
+                          {sourceLabel}
+                        </span>
+                      </div>
                       <span className="import-card-meta">
                         {job.total} tracks · {job.matchedLocal} local · {job.matchedOnline} online · {job.skipped} skipped
                       </span>
@@ -297,12 +407,18 @@ export function ImportsView({ onOpenPlaylist, onPlaylistCreated }: ImportsViewPr
           <div className="imports-grid">
             {pastJobs.map((job) => {
               const isCompleted = job.status === 'completed';
+              const sourceLabel = job.source === 'youtube_music' ? 'YouTube Music' : 'Spotify';
 
               return (
                 <div key={job.id} className="import-card past-job-card">
                   <div className="import-card-top">
                     <div className="import-card-info">
-                      <h3 className="import-card-title">{job.playlistName}</h3>
+                      <div className="import-card-title-row">
+                        <h3 className="import-card-title">{job.playlistName}</h3>
+                        <span className={`imports-source-pill source-${job.source || 'spotify'}`}>
+                          {sourceLabel}
+                        </span>
+                      </div>
                       <span className="import-card-meta">
                         {isCompleted ? (
                           <>
@@ -352,16 +468,15 @@ export function ImportsView({ onOpenPlaylist, onPlaylistCreated }: ImportsViewPr
       )}
 
       {/* Empty State */}
-      {jobs.length === 0 && (
+      {jobs.length === 0 && !isScanning && (
         <div className="imports-empty-state">
           <div className="imports-empty-icon">
             <FolderDown size={36} strokeWidth={1.4} />
           </div>
-          <h3 className="imports-empty-title">No imports yet</h3>
+          <h3 className="imports-empty-title">No active playlist imports</h3>
           <p className="imports-empty-desc">
-            Paste any public Spotify playlist URL into the box above to import it. Cavia reads the
-            playlist, then resolves streaming matches in the background. Public playlists are supported
-            up to 1,000 tracks.
+            Choose a local music folder above or paste any public Spotify or YouTube Music playlist URL
+            to bring your playlists into Cavia with live background progress.
           </p>
         </div>
       )}

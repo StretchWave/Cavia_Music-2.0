@@ -26,6 +26,26 @@ pub async fn spotify_start_import(
     state.import_manager.start_import(app, &url).await
 }
 
+/// Starts an asynchronous YouTube Music playlist import.
+#[tauri::command]
+pub async fn ytmusic_start_import(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<ImportJob, String> {
+    state.import_manager.start_ytmusic_import(app, &url).await
+}
+
+/// Starts an asynchronous playlist import from either Spotify or YouTube Music.
+#[tauri::command]
+pub async fn playlist_start_import(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+) -> Result<ImportJob, String> {
+    state.import_manager.start_playlist_import(app, &url).await
+}
+
 #[tauri::command]
 pub async fn import_pause(
     app: AppHandle,

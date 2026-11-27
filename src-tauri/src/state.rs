@@ -23,9 +23,13 @@ pub struct AppState {
     pub sync: Arc<SyncEngine>,
     pub ytmusic: Arc<YtMusicService>,
     pub import_manager: Arc<crate::services::spotify::ImportManager>,
+    pub preload: Arc<crate::services::preload::PreloadCoordinator>,
+    pub connect: Arc<crate::services::connect::ConnectService>,
+    pub offline: Arc<crate::services::offline::OfflineFallbackService>,
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         database: SqlitePool,
         artworks_dir: PathBuf,
@@ -36,6 +40,9 @@ impl AppState {
         sync: Arc<SyncEngine>,
         ytmusic: Arc<YtMusicService>,
         import_manager: Arc<crate::services::spotify::ImportManager>,
+        preload: Arc<crate::services::preload::PreloadCoordinator>,
+        connect: Arc<crate::services::connect::ConnectService>,
+        offline: Arc<crate::services::offline::OfflineFallbackService>,
     ) -> Self {
         Self {
             database,
@@ -48,6 +55,9 @@ impl AppState {
             sync,
             ytmusic,
             import_manager,
+            preload,
+            connect,
+            offline,
         }
     }
 }

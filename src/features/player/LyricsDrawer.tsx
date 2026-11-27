@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useState, useEffect, useId, useRef, useMemo, useCallback } from 'react';
 import { usePlaybackPosition } from '../../lib/usePlaybackPosition';
+import { acquireOverlayLock, isTopOverlay, releaseOverlayLock } from '../../lib/modalStack';
 import {
   AlertCircle,
   Disc,
@@ -69,6 +70,7 @@ export function LyricsDrawer({
   const activeLineRef = useRef<HTMLParagraphElement | null>(null);
   const drawerRef = useRef<HTMLDivElement | null>(null);
   const previousActiveElementRef = useRef<HTMLElement | null>(null);
+  const overlayId = `lyrics-drawer-${useId()}`;
   const prevActiveIndexRef = useRef<number>(-1);
   const programmaticScrollRef = useRef<boolean>(false);
   const programmaticScrollTimerRef = useRef<number | null>(null);
@@ -92,7 +94,7 @@ export function LyricsDrawer({
     if (!isOpen) return;
 
     previousActiveElementRef.current = document.activeElement as HTMLElement | null;
-    document.body.style.overflow = 'hidden';
+    acquireOverlayLock(overlayId);
 
     const timer = setTimeout(() => {
       const drawer = drawerRef.current;
@@ -106,6 +108,8 @@ export function LyricsDrawer({
     }, 50);
 
     function handleKeyDown(e: KeyboardEvent) {
+      if (!isTopOverlay(overlayId)) return;
+
       if (e.key === 'Escape') {
         e.preventDefault();
         onCloseRef.current();
@@ -139,13 +143,13 @@ export function LyricsDrawer({
 
     return () => {
       clearTimeout(timer);
-      document.body.style.overflow = '';
+      releaseOverlayLock(overlayId);
       window.removeEventListener('keydown', handleKeyDown);
       if (previousActiveElementRef.current && typeof previousActiveElementRef.current.focus === 'function') {
         previousActiveElementRef.current.focus();
       }
     };
-  }, [isOpen]);
+  }, [isOpen, overlayId]);
 
   // Fetch lyrics when track changes or drawer opens
   useEffect(() => {

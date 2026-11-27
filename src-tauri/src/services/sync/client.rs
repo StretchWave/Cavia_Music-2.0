@@ -190,7 +190,7 @@ impl SupabaseRestClient {
                     pl_body["client_updated_at"] = serde_json::json!(updated_at);
                 }
 
-                let _ = self
+                let proj_resp = self
                     .client
                     .post(&pl_endpoint)
                     .header("apikey", anon_key)
@@ -199,23 +199,28 @@ impl SupabaseRestClient {
                     .header("Prefer", "resolution=merge-duplicates")
                     .json(&pl_body)
                     .send()
-                    .await;
+                    .await
+                    .map_err(|e| format!("Network error projecting playlist upsert: {e}"))?;
+                check_projection_response(proj_resp, "cloud_playlists upsert").await?;
             }
             ("playlist", "delete") => {
-                let pl_endpoint = format!("{clean_url}/rest/v1/cloud_playlists?id=eq.{entity_id}");
+                let pl_endpoint = format!("{clean_url}/rest/v1/cloud_playlists");
                 let pl_body = serde_json::json!({
                     "is_deleted": true
                 });
 
-                let _ = self
+                let proj_resp = self
                     .client
                     .patch(&pl_endpoint)
+                    .query(&[("id", format!("eq.{entity_id}"))])
                     .header("apikey", anon_key)
                     .header("Authorization", format!("Bearer {access_token}"))
                     .header("Content-Type", "application/json")
                     .json(&pl_body)
                     .send()
-                    .await;
+                    .await
+                    .map_err(|e| format!("Network error projecting playlist delete: {e}"))?;
+                check_projection_response(proj_resp, "cloud_playlists delete").await?;
             }
             ("playlist_track", "add") => {
                 let pl_id = payload
@@ -254,7 +259,7 @@ impl SupabaseRestClient {
                     "is_deleted": false
                 });
 
-                let _ = self
+                let proj_resp = self
                     .client
                     .post(&pt_endpoint)
                     .header("apikey", anon_key)
@@ -263,24 +268,28 @@ impl SupabaseRestClient {
                     .header("Prefer", "resolution=merge-duplicates")
                     .json(&pt_body)
                     .send()
-                    .await;
+                    .await
+                    .map_err(|e| format!("Network error projecting playlist track add: {e}"))?;
+                check_projection_response(proj_resp, "cloud_playlist_tracks add").await?;
             }
             ("playlist_track", "remove") => {
-                let pt_endpoint =
-                    format!("{clean_url}/rest/v1/cloud_playlist_tracks?id=eq.{entity_id}");
+                let pt_endpoint = format!("{clean_url}/rest/v1/cloud_playlist_tracks");
                 let pt_body = serde_json::json!({
                     "is_deleted": true
                 });
 
-                let _ = self
+                let proj_resp = self
                     .client
                     .patch(&pt_endpoint)
+                    .query(&[("id", format!("eq.{entity_id}"))])
                     .header("apikey", anon_key)
                     .header("Authorization", format!("Bearer {access_token}"))
                     .header("Content-Type", "application/json")
                     .json(&pt_body)
                     .send()
-                    .await;
+                    .await
+                    .map_err(|e| format!("Network error projecting playlist track remove: {e}"))?;
+                check_projection_response(proj_resp, "cloud_playlist_tracks remove").await?;
             }
             ("liked_track", "like" | "unlike") => {
                 let is_liked = operation_type == "like";
@@ -305,7 +314,7 @@ impl SupabaseRestClient {
                     "is_liked": is_liked
                 });
 
-                let _ = self
+                let proj_resp = self
                     .client
                     .post(&lt_endpoint)
                     .header("apikey", anon_key)
@@ -314,7 +323,9 @@ impl SupabaseRestClient {
                     .header("Prefer", "resolution=merge-duplicates")
                     .json(&lt_body)
                     .send()
-                    .await;
+                    .await
+                    .map_err(|e| format!("Network error projecting liked track status: {e}"))?;
+                check_projection_response(proj_resp, "cloud_liked_tracks upsert").await?;
             }
             _ => {}
         }
@@ -369,50 +380,70 @@ impl SupabaseRestClient {
     ) -> Result<(), String> {
         let clean_url = supabase_url.trim_end_matches('/');
 
-        // Delete cloud_playlists (RLS ensures user only deletes their own)
-        let _ = self
-            .client
-            .delete(format!(
-                "{clean_url}/rest/v1/cloud_playlists?id=neq.placeholder"
-            ))
-            .header("apikey", anon_key)
-            .header("Authorization", format!("Bearer {access_token}"))
-            .send()
-            .await;
+        for (table, filter_col) in [
+            ("cloud_playlists", "id"),
+            ("cloud_playlist_tracks", "id"),
+            ("cloud_liked_tracks", "cloud_track_id"),
+            ("cloud_sync_events", "operation_id"),
+            ("cloud_devices", "device_id"),
+        ] {
+            let resp = self
+                .client
+                .delete(format!(
+                    "{clean_url}/rest/v1/{table}?{filter_col}=not.is.null"
+                ))
+                .header("apikey", anon_key)
+                .header("Authorization", format!("Bearer {access_token}"))
+                .send()
+                .await
+                .map_err(|e| format!("Network error deleting {table}: {e}"))?;
 
-        // Delete cloud_playlist_tracks
-        let _ = self
-            .client
-            .delete(format!(
-                "{clean_url}/rest/v1/cloud_playlist_tracks?id=neq.placeholder"
-            ))
-            .header("apikey", anon_key)
-            .header("Authorization", format!("Bearer {access_token}"))
-            .send()
-            .await;
-
-        // Delete cloud_liked_tracks
-        let _ = self
-            .client
-            .delete(format!(
-                "{clean_url}/rest/v1/cloud_liked_tracks?cloud_track_id=neq.placeholder"
-            ))
-            .header("apikey", anon_key)
-            .header("Authorization", format!("Bearer {access_token}"))
-            .send()
-            .await;
-
-        // Delete cloud_sync_events
-        let _ = self
-            .client
-            .delete(format!(
-                "{clean_url}/rest/v1/cloud_sync_events?operation_id=neq.placeholder"
-            ))
-            .header("apikey", anon_key)
-            .header("Authorization", format!("Bearer {access_token}"))
-            .send()
-            .await;
+            check_projection_response(resp, &format!("delete {table}")).await?;
+        }
 
         Ok(())
     }
+
+    pub async fn upsert_table_rows(
+        &self,
+        supabase_url: &str,
+        anon_key: &str,
+        access_token: &str,
+        table: &str,
+        rows: &serde_json::Value,
+        on_conflict: Option<&str>,
+    ) -> Result<(), String> {
+        let clean_url = supabase_url.trim_end_matches('/');
+        let endpoint = match on_conflict {
+            Some(cols) if !cols.trim().is_empty() => {
+                format!("{clean_url}/rest/v1/{table}?on_conflict={cols}")
+            }
+            _ => format!("{clean_url}/rest/v1/{table}"),
+        };
+
+        let resp = self
+            .client
+            .post(&endpoint)
+            .header("apikey", anon_key)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .header("Prefer", "resolution=merge-duplicates,return=minimal")
+            .json(rows)
+            .send()
+            .await
+            .map_err(|e| format!("Network error pushing {table}: {e}"))?;
+
+        check_projection_response(resp, &format!("upsert {table}")).await
+    }
+}
+
+async fn check_projection_response(resp: reqwest::Response, op: &str) -> Result<(), String> {
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err("Your session has expired. Please sign in again.".to_string());
+    }
+    if !status.is_success() {
+        let err = resp.text().await.unwrap_or_default();
+        return Err(format!("Cloud {op} failed ({status}): {err}"));
+    }
+    Ok(())
 }

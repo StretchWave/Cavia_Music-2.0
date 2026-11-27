@@ -362,6 +362,19 @@ impl SyncEngine {
         Ok(auth_resp.access_token)
     }
 
+    /// Returns `(supabase_url, anon_key, access_token)` when cloud credentials are configured
+    /// and a session token is currently valid.
+    pub async fn connect_auth_context(&self) -> Result<Option<(String, String, String)>, String> {
+        let (url, key) = self.get_config().await?;
+        if url.is_empty() || key.is_empty() {
+            return Ok(None);
+        }
+        match self.get_valid_access_token().await {
+            Ok(token) => Ok(Some((url, key, token))),
+            Err(_) => Ok(None),
+        }
+    }
+
     pub async fn sync(&self) -> Result<SyncResult, String> {
         // Serialize manual and automatic sync requests so the same outbox
         // batch cannot be pushed concurrently by multiple triggers.
@@ -401,54 +414,73 @@ impl SyncEngine {
         let user_id = status.account_id.clone().unwrap_or_default();
         let mut pushed = 0;
 
-        // 1. PUSH: Fetch pending outbox mutations
-        let pending = OutboxService::fetch_pending(&self.pool, 50).await?;
-        let mut completed_op_ids = Vec::new();
+        const MAX_SYNC_PAGES: usize = 200;
+        const PUSH_BATCH_SIZE: i64 = 50;
+        const PULL_PAGE_SIZE: usize = 100;
 
-        for item in pending {
-            let payload: serde_json::Value = match serde_json::from_str(&item.payload_json) {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ =
-                        OutboxService::mark_failed(&self.pool, &item.operation_id, &e.to_string())
-                            .await;
-                    continue;
-                }
-            };
+        // 1. PUSH: Drain all pending outbox batches in order until empty or network failure
+        for _ in 0..MAX_SYNC_PAGES {
+            let pending = OutboxService::fetch_pending(&self.pool, PUSH_BATCH_SIZE).await?;
+            if pending.is_empty() {
+                break;
+            }
+            let batch_len = pending.len();
+            let mut completed_op_ids = Vec::new();
+            let mut push_halted = false;
 
-            match self
-                .client
-                .push_sync_event(
-                    &url,
-                    &key,
-                    &access_token,
-                    &user_id,
-                    &device_id,
-                    &item.operation_id,
-                    &item.entity_type,
-                    &item.entity_id,
-                    &item.operation_type,
-                    &payload,
-                )
-                .await
-            {
-                Ok(()) => {
-                    completed_op_ids.push(item.operation_id);
-                    pushed += 1;
+            for item in pending {
+                let payload: serde_json::Value = match serde_json::from_str(&item.payload_json) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = OutboxService::mark_failed(
+                            &self.pool,
+                            &item.operation_id,
+                            &e.to_string(),
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+
+                match self
+                    .client
+                    .push_sync_event(
+                        &url,
+                        &key,
+                        &access_token,
+                        &user_id,
+                        &device_id,
+                        &item.operation_id,
+                        &item.entity_type,
+                        &item.entity_id,
+                        &item.operation_type,
+                        &payload,
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        completed_op_ids.push(item.operation_id);
+                        pushed += 1;
+                    }
+                    Err(err) => {
+                        let _ =
+                            OutboxService::mark_failed(&self.pool, &item.operation_id, &err).await;
+                        push_halted = true;
+                        break;
+                    }
                 }
-                Err(err) => {
-                    let _ = OutboxService::mark_failed(&self.pool, &item.operation_id, &err).await;
-                    // Stop pushing batch on network error
-                    break;
-                }
+            }
+
+            if !completed_op_ids.is_empty() {
+                let _ = OutboxService::mark_completed(&self.pool, &completed_op_ids).await;
+            }
+
+            if push_halted || batch_len < PUSH_BATCH_SIZE as usize {
+                break;
             }
         }
 
-        if !completed_op_ids.is_empty() {
-            let _ = OutboxService::mark_completed(&self.pool, &completed_op_ids).await;
-        }
-
-        // 2. PULL: Pull remote events since cursor
+        // 2. PULL: Pull all remote events since cursor across pages
         let cursor_str: Option<String> =
             sqlx::query_scalar("SELECT remote_cursor FROM sync_state WHERE id = 1")
                 .fetch_one(&self.pool)
@@ -460,10 +492,25 @@ impl SyncEngine {
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
 
-        let remote_events = self
-            .client
-            .pull_events_since(&url, &key, &access_token, since_seq, 100)
-            .await?;
+        let mut remote_events = Vec::new();
+        let mut cursor_page_seq = since_seq;
+        for _ in 0..MAX_SYNC_PAGES {
+            let page = self
+                .client
+                .pull_events_since(&url, &key, &access_token, cursor_page_seq, PULL_PAGE_SIZE)
+                .await?;
+            let page_len = page.len();
+            if page_len == 0 {
+                break;
+            }
+            if let Some(max_seq) = page.iter().filter_map(|e| e.server_seq).max() {
+                cursor_page_seq = max_seq;
+            }
+            remote_events.extend(page);
+            if page_len < PULL_PAGE_SIZE {
+                break;
+            }
+        }
 
         let mut pulled = 0;
         let mut latest_seq = since_seq;
@@ -546,6 +593,33 @@ impl SyncEngine {
 
                         pulled += 1;
                     }
+                    ("playlist", "reorder") => {
+                        let pl_id = ev
+                            .payload
+                            .get("playlistId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(ev.entity_id.as_str());
+                        let is_tombstoned: Option<i64> = sqlx::query_scalar(
+                            "SELECT 1 FROM sync_tombstones WHERE entity_type = 'playlist' AND entity_id = ?",
+                        )
+                        .bind(pl_id)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .unwrap_or(None);
+                        if is_tombstoned.is_some() {
+                            continue;
+                        }
+                        if let (Some(from_pos), Some(to_pos)) = (
+                            ev.payload.get("fromPosition").and_then(|v| v.as_i64()),
+                            ev.payload.get("toPosition").and_then(|v| v.as_i64()),
+                        ) {
+                            let _ = crate::services::library::reorder_playlist_tracks_in_tx(
+                                &mut tx, pl_id, from_pos, to_pos,
+                            )
+                            .await;
+                            pulled += 1;
+                        }
+                    }
                     ("playlist_track", "add") => {
                         let entry_id = &ev.entity_id;
                         let is_tombstoned: Option<i64> = sqlx::query_scalar(
@@ -565,6 +639,21 @@ impl SyncEngine {
                             .get("playlistId")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
+                        if pl_id.is_empty() {
+                            continue;
+                        }
+                        let pl_exists: Option<i64> = sqlx::query_scalar(
+                            "SELECT 1 FROM playlists WHERE id = ? AND is_deleted = 0",
+                        )
+                        .bind(pl_id)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .unwrap_or(None);
+                        if pl_exists.is_none() {
+                            // Do not trigger FK failure on deleted or missing parent playlist.
+                            continue;
+                        }
+
                         let cloud_trk_id = ev
                             .payload
                             .get("cloudTrackId")
@@ -603,13 +692,41 @@ impl SyncEngine {
                             None
                         };
 
-                        let next_pos: i64 = sqlx::query_scalar(
-                            "SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_tracks WHERE playlist_id = ?"
-                        )
-                        .bind(pl_id)
-                        .fetch_one(&mut *tx)
-                        .await
-                        .unwrap_or(0);
+                        let requested_pos = ev
+                            .payload
+                            .get("position")
+                            .and_then(|v| v.as_i64())
+                            .filter(|&p| p >= 0);
+
+                        let target_pos = if let Some(req_pos) = requested_pos {
+                            let occupied: Option<String> = sqlx::query_scalar(
+                                "SELECT id FROM playlist_tracks WHERE playlist_id = ? AND position = ? LIMIT 1",
+                            )
+                            .bind(pl_id)
+                            .bind(req_pos)
+                            .fetch_optional(&mut *tx)
+                            .await
+                            .unwrap_or(None);
+                            if occupied.is_none() || occupied.as_deref() == Some(entry_id) {
+                                req_pos
+                            } else {
+                                sqlx::query_scalar(
+                                    "SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_tracks WHERE playlist_id = ?",
+                                )
+                                .bind(pl_id)
+                                .fetch_one(&mut *tx)
+                                .await
+                                .unwrap_or(0)
+                            }
+                        } else {
+                            sqlx::query_scalar(
+                                "SELECT COALESCE(MAX(position) + 1, 0) FROM playlist_tracks WHERE playlist_id = ?",
+                            )
+                            .bind(pl_id)
+                            .fetch_one(&mut *tx)
+                            .await
+                            .unwrap_or(0)
+                        };
 
                         sqlx::query(
                             r#"
@@ -633,7 +750,7 @@ impl SyncEngine {
                         .bind(album)
                         .bind(dur)
                         .bind(hash)
-                        .bind(next_pos)
+                        .bind(target_pos)
                         .execute(&mut *tx)
                         .await
                         .map_err(|e| e.to_string())?;
@@ -641,6 +758,14 @@ impl SyncEngine {
                         pulled += 1;
                     }
                     ("playlist_track", "remove") => {
+                        let parent_pl_id: Option<String> = sqlx::query_scalar(
+                            "SELECT playlist_id FROM playlist_tracks WHERE id = ? LIMIT 1",
+                        )
+                        .bind(&ev.entity_id)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .unwrap_or(None);
+
                         sqlx::query("DELETE FROM playlist_tracks WHERE id = ?")
                             .bind(&ev.entity_id)
                             .execute(&mut *tx)
@@ -655,44 +780,74 @@ impl SyncEngine {
                         .await
                         .map_err(|e| e.to_string())?;
 
+                        if let Some(pl_id) = parent_pl_id {
+                            let _ = crate::services::library::recompact_playlist_positions_in_tx(
+                                &mut tx, &pl_id,
+                            )
+                            .await;
+                        }
+
                         pulled += 1;
                     }
                     ("liked_track", "like") => {
                         let hash = ev.payload.get("contentHash").and_then(|v| v.as_str());
-                        if let Some(h) = hash {
-                            if let Some(local_id) = sqlx::query_scalar::<_, String>(
-                                "SELECT id FROM tracks WHERE content_hash = ? AND is_deleted = 0 LIMIT 1"
+                        let mut matched_id = if let Some(h) = hash {
+                            sqlx::query_scalar::<_, String>(
+                                "SELECT id FROM tracks WHERE content_hash = ? AND is_deleted = 0 LIMIT 1",
                             )
                             .bind(h)
                             .fetch_optional(&mut *tx)
                             .await
-                            .unwrap_or(None) {
-                                let _ = sqlx::query(
-                                    "INSERT OR IGNORE INTO liked_tracks (track_id, liked_at) VALUES (?, CURRENT_TIMESTAMP)"
-                                )
-                                .bind(&local_id)
-                                .execute(&mut *tx)
-                                .await;
-                            }
+                            .unwrap_or(None)
+                        } else {
+                            None
+                        };
+                        if matched_id.is_none() {
+                            matched_id = sqlx::query_scalar::<_, String>(
+                                "SELECT id FROM tracks WHERE id = ? AND is_deleted = 0 LIMIT 1",
+                            )
+                            .bind(&ev.entity_id)
+                            .fetch_optional(&mut *tx)
+                            .await
+                            .unwrap_or(None);
+                        }
+                        if let Some(local_id) = matched_id {
+                            let _ = sqlx::query(
+                                "INSERT OR IGNORE INTO liked_tracks (track_id, liked_at) VALUES (?, CURRENT_TIMESTAMP)",
+                            )
+                            .bind(&local_id)
+                            .execute(&mut *tx)
+                            .await;
                         }
                         pulled += 1;
                     }
                     ("liked_track", "unlike") => {
                         let hash = ev.payload.get("contentHash").and_then(|v| v.as_str());
-                        if let Some(h) = hash {
-                            if let Some(local_id) = sqlx::query_scalar::<_, String>(
+                        let mut matched_id = if let Some(h) = hash {
+                            sqlx::query_scalar::<_, String>(
                                 "SELECT id FROM tracks WHERE content_hash = ? LIMIT 1",
                             )
                             .bind(h)
                             .fetch_optional(&mut *tx)
                             .await
                             .unwrap_or(None)
-                            {
-                                let _ = sqlx::query("DELETE FROM liked_tracks WHERE track_id = ?")
-                                    .bind(&local_id)
-                                    .execute(&mut *tx)
-                                    .await;
-                            }
+                        } else {
+                            None
+                        };
+                        if matched_id.is_none() {
+                            matched_id = sqlx::query_scalar::<_, String>(
+                                "SELECT id FROM tracks WHERE id = ? LIMIT 1",
+                            )
+                            .bind(&ev.entity_id)
+                            .fetch_optional(&mut *tx)
+                            .await
+                            .unwrap_or(None);
+                        }
+                        if let Some(local_id) = matched_id {
+                            let _ = sqlx::query("DELETE FROM liked_tracks WHERE track_id = ?")
+                                .bind(&local_id)
+                                .execute(&mut *tx)
+                                .await;
                         }
                         pulled += 1;
                     }

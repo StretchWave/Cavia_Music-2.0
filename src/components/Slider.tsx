@@ -1,4 +1,4 @@
-import { type ChangeEvent, type CSSProperties, useState, useEffect } from 'react';
+import { type ChangeEvent, type CSSProperties, useState, useEffect, useRef } from 'react';
 
 interface SliderProps {
   value: number;
@@ -28,11 +28,13 @@ export function Slider({
   showFill = true,
 }: SliderProps) {
   const [internalValue, setInternalValue] = useState(value);
+  const internalValueRef = useRef(value);
   const [isInteracting, setIsInteracting] = useState(false);
 
   useEffect(() => {
     if (!isInteracting) {
       setInternalValue(value);
+      internalValueRef.current = value;
     }
   }, [value, isInteracting]);
 
@@ -41,11 +43,9 @@ export function Slider({
 
   const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
     const nextVal = Number(e.target.value);
+    internalValueRef.current = nextVal;
     setInternalValue(nextVal);
     onChange?.(nextVal);
-    if (!onCommit) {
-      // If no commit callback provided, treat every change as immediate
-    }
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLInputElement>) => {
@@ -69,7 +69,7 @@ export function Slider({
     }
     if (isInteracting) {
       setIsInteracting(false);
-      onCommit?.(internalValue);
+      onCommit?.(internalValueRef.current);
     }
   };
 
@@ -85,7 +85,7 @@ export function Slider({
       e.key === 'PageUp' ||
       e.key === 'PageDown'
     ) {
-      onCommit?.(internalValue);
+      onCommit?.(internalValueRef.current);
     }
   };
 

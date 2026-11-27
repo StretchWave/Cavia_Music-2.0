@@ -2,9 +2,11 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 export type ImportStatus = 'queued' | 'running' | 'paused' | 'completed' | 'cancelled' | 'failed';
+export type ImportSource = 'spotify' | 'youtube_music';
 
 export interface ImportJob {
   id: string;
+  source?: ImportSource | string;
   playlistId: string;
   playlistName: string;
   total: number;
@@ -15,7 +17,7 @@ export interface ImportJob {
   currentTrack?: string | null;
   status: ImportStatus;
   error?: string | null;
-  /** Present when Spotify listed more tracks than Cavia could import. */
+  /** Present when the provider listed more tracks than Cavia could import. */
   notice?: string | null;
   createdAtMs: number;
 }
@@ -30,6 +32,24 @@ export interface SpotifyImportResult {
 }
 
 export const isSpotifyImportAvailable = (): boolean => isTauri();
+export const isPlaylistImportAvailable = (): boolean => isTauri();
+
+/**
+ * Starts an asynchronous playlist import from a public Spotify or YouTube Music URL.
+ */
+export async function startPlaylistImport(url: string): Promise<ImportJob> {
+  if (!isTauri()) {
+    throw new Error('Playlist import runs in the Cavia desktop app only.');
+  }
+  return invoke<ImportJob>('playlist_start_import', { url: url.trim() });
+}
+
+export async function startYtmusicImport(url: string): Promise<ImportJob> {
+  if (!isTauri()) {
+    throw new Error('YouTube Music import runs in the Cavia desktop app only.');
+  }
+  return invoke<ImportJob>('ytmusic_start_import', { url: url.trim() });
+}
 
 /**
  * Starts an asynchronous Spotify playlist import. Playlist metadata is read

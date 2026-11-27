@@ -1,24 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-
-export function formatBytes(bytes) {
-  if (bytes <= 0 || isNaN(bytes)) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  const val = bytes / Math.pow(k, i);
-  return `${val.toFixed(i === 0 ? 0 : 1)} ${sizes[i]}`;
-}
-
-export function isValidArtworkFilename(name) {
-  if (!name || name.startsWith('.')) return false;
-  const lastDot = name.lastIndexOf('.');
-  if (lastDot <= 0) return false;
-  const ext = name.slice(lastDot + 1).toLowerCase();
-  const hash = name.slice(0, lastDot);
-  if (hash.length !== 64 || !/^[0-9a-fA-F]+$/.test(hash)) return false;
-  return ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext);
-}
+import { formatBytes, isValidArtworkFilename } from '../src/lib/diagnostics.js';
 
 describe('Artwork Cache — FormatBytes Utility', () => {
   it('formats zero and negative bytes safely as 0 B', () => {

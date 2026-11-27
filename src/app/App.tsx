@@ -4,8 +4,10 @@ import {
   AudioWaveform,
   Library,
   Loader2,
+  Radio,
   Search,
   Settings2,
+  WifiOff,
   X,
 } from 'lucide-react';
 import {
@@ -29,6 +31,7 @@ import {
 } from '../lib/library';
 import {
   clearQueue,
+  enqueueTrack,
   getPlaybackState,
   listenPlaybackPosition,
   listenPlaybackState,
@@ -36,7 +39,7 @@ import {
   notifyPlaybackPosition,
   playNext,
   playPause,
-  playTrack,
+  playQueueIndex,
   previousTrack,
   removeFromQueue,
   removeFromQueueByIndex,
@@ -46,6 +49,7 @@ import {
   forceExit,
   type ShutdownErrorPayload,
   seek,
+  setPlaybackQueue,
   setPlaybackSpeed,
   setQueue,
   setRepeatMode,
@@ -53,28 +57,52 @@ import {
   setVolume,
   toggleMute,
 } from '../lib/playback';
+import type {
+  Album,
+  Artist,
+  ConnectSessionSnapshot,
+  OfflineFallbackStatus,
+  Page,
+  PlaybackState,
+  PreloadStatusSnapshot,
+  Track,
+} from '../lib/types';
 import {
-  fetchRelatedYouTubeMusic,
-  playYouTubeMusic,
-  type YtMusicTrack,
-} from '../lib/ytmusic';
-import type { Album, Artist, Page, PlaybackState, Track } from '../lib/types';
+  connectGetSession,
+  listenConnectSession,
+  listenOfflineStatus,
+  listenPreloadStatus,
+  offlineChooseShuffleCached,
+  offlineDeclineFallback,
+  offlineExitFallback,
+  offlineGetStatus,
+  preloadGetStatus,
+  preloadRetry,
+  preloadSetTarget,
+} from '../lib/connect';
+import {
+  getAlbumTracks,
+  getArtistTracks,
+  ytMusicTrackToTrack,
+} from '../lib/trackMatching';
 import { Button } from '../components/Button';
 import { Modal } from '../components/Modal';
 import { LibraryView } from '../features/library/LibraryView';
 import { SearchView } from '../features/search/SearchView';
 import { SettingsView } from '../features/settings/SettingsView';
 import { ImportsView } from '../features/imports/ImportsView';
-import { getImportJobs, listenImportProgress } from '../lib/spotify';
+import { getImportJobs, listenImportProgress, type ImportJob } from '../lib/spotify';
 import { PlayerDock } from '../features/player/PlayerDock';
 import { ExpandedPlayer } from '../features/player/ExpandedPlayer';
 import { QueueDrawer } from '../features/player/QueueDrawer';
 import { LyricsDrawer } from '../features/player/LyricsDrawer';
+import { ConnectDrawer } from '../features/connect/ConnectDrawer';
 import { AddToPlaylistModal } from '../features/library/AddToPlaylistModal';
 import { AfterglowBackdrop } from '../components/AfterglowBackdrop';
 import { useAfterglowPalette } from '../lib/useAfterglowPalette';
 import { useMotionSetting } from '../lib/motion';
 import { formatArtworkUri } from '../lib/library';
+import { extractShutdownErrorMessage } from '../lib/diagnostics.js';
 import { useLibraryController } from './useLibraryController';
 import { useAutomaticSync } from './useAutomaticSync';
 
@@ -84,76 +112,6 @@ const pageLabels: Record<Page, string> = {
   imports: 'Imports',
   settings: 'Settings',
 };
-
-/// Catalogue tracks are ephemeral and have no audio file, so anything that
-/// wants to play them needs the provider payload rather than the row id.
-function toProviderTrack(track: Track): YtMusicTrack | null {
-  if (track.sourceKind !== 'provider') return null;
-  const videoId = track.id.startsWith('ytmusic:') ? track.id.slice('ytmusic:'.length) : '';
-  if (videoId.length !== 11) return null;
-  return {
-    videoId,
-    title: track.title,
-    artist: track.artist,
-    album: track.album,
-    durationMs: track.durationMs,
-    artworkUrl: track.artworkUri,
-  };
-}
-
-/// Words that mark part of a title as another version of the same song.
-const VERSION_MARKERS = [
-  'remix',
-  'sped up',
-  'spedup',
-  'slowed',
-  'nightcore',
-  'live',
-  'version',
-  'edit',
-  'instrumental',
-  'acoustic',
-  'remaster',
-  'demo',
-  'reverb',
-];
-
-/// Base title used to recognise the same song uploaded under a different
-/// label: "Song (Remix)" and "Song - Sped Up" both reduce to "song".
-function baseSongTitle(title: string): string {
-  let withoutBrackets = '';
-  let depth = 0;
-  for (const char of title) {
-    if (char === '(' || char === '[') {
-      depth += 1;
-    } else if (char === ')' || char === ']') {
-      depth = Math.max(0, depth - 1);
-    } else if (depth === 0) {
-      withoutBrackets += char;
-    }
-  }
-
-  const lowered = withoutBrackets.toLowerCase();
-  const segments = lowered.split(' - ');
-  const head = segments[0].trim();
-  const tail = segments.slice(1);
-  const tailIsVersion =
-    tail.length > 0 &&
-    tail.every((segment) => VERSION_MARKERS.some((marker) => segment.includes(marker)));
-  const chosen = tailIsVersion ? head : lowered;
-
-  const normalized = chosen.split(/[^\p{L}\p{N}]+/u).filter(Boolean).join(' ');
-  return normalized || chosen.trim();
-}
-
-function shuffled<T>(items: T[]): T[] {
-  const copy = [...items];
-  for (let index = copy.length - 1; index > 0; index -= 1) {
-    const swap = Math.floor(Math.random() * (index + 1));
-    [copy[index], copy[swap]] = [copy[swap], copy[index]];
-  }
-  return copy;
-}
 
 type ToastKind = 'success' | 'error' | 'info';
 
@@ -192,21 +150,31 @@ export function App() {
   const [health, setHealth] = useState<PlatformHealth | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [activeImportCount, setActiveImportCount] = useState<number>(0);
+  const importJobsMapRef = useRef<Map<string, ImportJob>>(new Map());
+  const [requestedPlaylistId, setRequestedPlaylistId] = useState<string | null>(null);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    const countActive = () => {
+      let count = 0;
+      for (const job of importJobsMapRef.current.values()) {
+        if (job.status === 'running' || job.status === 'paused' || job.status === 'queued') {
+          count += 1;
+        }
+      }
+      setActiveImportCount(count);
+    };
+
     getImportJobs()
       .then((jobs) => {
-        setActiveImportCount(jobs.filter((j) => j.status === 'running' || j.status === 'paused').length);
+        importJobsMapRef.current = new Map(jobs.map((job) => [job.id, job]));
+        countActive();
       })
       .catch(console.error);
 
-    listenImportProgress(() => {
-      getImportJobs()
-        .then((jobs) => {
-          setActiveImportCount(jobs.filter((j) => j.status === 'running' || j.status === 'paused').length);
-        })
-        .catch(console.error);
+    listenImportProgress((job) => {
+      importJobsMapRef.current.set(job.id, job);
+      countActive();
     })
       .then((u) => {
         unlisten = u;
@@ -227,8 +195,13 @@ export function App() {
   const [isExpandedPlayerOpen, setIsExpandedPlayerOpen] = useState(urlParams.get('expanded') === 'true');
   const [isQueueOpen, setIsQueueOpen] = useState(urlParams.get('queue') === 'true');
   const [isLyricsOpen, setIsLyricsOpen] = useState(urlParams.get('lyrics') === 'true');
+  const [isConnectOpen, setIsConnectOpen] = useState(false);
   const [shutdownError, setShutdownError] = useState<string | null>(null);
   const [isRetryingShutdown, setIsRetryingShutdown] = useState(false);
+  const [preloadStatus, setPreloadStatus] = useState<PreloadStatusSnapshot | null>(null);
+  const [offlineStatus, setOfflineStatus] = useState<OfflineFallbackStatus | null>(null);
+  const [connectSession, setConnectSession] = useState<ConnectSessionSnapshot | null>(null);
+  const [offlineBusy, setOfflineBusy] = useState(false);
 
   // Add to Playlist modal state
   const [addToPlaylistData, setAddToPlaylistData] = useState<{
@@ -241,7 +214,21 @@ export function App() {
   });
 
   // Appearance preferences
-  const [density, setDensity] = useState<'standard' | 'compact'>('standard');
+  const [density, setDensityState] = useState<'standard' | 'compact'>(() => {
+    try {
+      return localStorage.getItem('cavia-density') === 'compact' ? 'compact' : 'standard';
+    } catch {
+      return 'standard';
+    }
+  });
+  const handleDensityChange = useCallback((next: 'standard' | 'compact') => {
+    setDensityState(next);
+    try {
+      localStorage.setItem('cavia-density', next);
+    } catch {
+      // Ignore storage failures in restricted contexts
+    }
+  }, []);
   const [motion, setMotion] = useMotionSetting();
 
   // Playback state (honest initial state: audio backend is standby until native initialization)
@@ -378,6 +365,7 @@ export function App() {
             ...prev,
             status: state.status,
             currentTrack: state.currentTrack,
+            currentIndex: state.currentIndex,
             positionMs: state.positionMs,
             durationMs: state.durationMs,
             volume: state.volume,
@@ -408,6 +396,7 @@ export function App() {
           ...prev,
           status: snap.status,
           currentTrack: snap.currentTrack,
+          currentIndex: snap.currentIndex,
           positionMs: snap.positionMs,
           durationMs: snap.durationMs,
           volume: snap.volume,
@@ -433,17 +422,105 @@ export function App() {
     });
 
     listen<ShutdownErrorPayload>('app:shutdown-error', (event) => {
-      setShutdownError(event.payload.error);
+      setShutdownError(
+        extractShutdownErrorMessage(event.payload) ??
+          'Failed to save playback state before exiting.'
+      );
     }).then((fn) => {
       unlistenShutdown = fn;
+    });
+
+    let unlistenPreload: (() => void) | undefined;
+    let unlistenOffline: (() => void) | undefined;
+    let unlistenConnect: (() => void) | undefined;
+
+    preloadGetStatus().then((snap) => snap && setPreloadStatus(snap)).catch(console.error);
+    offlineGetStatus().then((st) => st && setOfflineStatus(st)).catch(console.error);
+    connectGetSession().then((sess) => setConnectSession(sess)).catch(console.error);
+
+    listenPreloadStatus((snap) => setPreloadStatus(snap)).then((fn) => {
+      unlistenPreload = fn;
+    });
+    listenOfflineStatus((st) => setOfflineStatus(st)).then((fn) => {
+      unlistenOffline = fn;
+    });
+    listenConnectSession((sess) => setConnectSession(sess)).then((fn) => {
+      unlistenConnect = fn;
     });
 
     return () => {
       if (unlistenState) unlistenState();
       if (unlistenPos) unlistenPos();
       if (unlistenShutdown) unlistenShutdown();
+      if (unlistenPreload) unlistenPreload();
+      if (unlistenOffline) unlistenOffline();
+      if (unlistenConnect) unlistenConnect();
     };
   }, []);
+
+  const handleChangePreloadTarget = useCallback(
+    async (target: number) => {
+      try {
+        const snap = await preloadSetTarget(target);
+        if (snap) setPreloadStatus(snap);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        pushToast('error', `Failed to update preload target: ${msg}`);
+      }
+    },
+    [pushToast]
+  );
+
+  const handleRetryPreload = useCallback(async () => {
+    try {
+      const snap = await preloadRetry();
+      if (snap) setPreloadStatus(snap);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      pushToast('error', `Retry preload failed: ${msg}`);
+    }
+  }, [pushToast]);
+
+  const handleShuffleCachedOffline = useCallback(async () => {
+    setOfflineBusy(true);
+    try {
+      const next = await offlineChooseShuffleCached();
+      if (next) setOfflineStatus(next);
+      pushToast('info', 'Shuffling verified cached tracks offline.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      pushToast('error', msg);
+      const st = await offlineGetStatus().catch(() => null);
+      if (st) setOfflineStatus(st);
+    } finally {
+      setOfflineBusy(false);
+    }
+  }, [pushToast]);
+
+  const handleDeclineOfflineFallback = useCallback(async () => {
+    setOfflineBusy(true);
+    try {
+      const next = await offlineDeclineFallback();
+      if (next) setOfflineStatus(next);
+    } catch (err) {
+      pushToast('error', err instanceof Error ? err.message : String(err));
+    } finally {
+      setOfflineBusy(false);
+    }
+  }, [pushToast]);
+
+  const handleExitOfflineFallback = useCallback(async () => {
+    setOfflineBusy(true);
+    try {
+      const next = await offlineExitFallback();
+      if (next) setOfflineStatus(next);
+      pushToast('info', 'Restored original queue.');
+    } catch (err) {
+      pushToast('error', err instanceof Error ? err.message : String(err));
+    } finally {
+      setOfflineBusy(false);
+    }
+  }, [pushToast]);
 
   const handleRetryShutdown = useCallback(async () => {
     try {
@@ -640,12 +717,7 @@ export function App() {
 
   const handleOpenAddAlbumToPlaylist = useCallback(
     (album: Album) => {
-      const albumTracks = tracks.filter(
-        (track) =>
-          track.album.toLowerCase() === album.title.toLowerCase() &&
-          (track.albumArtist?.toLowerCase() === album.artist.toLowerCase() ||
-            track.artist.toLowerCase() === album.artist.toLowerCase())
-      );
+      const albumTracks = getAlbumTracks(tracks, album);
       setAddToPlaylistData({
         isOpen: true,
         tracks: albumTracks,
@@ -678,15 +750,6 @@ export function App() {
     }
   }, [showPlaybackError]);
 
-  // Online playback is a renderer-side sequence: one stream is playing while
-  // the rest wait here. When it empties, the radio continues from the last
-  // track. A queue that contains local tracks is the user's own and disables
-  // that continuation.
-  const providerQueueRef = useRef<YtMusicTrack[]>([]);
-  const radioHistoryRef = useRef<string[]>([]);
-  // Base titles already played by the radio, so a near-identical upload (a
-  // remix, a sped-up edit or a duplicate upload) is never picked as "next".
-  const radioTitlesRef = useRef<string[]>([]);
   const previousStatusRef = useRef<PlaybackState['status']>('idle');
   const activePlayingTrackRef = useRef<Track | null>(null);
   const userStoppedOrRemovedRef = useRef<boolean>(false);
@@ -715,19 +778,6 @@ export function App() {
       });
   }, [playback.currentTrack, playback.status]);
 
-  const startProviderSequence = useCallback(
-    async (tracks: YtMusicTrack[], startIndex = 0) => {
-      const first = tracks[startIndex];
-      if (!first) return;
-      providerQueueRef.current = tracks.slice(startIndex + 1);
-      radioHistoryRef.current = [first.videoId];
-      const base = baseSongTitle(first.title);
-      radioTitlesRef.current = base ? [base] : [];
-      await playYouTubeMusic(first);
-    },
-    []
-  );
-
   useEffect(() => {
     const status = playback.status;
     const previous = previousStatusRef.current;
@@ -743,93 +793,31 @@ export function App() {
     const finished = activePlayingTrackRef.current;
     if (!finished) return;
 
-    const queue = playback.queue;
-
-    // A song played on its own (for example a single search result) has no
-    // continuation to follow, so the next track is chosen from its tags. Any
-    // longer queue is the user's own order and is left alone.
-    if (finished.sourceKind === 'local') {
-      providerQueueRef.current = [];
-      radioHistoryRef.current = [];
-      radioTitlesRef.current = [];
-
-      if (queue.length <= 1) {
-        let cancelled = false;
-        void suggestNextTrack(finished.id)
-          .then(async (next) => {
-            if (cancelled || !next) return;
-            await setQueue([next.id], next.id);
-          })
-          .catch((err) => {
-            console.error('Autoplay failed:', err);
-          });
-        return () => {
-          cancelled = true;
-        };
-      }
-      return;
+    // A local track played on its own continues from library tag similarity.
+    // Mixed queues and online provider radio are owned natively by Rust.
+    if (finished.sourceKind === 'local' && playback.queue.length <= 1) {
+      let cancelled = false;
+      void suggestNextTrack(finished.id)
+        .then(async (next) => {
+          if (cancelled || !next) return;
+          await setQueue([next.id], next.id);
+        })
+        .catch((err) => {
+          console.error('Autoplay failed:', err);
+        });
+      return () => {
+        cancelled = true;
+      };
     }
-
-    if (finished.sourceKind !== 'provider') return;
-
-    // Only continue when every queued track is a catalogue stream, i.e. the
-    // user never built a queue of their own.
-    if (queue.length === 0 || !queue.every((track) => track.sourceKind === 'provider')) {
-      return;
-    }
-
-    const videoId = finished.id.replace(/^ytmusic:/, '');
-    if (videoId.length !== 11) return;
-
-    let cancelled = false;
-
-    const continueRadio = async () => {
-      const pending = providerQueueRef.current.shift();
-      if (pending) {
-        radioHistoryRef.current.push(pending.videoId);
-        const base = baseSongTitle(pending.title);
-        if (base) radioTitlesRef.current.push(base);
-        await playYouTubeMusic(pending);
-        return;
-      }
-
-      const related = await fetchRelatedYouTubeMusic(videoId);
-      if (cancelled || related.length === 0) return;
-
-      // Skip anything already heard and anything whose base title matches a
-      // played song: a "(Remix)" or duplicate upload of the same name is not
-      // a new track.
-      const heard = new Set(radioHistoryRef.current);
-      const playedTitles = new Set(radioTitlesRef.current);
-      const next = related.find((track) => {
-        if (heard.has(track.videoId)) return false;
-        const base = baseSongTitle(track.title);
-        if (!base) return true;
-        return !playedTitles.has(base);
-      });
-      if (!next) return;
-
-      radioHistoryRef.current.push(next.videoId);
-      const nextBase = baseSongTitle(next.title);
-      if (nextBase) radioTitlesRef.current.push(nextBase);
-      await playYouTubeMusic(next);
-    };
-
-    void continueRadio().catch((err) => {
-      console.error('Autoplay failed:', err);
-    });
-
-    return () => {
-      cancelled = true;
-    };
   }, [playback.status, playback.currentTrack?.id, playback.queue.length]);
 
   const handlePlayTrack = useCallback(
     async (trackId: string) => {
       try {
-        const ids = tracksRef.current.map((track) => track.id);
-        if (!ids.includes(trackId)) return;
-        await setQueue(ids, trackId);
+        const list = tracksRef.current;
+        const index = list.findIndex((track) => track.id === trackId);
+        if (index < 0) return;
+        await setPlaybackQueue(list, index, false);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error('Play track failed:', msg);
@@ -843,51 +831,20 @@ export function App() {
     async (tracksToPlay: Track[], startIndex = 0, shuffle = false) => {
       try {
         if (tracksToPlay.length === 0) return;
-
-        // Catalogue entries carry no local file, so the native queue cannot
-        // load them. Play the online sequence instead: the first stream starts
-        // now, the rest stay queued in the renderer.
-        const online = tracksToPlay.map(toProviderTrack);
-        const onlineCount = online.filter((track) => track !== null).length;
-        if (onlineCount === tracksToPlay.length) {
-          await startProviderSequence(
-            shuffle ? shuffled(online as YtMusicTrack[]) : (online as YtMusicTrack[]),
-            shuffle ? 0 : startIndex
-          );
-          return;
+        if (shuffle) {
+          await setShuffle(true);
         }
-
-        // A mixed collection cannot become one native queue: catalogue rows
-        // have no local file. Play the device's own copy of the collection and
-        // say so, rather than failing on the first online entry.
-        const localOnly =
-          onlineCount > 0 ? tracksToPlay.filter((track) => track.sourceKind !== 'provider') : tracksToPlay;
-        if (onlineCount > 0) {
-          pushToast('info', 'Playing local tracks — streamable tracks play when opened directly.');
-        }
-
-        // Reset provider queue and radio session when starting local playback
-        providerQueueRef.current = [];
-        radioHistoryRef.current = [];
-        radioTitlesRef.current = [];
-
-        if (shuffle) await setShuffle(true);
-        const targetTrack = tracksToPlay[startIndex];
-        const startId =
-          targetTrack && targetTrack.sourceKind !== 'provider' && localOnly.some((t) => t.id === targetTrack.id)
-            ? targetTrack.id
-            : localOnly[0]?.id;
-        await setQueue(
-          localOnly.map((track) => track.id),
-          startId
-        );
+        const safeIndex = Math.max(0, Math.min(startIndex, tracksToPlay.length - 1));
+        const enableRadio =
+          tracksToPlay.length === 1 && tracksToPlay[0].sourceKind === 'provider';
+        await setPlaybackQueue(tracksToPlay, safeIndex, enableRadio);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error('Play collection failed:', msg);
         showPlaybackError(`Playback failed: ${msg}`);
       }
     },
-    [showPlaybackError, pushToast, startProviderSequence]
+    [showPlaybackError]
   );
 
   const handlePlayAll = useCallback(() => {
@@ -924,25 +881,14 @@ export function App() {
 
   const handlePlayAlbum = useCallback(
     (album: Album) => {
-      const albumTracks = tracksRef.current.filter(
-        (track) =>
-          track.album.toLowerCase() === album.title.toLowerCase() &&
-          (track.albumArtist?.toLowerCase() === album.artist.toLowerCase() ||
-            track.artist.toLowerCase() === album.artist.toLowerCase())
-      );
-      void handlePlayTracks(albumTracks, 0, false);
+      void handlePlayTracks(getAlbumTracks(tracksRef.current, album), 0, false);
     },
     [handlePlayTracks]
   );
 
   const handlePlayArtist = useCallback(
     (artist: Artist) => {
-      const artistTracks = tracksRef.current.filter(
-        (track) =>
-          track.artist.toLowerCase() === artist.name.toLowerCase() ||
-          track.albumArtist?.toLowerCase() === artist.name.toLowerCase()
-      );
-      void handlePlayTracks(artistTracks, 0, false);
+      void handlePlayTracks(getArtistTracks(tracksRef.current, artist), 0, false);
     },
     [handlePlayTracks]
   );
@@ -958,6 +904,20 @@ export function App() {
       }
     },
     [showPlaybackError]
+  );
+
+  const handlePlayNextTrack = useCallback(
+    async (track: Track) => {
+      try {
+        await enqueueTrack(track, true);
+        pushToast('info', `Queued "${track.title}" to play next.`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('Play next failed:', msg);
+        showPlaybackError(`Play next failed: ${msg}`);
+      }
+    },
+    [pushToast, showPlaybackError]
   );
 
   const [routeAnnouncement, setRouteAnnouncement] = useState('');
@@ -1167,9 +1127,9 @@ export function App() {
   );
 
   const handleSelectQueueTrack = useCallback(
-    async (trackId: string) => {
+    async (index: number) => {
       try {
-        await playTrack(trackId);
+        await playQueueIndex(index);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error('Select queue track failed:', msg);
@@ -1255,7 +1215,10 @@ export function App() {
                 type="button"
                 className={`nav-item ${isActive ? 'active' : ''}`}
                 aria-current={isActive ? 'page' : undefined}
-                onClick={() => setPage(item.page)}
+                onClick={(e) => {
+                  if (e.detail > 0) e.currentTarget.blur();
+                  setPage(item.page);
+                }}
               >
                 <Icon size={17} strokeWidth={1.8} />
                 <span>{item.label}</span>
@@ -1273,6 +1236,35 @@ export function App() {
           <span className="topbar-page-title">{pageLabels[page]}</span>
 
           <div className="topbar-actions">
+            {offlineStatus?.fallbackActive && (
+              <button
+                type="button"
+                className="topbar-offline-chip"
+                onClick={() => setIsQueueOpen(true)}
+                title={offlineStatus.statusMessage ?? 'Offline cached playback active'}
+              >
+                <WifiOff size={13} aria-hidden="true" />
+                <span>
+                  {offlineStatus.reconnectPendingFinish
+                    ? 'Online · finishing track'
+                    : `Offline (${offlineStatus.remainingFallbackCount} left)`}
+                </span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              className={`topbar-connect-btn ${connectSession ? 'is-active' : ''}`}
+              onClick={() => setIsConnectOpen(true)}
+              title="Open Cavia Connect collaborative session"
+              aria-label="Open Cavia Connect"
+            >
+              <Radio size={14} aria-hidden="true" />
+              <span className="topbar-connect-label">
+                {connectSession ? connectSession.joinCode : 'Connect'}
+              </span>
+            </button>
+
             <span
               className={`core-status-chip status-${statusTone}`}
               title={statusLabel}
@@ -1285,7 +1277,7 @@ export function App() {
           </div>
         </header>
 
-        {isScanning && scanProgress && (
+        {isScanning && scanProgress && page !== 'imports' && (
           <div className="cavia-scan-banner" role="status" aria-live="polite">
             <div className="scan-banner-header">
               <div className="scan-banner-info">
@@ -1326,28 +1318,7 @@ export function App() {
           </div>
         )}
 
-        <div className="cavia-toast-stack" aria-live="polite">
-          {toasts.map((toast) => (
-            <div
-              key={toast.id}
-              className={`cavia-toast toast-${toast.kind}`}
-              role="status"
-            >
-              <span className="toast-dot" aria-hidden="true" />
-              <span className="toast-message">{toast.message}</span>
-              <button
-                type="button"
-                className="toast-close"
-                onClick={() => dismissToast(toast.id)}
-                aria-label="Dismiss notification"
-              >
-                <X size={14} />
-              </button>
-            </div>
-          ))}
-        </div>
-
-        <div className="cavia-page-scroll" key={page} data-page={page} tabIndex={-1}>
+        <div className="cavia-page-scroll" data-page={page} tabIndex={-1}>
           {page === 'library' && (
             <LibraryView
               connectionError={connectionError}
@@ -1386,17 +1357,24 @@ export function App() {
               onPlayNext={handlePlayNext}
               onNavigateToImports={() => setPage('imports')}
               activeImportCount={activeImportCount}
-              onOpenImportActivity={() => setPage('imports')}
+              requestedPlaylistId={requestedPlaylistId}
+              onRequestedPlaylistHandled={() => setRequestedPlaylistId(null)}
             />
           )}
 
           {page === 'imports' && (
             <ImportsView
-              onOpenPlaylist={(_playlistId) => {
+              onOpenPlaylist={(playlistId) => {
+                setRequestedPlaylistId(playlistId);
                 setPage('library');
                 refreshLibrary();
               }}
+              onExit={() => setPage('library')}
               onPlaylistCreated={refreshLibrary}
+              onImportFolder={handleImportFolder}
+              isScanning={isScanning}
+              scanProgress={scanProgress}
+              onCancelScan={handleCancelScan}
             />
           )}
 
@@ -1413,7 +1391,10 @@ export function App() {
               onPlayAlbum={handlePlayAlbum}
               onPlayArtist={handlePlayArtist}
               onPlayNext={handlePlayNext}
-              onPlayOnlineTrack={(track) => startProviderSequence([track])}
+              onPlayNextTrack={handlePlayNextTrack}
+              onPlayOnlineTrack={async (track) =>
+                setPlaybackQueue([ytMusicTrackToTrack(track)], 0, true)
+              }
               historyRevision={historyRevision}
               allTracks={tracks}
               currentTrackId={playback.currentTrack?.id}
@@ -1425,9 +1406,11 @@ export function App() {
             <SettingsView
               health={health}
               density={density}
-              onDensityChange={setDensity}
+              onDensityChange={handleDensityChange}
               motion={motion}
               onMotionChange={setMotion}
+              preloadStatus={preloadStatus}
+              onChangePreloadTarget={handleChangePreloadTarget}
               onSyncConfigurationChanged={(enabled) => {
                 if (enabled) {
                   scheduleAutomaticSync(250);
@@ -1441,6 +1424,10 @@ export function App() {
           playback={playback}
           isBackendReady={isBackendReady}
           audioBackendStatus={health?.audio_backend}
+          preloadStatus={preloadStatus}
+          offlineStatus={offlineStatus}
+          onChangePreloadTarget={handleChangePreloadTarget}
+          onRetryPreload={handleRetryPreload}
           onRetryDevice={handleRetryDevice}
           onOpenExpanded={() => setIsExpandedPlayerOpen(true)}
           onOpenQueue={() => setIsQueueOpen(true)}
@@ -1463,6 +1450,9 @@ export function App() {
         playback={playback}
         isBackendReady={isBackendReady}
         audioBackendStatus={health?.audio_backend}
+        preloadStatus={preloadStatus}
+        onChangePreloadTarget={handleChangePreloadTarget}
+        onRetryPreload={handleRetryPreload}
         onOpenQueue={() => {
           setIsExpandedPlayerOpen(false);
           setIsQueueOpen(true);
@@ -1487,15 +1477,32 @@ export function App() {
         isOpen={isQueueOpen}
         onClose={() => setIsQueueOpen(false)}
         currentTrack={playback.currentTrack}
+        currentIndex={playback.currentIndex}
         queue={playback.queue}
         isPlaying={playback.status === 'playing'}
         status={playback.status}
         isBackendReady={isBackendReady}
+        preloadStatus={preloadStatus}
+        offlineStatus={offlineStatus}
+        connectSession={connectSession}
+        onChangePreloadTarget={handleChangePreloadTarget}
+        onExitOfflineFallback={handleExitOfflineFallback}
+        onOpenConnect={() => setIsConnectOpen(true)}
         onClearQueue={handleClearQueue}
         onRemoveTrack={handleRemoveQueueTrack}
-        onSelectTrack={handleSelectQueueTrack}
+        onSelectTrack={(index) => handleSelectQueueTrack(index)}
         onShuffleQueue={handleToggleShuffle}
         onReorderQueue={handleReorderQueue}
+      />
+
+      <ConnectDrawer
+        isOpen={isConnectOpen}
+        onClose={() => setIsConnectOpen(false)}
+        session={connectSession}
+        isOffline={Boolean(offlineStatus?.isOffline)}
+        localTracks={tracks}
+        onSessionChanged={setConnectSession}
+        onNotify={pushToast}
       />
 
       <LyricsDrawer
@@ -1540,6 +1547,63 @@ export function App() {
           );
         })}
       </nav>
+
+      <div className="cavia-toast-stack" aria-live="polite">
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            className={`cavia-toast toast-${toast.kind}`}
+            role="status"
+          >
+            <span className="toast-dot" aria-hidden="true" />
+            <span className="toast-message">{toast.message}</span>
+            <button
+              type="button"
+              className="toast-close"
+              onClick={() => dismissToast(toast.id)}
+              aria-label="Dismiss notification"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {offlineStatus?.promptVisible && (
+        <Modal
+          isOpen
+          onClose={handleDeclineOfflineFallback}
+          title="Internet is unavailable"
+        >
+          <div className="modal-stack">
+            <p className="modal-text">
+              {offlineStatus.promptMessage ??
+                'Internet is unavailable. Would you like to continue with cached songs?'}
+            </p>
+            <p className="modal-text modal-text-muted">
+              {offlineStatus.eligibleCachedCount > 0
+                ? `${offlineStatus.eligibleCachedCount} verified cached and local songs are ready offline without modifying your queue.`
+                : 'No verified cached or local songs are available in your library or stream cache yet.'}
+            </p>
+            <div className="modal-actions-right">
+              <Button
+                variant="outline"
+                disabled={offlineBusy}
+                onClick={handleDeclineOfflineFallback}
+              >
+                Don&apos;t Switch
+              </Button>
+              <Button
+                variant="primary"
+                disabled={offlineBusy || offlineStatus.eligibleCachedCount === 0}
+                onClick={handleShuffleCachedOffline}
+              >
+                {offlineBusy ? 'Switching…' : 'Shuffle Cached Songs'}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
 
       {shutdownError && (
         <Modal

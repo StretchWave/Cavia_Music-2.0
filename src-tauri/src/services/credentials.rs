@@ -65,7 +65,13 @@ impl CredentialStore for KeyringStore {
             });
         }
 
-        #[cfg(not(target_os = "android"))]
+        #[cfg(target_os = "ios")]
+        {
+            let _ = (service, account);
+            Err("iOS Keychain secure credential storage is not yet integrated in this build".into())
+        }
+
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             let entry = keyring::Entry::new(service, account)
                 .map_err(|e| format!("Failed to initialize keyring entry for '{account}': {e}"))?;
@@ -103,7 +109,13 @@ impl CredentialStore for KeyringStore {
             return Ok(());
         }
 
-        #[cfg(not(target_os = "android"))]
+        #[cfg(target_os = "ios")]
+        {
+            let _ = (service, account, secret);
+            Err("iOS Keychain secure credential storage is not yet integrated in this build".into())
+        }
+
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             let entry = keyring::Entry::new(service, account)
                 .map_err(|e| format!("Failed to initialize keyring entry for '{account}': {e}"))?;
@@ -129,7 +141,13 @@ impl CredentialStore for KeyringStore {
             return Ok(());
         }
 
-        #[cfg(not(target_os = "android"))]
+        #[cfg(target_os = "ios")]
+        {
+            let _ = (service, account);
+            Err("iOS Keychain secure credential storage is not yet integrated in this build".into())
+        }
+
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             let entry = keyring::Entry::new(service, account)
                 .map_err(|e| format!("Failed to initialize keyring entry for '{account}': {e}"))?;

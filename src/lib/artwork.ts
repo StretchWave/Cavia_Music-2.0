@@ -1,4 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import { formatBytes } from './diagnostics.js';
+
+export { formatBytes };
 
 const requireNative = () => {
   if (!isTauri()) {
@@ -63,13 +66,4 @@ export async function recoverMissingArtwork(): Promise<ArtworkRecoveryResult> {
 export async function recoverTrackArtwork(trackId: string): Promise<TrackRecoveryOutcome> {
   requireNative();
   return invoke<TrackRecoveryOutcome>('recover_track_artwork', { trackId });
-}
-
-export function formatBytes(bytes: number): string {
-  if (bytes <= 0 || isNaN(bytes)) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  const val = bytes / Math.pow(k, i);
-  return `${val.toFixed(i === 0 ? 0 : 1)} ${sizes[i]}`;
 }

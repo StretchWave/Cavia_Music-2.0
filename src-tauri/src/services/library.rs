@@ -3,6 +3,32 @@ use uuid::Uuid;
 
 use crate::domain::{Album, Artist, Playlist, Track};
 
+fn row_to_track(row: &sqlx::sqlite::SqliteRow) -> Track {
+    Track {
+        id: row.get("id"),
+        title: row.get("title"),
+        artist: row.get("artist"),
+        album: row.get("album"),
+        album_artist: row.get("album_artist"),
+        duration_ms: row.get("duration_ms"),
+        artwork_uri: row.get("artwork_uri"),
+        source_kind: row.get("source_kind"),
+        provider_id: row.get("provider_id"),
+        file_uri: row.get("file_uri"),
+        release_year: row.get("release_year"),
+        track_number: row.get("track_number"),
+        disc_number: row.get("disc_number"),
+        genre: row.get("genre"),
+        is_liked: row.get::<i64, _>("is_liked") == 1,
+        play_count: row.get("play_count"),
+        date_added: row.get("date_added"),
+        queue_entry_id: None,
+        contributor_id: None,
+        contributor_name: None,
+        priority_override: None,
+    }
+}
+
 pub async fn get_all_tracks(pool: &SqlitePool) -> Result<Vec<Track>, String> {
     let rows = sqlx::query(
         r#"
@@ -34,30 +60,96 @@ pub async fn get_all_tracks(pool: &SqlitePool) -> Result<Vec<Track>, String> {
     .await
     .map_err(|e| format!("Failed to fetch tracks: {e}"))?;
 
-    let tracks = rows
-        .into_iter()
-        .map(|row| Track {
-            id: row.get("id"),
-            title: row.get("title"),
-            artist: row.get("artist"),
-            album: row.get("album"),
-            album_artist: row.get("album_artist"),
-            duration_ms: row.get("duration_ms"),
-            artwork_uri: row.get("artwork_uri"),
-            source_kind: row.get("source_kind"),
-            provider_id: row.get("provider_id"),
-            file_uri: row.get("file_uri"),
-            release_year: row.get("release_year"),
-            track_number: row.get("track_number"),
-            disc_number: row.get("disc_number"),
-            genre: row.get("genre"),
-            is_liked: row.get::<i64, _>("is_liked") == 1,
-            play_count: row.get("play_count"),
-            date_added: row.get("date_added"),
-        })
-        .collect();
+    Ok(rows.iter().map(row_to_track).collect())
+}
 
-    Ok(tracks)
+pub async fn get_track_by_id(pool: &SqlitePool, track_id: &str) -> Result<Option<Track>, String> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            t.id,
+            t.title,
+            t.artist,
+            t.album,
+            t.album_artist,
+            t.duration_ms,
+            t.artwork_uri,
+            t.source_kind,
+            t.provider_id,
+            t.file_uri,
+            t.release_year,
+            t.track_number,
+            t.disc_number,
+            t.genre,
+            t.play_count,
+            t.date_added,
+            CASE WHEN l.track_id IS NOT NULL THEN 1 ELSE 0 END AS is_liked
+        FROM tracks t
+        LEFT JOIN liked_tracks l ON t.id = l.track_id
+        WHERE t.id = ? AND t.is_deleted = 0
+        LIMIT 1
+        "#,
+    )
+    .bind(track_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch track: {e}"))?;
+
+    Ok(row.as_ref().map(row_to_track))
+}
+
+pub async fn get_tracks_by_ids(
+    pool: &SqlitePool,
+    track_ids: &[String],
+) -> Result<Vec<Track>, String> {
+    if track_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut unique_ids: Vec<&str> = Vec::with_capacity(track_ids.len());
+    let mut seen = std::collections::HashSet::with_capacity(track_ids.len());
+    for id in track_ids {
+        if seen.insert(id.as_str()) {
+            unique_ids.push(id.as_str());
+        }
+    }
+
+    let mut by_id = std::collections::HashMap::with_capacity(unique_ids.len());
+    // Keep SQL bind count comfortably below SQLite's default 999 variable limit.
+    for chunk in unique_ids.chunks(500) {
+        let mut builder = sqlx::QueryBuilder::new(
+            "SELECT t.id, t.title, t.artist, t.album, t.album_artist, t.duration_ms, \
+             t.artwork_uri, t.source_kind, t.provider_id, t.file_uri, t.release_year, \
+             t.track_number, t.disc_number, t.genre, t.play_count, t.date_added, \
+             CASE WHEN l.track_id IS NOT NULL THEN 1 ELSE 0 END AS is_liked \
+             FROM tracks t LEFT JOIN liked_tracks l ON t.id = l.track_id \
+             WHERE t.is_deleted = 0 AND t.id IN (",
+        );
+        let mut separated = builder.separated(", ");
+        for id in chunk {
+            separated.push_bind(*id);
+        }
+        separated.push_unseparated(")");
+
+        let rows = builder
+            .build()
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("Failed to fetch requested tracks: {e}"))?;
+
+        for row in &rows {
+            let track = row_to_track(row);
+            by_id.insert(track.id.clone(), track);
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(track_ids.len());
+    for id in track_ids {
+        if let Some(track) = by_id.get(id) {
+            ordered.push(track.clone());
+        }
+    }
+    Ok(ordered)
 }
 
 pub async fn get_albums(pool: &SqlitePool) -> Result<Vec<Album>, String> {
@@ -190,6 +282,10 @@ pub async fn get_liked_tracks(pool: &SqlitePool) -> Result<Vec<Track>, String> {
             is_liked: true,
             play_count: row.get("play_count"),
             date_added: row.get("date_added"),
+            queue_entry_id: None,
+            contributor_id: None,
+            contributor_name: None,
+            priority_override: None,
         })
         .collect();
 
@@ -421,6 +517,10 @@ pub async fn get_playlist_tracks(
             is_liked: row.get::<i64, _>("is_liked") == 1,
             play_count: row.get("play_count"),
             date_added: row.get("date_added"),
+            queue_entry_id: None,
+            contributor_id: None,
+            contributor_name: None,
+            priority_override: None,
         })
         .collect();
 
@@ -806,14 +906,29 @@ pub async fn record_recent_play(
 }
 
 /// Most recently played tracks, newest first. Catalogue entries are included
-/// with the snapshot they had when they played.
+/// with the snapshot they had when they played, while active local rows retain
+/// their current `file_uri`, `album_artist`, and `is_liked` state.
 pub async fn get_recent_plays(pool: &SqlitePool, limit: i64) -> Result<Vec<Track>, String> {
     let rows = sqlx::query(
         r#"
-        SELECT track_id, source_kind, title, artist, album, duration_ms,
-               artwork_uri, provider_id, play_count, played_at
-        FROM recent_plays
-        ORDER BY played_at DESC
+        SELECT
+            r.track_id,
+            r.source_kind,
+            r.title,
+            r.artist,
+            r.album,
+            t.album_artist,
+            r.duration_ms,
+            COALESCE(t.artwork_uri, r.artwork_uri) AS artwork_uri,
+            r.provider_id,
+            CASE WHEN t.id IS NOT NULL THEN t.file_uri ELSE NULL END AS file_uri,
+            CASE WHEN l.track_id IS NOT NULL THEN 1 ELSE 0 END AS is_liked,
+            r.play_count,
+            r.played_at
+        FROM recent_plays r
+        LEFT JOIN tracks t ON r.track_id = t.id AND t.is_deleted = 0
+        LEFT JOIN liked_tracks l ON r.track_id = l.track_id
+        ORDER BY r.played_at DESC
         LIMIT ?
         "#,
     )
@@ -829,19 +944,23 @@ pub async fn get_recent_plays(pool: &SqlitePool, limit: i64) -> Result<Vec<Track
             title: row.get("title"),
             artist: row.get("artist"),
             album: row.get("album"),
-            album_artist: None,
+            album_artist: row.get("album_artist"),
             duration_ms: row.get("duration_ms"),
             artwork_uri: row.get("artwork_uri"),
             source_kind: row.get("source_kind"),
             provider_id: row.get("provider_id"),
-            file_uri: None,
+            file_uri: row.get("file_uri"),
             release_year: None,
             track_number: None,
             disc_number: None,
             genre: None,
-            is_liked: false,
+            is_liked: row.get::<i64, _>("is_liked") == 1,
             play_count: row.get("play_count"),
             date_added: row.get("played_at"),
+            queue_entry_id: None,
+            contributor_id: None,
+            contributor_name: None,
+            priority_override: None,
         })
         .collect())
 }
@@ -1016,6 +1135,141 @@ pub async fn remove_tracks_from_playlist(
     Ok(())
 }
 
+const REORDER_ISOLATION_POS: i64 = 1_000_000_000;
+const REORDER_SHIFT_OFFSET: i64 = 2_000_000_000;
+
+/// Recompacts `playlist_tracks.position` sequentially (`0..N-1`) inside an open transaction.
+pub(crate) async fn recompact_playlist_positions_in_tx(
+    tx: &mut sqlx::SqliteConnection,
+    playlist_id: &str,
+) -> Result<(), String> {
+    let remaining_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position ASC",
+    )
+    .bind(playlist_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to read playlist order for compaction: {e}"))?;
+
+    if remaining_ids.is_empty() {
+        return Ok(());
+    }
+
+    // Move out of conflicting index space before writing compact 0..N positions.
+    sqlx::query("UPDATE playlist_tracks SET position = position + ? WHERE playlist_id = ?")
+        .bind(REORDER_SHIFT_OFFSET)
+        .bind(playlist_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to offset positions before compaction: {e}"))?;
+
+    for (new_pos, entry_id) in remaining_ids.into_iter().enumerate() {
+        sqlx::query("UPDATE playlist_tracks SET position = ? WHERE id = ?")
+            .bind(new_pos as i64)
+            .bind(&entry_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to write compacted position: {e}"))?;
+    }
+
+    Ok(())
+}
+
+/// Applies a playlist track move (`from_pos -> to_pos`) using two-phase collision avoidance.
+pub(crate) async fn reorder_playlist_tracks_in_tx(
+    tx: &mut sqlx::SqliteConnection,
+    playlist_id: &str,
+    from_pos: i64,
+    to_pos: i64,
+) -> Result<(), String> {
+    if from_pos < 0 || to_pos < 0 {
+        return Err("Positions must be non-negative".to_string());
+    }
+    if from_pos == to_pos {
+        return Ok(());
+    }
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?")
+            .bind(playlist_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to count playlist tracks: {e}"))?;
+
+    if from_pos >= count || to_pos >= count {
+        return Err(format!(
+            "Invalid position: from_pos={from_pos}, to_pos={to_pos}, total tracks={count}"
+        ));
+    }
+
+    // Step 1: Move target track to temporary out-of-range position
+    sqlx::query("UPDATE playlist_tracks SET position = ? WHERE playlist_id = ? AND position = ?")
+        .bind(REORDER_ISOLATION_POS)
+        .bind(playlist_id)
+        .bind(from_pos)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to isolate moving track: {e}"))?;
+
+    // Step 2: Shift intervening tracks using 2-phase disjoint update
+    if from_pos < to_pos {
+        sqlx::query(
+            "UPDATE playlist_tracks SET position = position + ? WHERE playlist_id = ? AND position > ? AND position <= ?",
+        )
+        .bind(REORDER_SHIFT_OFFSET)
+        .bind(playlist_id)
+        .bind(from_pos)
+        .bind(to_pos)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to shift intervening tracks (phase 2a): {e}"))?;
+
+        sqlx::query(
+            "UPDATE playlist_tracks SET position = position - ? WHERE playlist_id = ? AND position >= ? AND position != ?",
+        )
+        .bind(REORDER_SHIFT_OFFSET + 1)
+        .bind(playlist_id)
+        .bind(REORDER_SHIFT_OFFSET)
+        .bind(REORDER_ISOLATION_POS)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to shift intervening tracks (phase 2b): {e}"))?;
+    } else {
+        sqlx::query(
+            "UPDATE playlist_tracks SET position = position + ? WHERE playlist_id = ? AND position >= ? AND position < ?",
+        )
+        .bind(REORDER_SHIFT_OFFSET)
+        .bind(playlist_id)
+        .bind(to_pos)
+        .bind(from_pos)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to shift intervening tracks (phase 2a): {e}"))?;
+
+        sqlx::query(
+            "UPDATE playlist_tracks SET position = position - ? WHERE playlist_id = ? AND position >= ? AND position != ?",
+        )
+        .bind(REORDER_SHIFT_OFFSET - 1)
+        .bind(playlist_id)
+        .bind(REORDER_SHIFT_OFFSET)
+        .bind(REORDER_ISOLATION_POS)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to shift intervening tracks (phase 2b): {e}"))?;
+    }
+
+    // Step 3: Move isolated track into destination position to_pos
+    sqlx::query("UPDATE playlist_tracks SET position = ? WHERE playlist_id = ? AND position = ?")
+        .bind(to_pos)
+        .bind(playlist_id)
+        .bind(REORDER_ISOLATION_POS)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to place moving track at target position: {e}"))?;
+
+    Ok(())
+}
+
 pub async fn reorder_playlist_tracks(
     pool: &SqlitePool,
     playlist_id: &str,
@@ -1045,82 +1299,10 @@ pub async fn reorder_playlist_tracks(
         .await
         .map_err(|e| format!("Failed to start transaction: {e}"))?;
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?")
-            .bind(playlist_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| format!("Failed to count playlist tracks: {e}"))?;
-
-    if from_pos >= count || to_pos >= count {
-        return Err(format!(
-            "Invalid position: from_pos={from_pos}, to_pos={to_pos}, total tracks={count}"
-        ));
-    }
-
-    // Step 1: Move target track to temporary out-of-range position
-    sqlx::query(
-        "UPDATE playlist_tracks SET position = 1000000 WHERE playlist_id = ? AND position = ?",
-    )
-    .bind(playlist_id)
-    .bind(from_pos)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| format!("Failed to isolate moving track: {e}"))?;
-
-    // Step 2: Shift intervening tracks using 2-phase disjoint update
-    if from_pos < to_pos {
-        // Moving downwards: items in (from_pos, to_pos] shift down by 1 to [from_pos, to_pos)
-        sqlx::query(
-            "UPDATE playlist_tracks SET position = position + 2000000 WHERE playlist_id = ? AND position > ? AND position <= ?",
-        )
-        .bind(playlist_id)
-        .bind(from_pos)
-        .bind(to_pos)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to shift intervening tracks (phase 2a): {e}"))?;
-
-        sqlx::query(
-            "UPDATE playlist_tracks SET position = position - 2000001 WHERE playlist_id = ? AND position >= 2000000",
-        )
-        .bind(playlist_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to shift intervening tracks (phase 2b): {e}"))?;
-    } else {
-        // Moving upwards: items in [to_pos, from_pos) shift up by 1 to (to_pos, from_pos]
-        sqlx::query(
-            "UPDATE playlist_tracks SET position = position + 2000000 WHERE playlist_id = ? AND position >= ? AND position < ?",
-        )
-        .bind(playlist_id)
-        .bind(to_pos)
-        .bind(from_pos)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to shift intervening tracks (phase 2a): {e}"))?;
-
-        sqlx::query(
-            "UPDATE playlist_tracks SET position = position - 1999999 WHERE playlist_id = ? AND position >= 2000000",
-        )
-        .bind(playlist_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to shift intervening tracks (phase 2b): {e}"))?;
-    }
-
-    // Step 3: Move isolated track into destination position to_pos
-    sqlx::query(
-        "UPDATE playlist_tracks SET position = ? WHERE playlist_id = ? AND position = 1000000",
-    )
-    .bind(to_pos)
-    .bind(playlist_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| format!("Failed to place moving track at target position: {e}"))?;
+    reorder_playlist_tracks_in_tx(&mut tx, playlist_id, from_pos, to_pos).await?;
 
     let _ = crate::services::sync::outbox::OutboxService::record_tracks_reorder(
-        &mut *tx,
+        &mut tx,
         playlist_id,
         from_pos,
         to_pos,
@@ -1252,7 +1434,7 @@ fn is_version_marker(segment: &str) -> bool {
 /// Reduces a title to its base name so near-identical uploads ("Song",
 /// "Song (Remix)", "Song - Sped Up") count as the same song and are never
 /// chosen as the next track.
-fn base_song_title(title: &str) -> String {
+pub fn base_song_title(title: &str) -> String {
     let mut text = String::with_capacity(title.len());
     let mut depth = 0i32;
     for ch in title.chars() {
@@ -1371,6 +1553,10 @@ pub async fn suggest_next_track(
         is_liked: false,
         play_count: cur_row.get("play_count"),
         date_added: String::new(),
+        queue_entry_id: None,
+        contributor_id: None,
+        contributor_name: None,
+        priority_override: None,
     };
 
     let recent_ids: Vec<String> =
@@ -1425,6 +1611,10 @@ pub async fn suggest_next_track(
             is_liked: false,
             play_count: row.get("play_count"),
             date_added: row.get("date_added"),
+            queue_entry_id: None,
+            contributor_id: None,
+            contributor_name: None,
+            priority_override: None,
         })
         .collect();
 
@@ -1546,18 +1736,14 @@ pub async fn delete_tracks(pool: &SqlitePool, track_ids: &[String]) -> Result<us
             .await
             .map_err(|e| format!("Failed to remove from recent plays: {e}"))?;
 
-        // Find affected playlists
-        let affected: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT playlist_id FROM playlist_tracks WHERE track_id = ?",
+        // Find affected playlist entries so sync outbox records every removal
+        let affected_entries: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT id, playlist_id, position FROM playlist_tracks WHERE track_id = ?",
         )
         .bind(track_id)
         .fetch_all(&mut *tx)
         .await
         .unwrap_or_default();
-
-        for pid in affected {
-            all_affected_playlists.insert(pid);
-        }
 
         // Remove from playlist_tracks
         sqlx::query("DELETE FROM playlist_tracks WHERE track_id = ?")
@@ -1565,6 +1751,14 @@ pub async fn delete_tracks(pool: &SqlitePool, track_ids: &[String]) -> Result<us
             .execute(&mut *tx)
             .await
             .map_err(|e| format!("Failed to remove track from playlists: {e}"))?;
+
+        for (entry_id, pid, pos) in affected_entries {
+            all_affected_playlists.insert(pid.clone());
+            let _ = crate::services::sync::outbox::OutboxService::record_track_remove(
+                &mut *tx, &pid, &entry_id, pos,
+            )
+            .await;
+        }
     }
 
     // Recompact positions for all affected playlists once
@@ -1623,11 +1817,29 @@ pub async fn clear_playlist_tracks(pool: &SqlitePool, playlist_id: &str) -> Resu
         return Err(format!("Playlist '{playlist_id}' not found or deleted"));
     }
 
+    let removed_entries: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT id, position FROM playlist_tracks WHERE playlist_id = ? ORDER BY position ASC",
+    )
+    .bind(playlist_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to list playlist tracks for clearing: {e}"))?;
+
     sqlx::query("DELETE FROM playlist_tracks WHERE playlist_id = ?")
         .bind(playlist_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("Failed to clear playlist tracks: {e}"))?;
+
+    for (entry_id, position) in removed_entries {
+        let _ = crate::services::sync::outbox::OutboxService::record_track_remove(
+            &mut *tx,
+            playlist_id,
+            &entry_id,
+            position,
+        )
+        .await;
+    }
 
     sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(playlist_id)
@@ -1703,6 +1915,10 @@ mod tests {
             is_liked: false,
             play_count: 0,
             date_added: String::new(),
+            queue_entry_id: None,
+            contributor_id: None,
+            contributor_name: None,
+            priority_override: None,
         }
     }
 
@@ -1870,6 +2086,10 @@ mod tests {
             is_liked: false,
             play_count: 0,
             date_added: String::new(),
+            queue_entry_id: None,
+            contributor_id: None,
+            contributor_name: None,
+            priority_override: None,
         };
 
         record_recent_play(&pool, &track).await.unwrap();

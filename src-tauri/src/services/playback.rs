@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -9,7 +10,89 @@ use tokio::sync::oneshot;
 
 use crate::audio::{AudioBackend, PlaybackStatus, create_platform_backend};
 use crate::domain::Track;
-use crate::services::queue::{QueueManager, RepeatMode};
+use crate::services::connect::ConnectService;
+use crate::services::library::base_song_title;
+use crate::services::offline::{OfflineFallbackService, probe_internet_connectivity};
+use crate::services::preload::{PreloadCoordinator, is_connectivity_error};
+use crate::services::queue::{QueueManager, RepeatMode, SavedQueueSnapshot};
+use crate::services::ytmusic::{YtMusicService, YtMusicTrack};
+
+fn is_playable_source_available(file_path: &str) -> bool {
+    if file_path.starts_with("content://") {
+        return true;
+    }
+    if let Ok(parsed) = url::Url::parse(file_path)
+        && parsed.scheme() == "file"
+        && let Ok(local_path) = parsed.to_file_path()
+    {
+        return local_path.exists();
+    }
+    Path::new(file_path).exists()
+}
+
+fn ytmusic_video_id(track: &Track) -> Option<&str> {
+    if track.source_kind != "provider" {
+        return None;
+    }
+    let is_ytmusic =
+        track.provider_id.as_deref() == Some("youtube_music") || track.id.starts_with("ytmusic:");
+    if !is_ytmusic {
+        return None;
+    }
+    let raw = track.id.strip_prefix("ytmusic:")?;
+    let valid = raw.len() == 11
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    valid.then_some(raw)
+}
+
+fn ytmusic_track_to_domain(item: YtMusicTrack) -> Track {
+    let artist_name = if item.artist.trim().is_empty() {
+        "Unknown artist".to_string()
+    } else {
+        item.artist
+    };
+    Track {
+        id: format!("ytmusic:{}", item.video_id),
+        title: item.title,
+        artist: artist_name.clone(),
+        album: item.album,
+        album_artist: Some(artist_name),
+        duration_ms: item.duration_ms.max(0),
+        artwork_uri: item.artwork_url,
+        source_kind: "provider".to_string(),
+        provider_id: Some("youtube_music".to_string()),
+        file_uri: None,
+        release_year: None,
+        track_number: None,
+        disc_number: None,
+        genre: None,
+        is_liked: false,
+        play_count: 0,
+        date_added: String::new(),
+        queue_entry_id: None,
+        contributor_id: None,
+        contributor_name: None,
+        priority_override: None,
+    }
+}
+
+fn local_cover_url(artwork_uri: Option<&str>) -> Option<String> {
+    let raw = artwork_uri?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.starts_with("http://") || raw.starts_with("https://") || raw.starts_with("file://") {
+        return Some(raw.to_string());
+    }
+    let path = Path::new(raw);
+    if path.exists() {
+        url::Url::from_file_path(path).ok().map(String::from)
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +100,7 @@ pub struct PlaybackSnapshot {
     pub generation: u64,
     pub status: String,
     pub current_track: Option<Track>,
+    pub current_index: Option<usize>,
     pub position_ms: i64,
     pub duration_ms: i64,
     pub volume: u32,
@@ -226,9 +310,44 @@ pub async fn write_playback_state(
 type StateEmitter = Box<dyn Fn(PlaybackSnapshot) + Send + Sync>;
 type PositionEmitter = Box<dyn Fn(PositionUpdate) + Send + Sync>;
 
+pub enum ProviderWork {
+    ResolveTrack {
+        generation: u64,
+        index: usize,
+        track: Track,
+    },
+    FetchRadio {
+        generation: u64,
+        video_id: String,
+        seen_ids: HashSet<String>,
+        seen_titles: HashSet<(String, String)>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum CoordinatorEvent {
+    QueueSnapshotChanged {
+        current: Option<Track>,
+        upcoming: Vec<Track>,
+    },
+    TrackStarted {
+        track: Track,
+    },
+    TrackResolutionFinished {
+        error: Option<String>,
+    },
+    PlaybackAdvanced,
+    FallbackExhausted,
+    RequestRestoreOriginalQueue,
+}
+
 pub enum PlaybackCommand {
     PlayTrack {
         track_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    PlayQueueIndex {
+        index: usize,
         reply: oneshot::Sender<Result<(), String>>,
     },
     Play {
@@ -278,6 +397,12 @@ pub enum PlaybackCommand {
         start_track_id: Option<String>,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    SetMixedQueue {
+        tracks: Vec<Track>,
+        start_index: Option<usize>,
+        enable_radio: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     AddToQueue {
         track: Track,
         reply: oneshot::Sender<Result<(), String>>,
@@ -317,6 +442,20 @@ pub enum PlaybackCommand {
         app_handle: AppHandle,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    SetResolverTx {
+        tx: tokio::sync::mpsc::UnboundedSender<ProviderWork>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    FinishTrackResolution {
+        generation: u64,
+        index: usize,
+        track_id: String,
+        result: Result<String, String>,
+    },
+    FinishRadioFetch {
+        generation: u64,
+        result: Result<Vec<Track>, String>,
+    },
     InitMediaControls {
         hwnd: Option<isize>,
         reply: oneshot::Sender<Result<(), String>>,
@@ -326,6 +465,31 @@ pub enum PlaybackCommand {
         reply: oneshot::Sender<Result<(), String>>,
     },
     RetryDevice {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    SetCoordinatorTx {
+        tx: tokio::sync::mpsc::UnboundedSender<CoordinatorEvent>,
+        fallback_restore_armed: Arc<AtomicBool>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    QueueSnapshot {
+        reply: oneshot::Sender<Result<SavedQueueSnapshot, String>>,
+    },
+    ApplyCollaborativeSequence {
+        current: Option<Track>,
+        upcoming: Vec<Track>,
+        start_if_idle: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    EnterOfflineFallback {
+        fallback_tracks: Vec<Track>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ExitOfflineFallback {
+        saved: SavedQueueSnapshot,
+        played_entry_ids: HashSet<String>,
+        played_track_ids: HashSet<String>,
+        auto_play: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
     Shutdown {
@@ -344,6 +508,12 @@ pub struct PlaybackCore {
     position_emitter: Option<PositionEmitter>,
     last_error: Option<String>,
     generation: u64,
+    loading_generation: Option<u64>,
+    radio_enabled: bool,
+    radio_seed_video_id: Option<String>,
+    radio_seen_ids: HashSet<String>,
+    radio_seen_titles: HashSet<(String, String)>,
+    resolver_tx: Option<tokio::sync::mpsc::UnboundedSender<ProviderWork>>,
     media_controls_host: Option<Box<dyn MediaControlsHost>>,
     media_controls_ready: bool,
     smtc_status: SmtcStatus,
@@ -357,6 +527,10 @@ pub struct PlaybackCore {
     snapshot_cache: Arc<RwLock<PlaybackSnapshot>>,
     cmd_tx: Option<std::sync::mpsc::Sender<PlaybackCommand>>,
     restored_position_ms: Option<i64>,
+    coordinator_tx: Option<tokio::sync::mpsc::UnboundedSender<CoordinatorEvent>>,
+    fallback_active: bool,
+    fallback_restore_armed: Arc<AtomicBool>,
+    last_window_signature: Mutex<Vec<String>>,
 }
 
 impl PlaybackCore {
@@ -382,6 +556,12 @@ impl PlaybackCore {
             position_emitter: None,
             last_error: None,
             generation: 1,
+            loading_generation: None,
+            radio_enabled: false,
+            radio_seed_video_id: None,
+            radio_seen_ids: HashSet::new(),
+            radio_seen_titles: HashSet::new(),
+            resolver_tx: None,
             media_controls_host: None,
             media_controls_ready: false,
             smtc_status: initial_smtc_status,
@@ -395,6 +575,10 @@ impl PlaybackCore {
             snapshot_cache,
             cmd_tx: None,
             restored_position_ms: None,
+            coordinator_tx: None,
+            fallback_active: false,
+            fallback_restore_armed: Arc::new(AtomicBool::new(false)),
+            last_window_signature: Mutex::new(Vec::new()),
         };
         core.update_snapshot_cache();
         core
@@ -509,22 +693,87 @@ impl PlaybackCore {
         }
     }
 
+    pub fn set_resolver_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<ProviderWork>) {
+        self.resolver_tx = Some(tx);
+    }
+
+    fn effective_status(&self) -> PlaybackStatus {
+        if self.loading_generation == Some(self.generation) {
+            PlaybackStatus::Loading
+        } else {
+            self.backend.status()
+        }
+    }
+
+    fn record_radio_seed(&mut self, track: &Track) {
+        if let Some(vid) = ytmusic_video_id(track) {
+            self.radio_seed_video_id = Some(vid.to_string());
+        }
+        self.radio_seen_ids.insert(track.id.clone());
+        let base = base_song_title(&track.title);
+        if !base.is_empty() {
+            self.radio_seen_titles
+                .insert((track.artist.trim().to_lowercase(), base));
+        }
+    }
+
     pub fn play_track(&mut self, track_id: &str) -> Result<(), String> {
+        let index = self
+            .queue
+            .tracks()
+            .iter()
+            .position(|t| t.id == track_id)
+            .ok_or_else(|| format!("Track not found in active queue: {track_id}"))?;
+        self.play_index(index)
+    }
+
+    pub fn play_index(&mut self, index: usize) -> Result<(), String> {
         let track = self
             .queue
-            .find_track_by_id(track_id)
+            .tracks()
+            .get(index)
             .cloned()
-            .ok_or_else(|| format!("Track not found in active queue: {track_id}"))?;
+            .ok_or_else(|| format!("Queue index out of bounds: {index}"))?;
+
+        let has_ready_file = track
+            .file_uri
+            .as_deref()
+            .is_some_and(is_playable_source_available);
+
+        if !has_ready_file
+            && ytmusic_video_id(&track).is_some()
+            && let Some(resolver_tx) = self.resolver_tx.clone()
+        {
+            let _ = self.backend.stop();
+            self.queue.set_current_index(index);
+            self.last_error = None;
+            self.restored_position_ms = None;
+            self.generation += 1;
+            let generation_id = self.generation;
+            self.loading_generation = Some(generation_id);
+            self.record_radio_seed(&track);
+            let _ = self.update_media_metadata(&track);
+            let _ = self.persist_state();
+            self.update_snapshot_cache();
+            self.emit_state();
+
+            let _ = resolver_tx.send(ProviderWork::ResolveTrack {
+                generation: generation_id,
+                index,
+                track,
+            });
+            return Ok(());
+        }
 
         let file_path = track
             .file_uri
             .clone()
             .ok_or_else(|| "Track has no associated file path".to_string())?;
 
-        let path = Path::new(&file_path);
-        if !path.exists() {
+        if !is_playable_source_available(&file_path) {
             let err = format!("Audio file does not exist at path: {file_path}");
             self.last_error = Some(err.clone());
+            self.loading_generation = None;
             self.update_snapshot_cache();
             self.emit_state();
             return Err(err);
@@ -535,6 +784,7 @@ impl PlaybackCore {
         if let Err(e) = self.backend.load(&file_path, 0) {
             let err = format!("Failed to load audio: {e}");
             self.last_error = Some(err.clone());
+            self.loading_generation = None;
             self.update_snapshot_cache();
             self.emit_state();
             return Err(err);
@@ -547,13 +797,16 @@ impl PlaybackCore {
             self.last_error = Some(format!(
                 "Track loaded, but system media metadata could not be updated: {error}"
             ));
+        } else {
+            self.last_error = None;
         }
 
         // Loading succeeded: commit queue selection
-        self.queue.select_track_by_id(track_id);
-        self.last_error = None;
+        self.queue.set_current_index(index);
+        self.loading_generation = None;
         self.restored_position_ms = None;
         self.generation += 1;
+        self.record_radio_seed(&track);
 
         let _ = self.backend.set_volume(if self.is_muted {
             0.0
@@ -563,10 +816,84 @@ impl PlaybackCore {
         let _ = self.backend.set_speed(self.playback_speed);
 
         let _ = self.update_media_metadata(&track);
+        if let Some(tx) = &self.coordinator_tx {
+            let _ = tx.send(CoordinatorEvent::TrackStarted { track });
+        }
         let _ = self.persist_state();
         self.update_snapshot_cache();
         self.emit_state();
         Ok(())
+    }
+
+    pub fn finish_track_resolution(
+        &mut self,
+        generation: u64,
+        index: usize,
+        track_id: &str,
+        result: Result<String, String>,
+    ) {
+        if generation != self.generation || self.loading_generation != Some(generation) {
+            return;
+        }
+        self.loading_generation = None;
+
+        match result {
+            Ok(file_uri) => {
+                if let Some(tx) = &self.coordinator_tx {
+                    let _ = tx.send(CoordinatorEvent::TrackResolutionFinished { error: None });
+                }
+                if !self.queue.update_track_file_uri(index, track_id, file_uri) {
+                    self.last_error = Some("Queued track moved before resolution completed".into());
+                    self.update_snapshot_cache();
+                    self.emit_state();
+                    return;
+                }
+                let _ = self.play_index(index);
+            }
+            Err(err) => {
+                if let Some(tx) = &self.coordinator_tx {
+                    let _ = tx.send(CoordinatorEvent::TrackResolutionFinished {
+                        error: Some(err.clone()),
+                    });
+                }
+                self.last_error = Some(err);
+                let _ = self.backend.stop();
+                let _ = self.sync_media_playback_state();
+                self.update_snapshot_cache();
+                self.emit_state();
+            }
+        }
+    }
+
+    pub fn finish_radio_fetch(&mut self, generation: u64, result: Result<Vec<Track>, String>) {
+        if generation != self.generation || self.loading_generation != Some(generation) {
+            return;
+        }
+        self.loading_generation = None;
+
+        match result {
+            Ok(tracks) if !tracks.is_empty() => {
+                let first_new_index = self.queue.len();
+                for track in &tracks {
+                    self.record_radio_seed(track);
+                }
+                self.queue.add_tracks(tracks);
+                let _ = self.play_index(first_new_index);
+            }
+            Ok(_) => {
+                let _ = self.backend.stop();
+                let _ = self.sync_media_playback_state();
+                self.update_snapshot_cache();
+                self.emit_state();
+            }
+            Err(err) => {
+                let _ = self.backend.stop();
+                let _ = self.sync_media_playback_state();
+                self.last_error = Some(err);
+                self.update_snapshot_cache();
+                self.emit_state();
+            }
+        }
     }
 
     pub fn play(&mut self) -> Result<(), String> {
@@ -582,6 +909,10 @@ impl PlaybackCore {
             self.device_error = None;
         }
 
+        if self.effective_status() == PlaybackStatus::Loading {
+            return Ok(());
+        }
+
         if self.backend.status() == PlaybackStatus::Paused {
             self.backend.play().map_err(|e| e.to_string())?;
             let _ = self.sync_media_playback_state();
@@ -590,16 +921,17 @@ impl PlaybackCore {
             return Ok(());
         }
 
-        if let Some(track) = self.queue.current_track().cloned() {
-            self.play_track(&track.id)
-        } else if let Some(first) = self.queue.tracks().first().cloned() {
-            self.play_track(&first.id)
+        if let Some(idx) = self.queue.current_index() {
+            self.play_index(idx)
+        } else if !self.queue.is_empty() {
+            self.play_index(0)
         } else {
             Err("Cannot play: queue is empty".into())
         }
     }
 
     pub fn pause(&mut self) -> Result<(), String> {
+        self.loading_generation = None;
         self.backend.pause().map_err(|e| e.to_string())?;
         let _ = self.sync_media_playback_state();
         let _ = self.persist_state();
@@ -609,14 +941,14 @@ impl PlaybackCore {
     }
 
     pub fn play_pause(&mut self) -> Result<(), String> {
-        match self.backend.status() {
+        match self.effective_status() {
             PlaybackStatus::Playing => self.pause(),
             PlaybackStatus::Paused => self.play(),
             PlaybackStatus::Idle | PlaybackStatus::Stopped => self.play(),
             PlaybackStatus::Loading => Ok(()),
             PlaybackStatus::Error => {
-                if let Some(track) = self.queue.current_track().cloned() {
-                    self.play_track(&track.id)
+                if let Some(idx) = self.queue.current_index() {
+                    self.play_index(idx)
                 } else {
                     Ok(())
                 }
@@ -625,6 +957,7 @@ impl PlaybackCore {
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
+        self.loading_generation = None;
         self.backend.stop().map_err(|e| e.to_string())?;
         let _ = self.sync_media_playback_state();
         self.generation += 1;
@@ -726,10 +1059,69 @@ impl PlaybackCore {
         Ok(())
     }
 
+    fn trigger_radio_fetch_if_enabled(&mut self) -> bool {
+        if !self.radio_enabled || self.queue.repeat_mode() != RepeatMode::Off {
+            return false;
+        }
+        let Some(resolver_tx) = self.resolver_tx.clone() else {
+            return false;
+        };
+        let seed = self.radio_seed_video_id.clone().or_else(|| {
+            self.queue
+                .current_track()
+                .and_then(ytmusic_video_id)
+                .map(str::to_string)
+        });
+        let Some(video_id) = seed else {
+            return false;
+        };
+
+        let _ = self.backend.stop();
+        self.last_error = None;
+        self.generation += 1;
+        let generation_id = self.generation;
+        self.loading_generation = Some(generation_id);
+        self.update_snapshot_cache();
+        self.emit_state();
+
+        let _ = resolver_tx.send(ProviderWork::FetchRadio {
+            generation: generation_id,
+            video_id,
+            seen_ids: self.radio_seen_ids.clone(),
+            seen_titles: self.radio_seen_titles.clone(),
+        });
+        true
+    }
+
     pub fn next(&mut self) -> Result<(), String> {
-        let (_cand_idx, cand_track) = match self.queue.peek_next() {
-            Some((idx, track)) => (idx, track.clone()),
+        if self.fallback_active && self.fallback_restore_armed.swap(false, Ordering::SeqCst) {
+            if let Some(tx) = &self.coordinator_tx {
+                let _ = tx.send(CoordinatorEvent::RequestRestoreOriginalQueue);
+            }
+            return Ok(());
+        }
+        let cand_idx = match self.queue.peek_next() {
+            Some((idx, _track)) => idx,
             None => {
+                if self.fallback_active {
+                    self.loading_generation = None;
+                    let _ = self.backend.stop();
+                    let _ = self.sync_media_playback_state();
+                    self.last_error = Some(
+                        "Offline fallback exhausted — all verified cached songs have been played."
+                            .into(),
+                    );
+                    if let Some(tx) = &self.coordinator_tx {
+                        let _ = tx.send(CoordinatorEvent::FallbackExhausted);
+                    }
+                    self.update_snapshot_cache();
+                    self.emit_state();
+                    return Ok(());
+                }
+                if self.trigger_radio_fetch_if_enabled() {
+                    return Ok(());
+                }
+                self.loading_generation = None;
                 let _ = self.backend.stop();
                 let _ = self.sync_media_playback_state();
                 self.update_snapshot_cache();
@@ -738,16 +1130,18 @@ impl PlaybackCore {
             }
         };
 
-        match self.play_track(&cand_track.id) {
-            Ok(()) => Ok(()),
-            Err(e) => Err(e),
+        if !self.fallback_active
+            && let Some(tx) = &self.coordinator_tx
+        {
+            let _ = tx.send(CoordinatorEvent::PlaybackAdvanced);
         }
+        self.play_index(cand_idx)
     }
 
     pub fn previous(&mut self) -> Result<(), String> {
         let pos = self.backend.position_ms();
-        let (cand_idx, cand_track) = match self.queue.peek_previous(pos) {
-            Some((idx, track)) => (idx, track.clone()),
+        let cand_idx = match self.queue.peek_previous(pos) {
+            Some((idx, _track)) => idx,
             None => {
                 let _ = self.backend.seek(0);
                 self.emit_position();
@@ -761,7 +1155,7 @@ impl PlaybackCore {
             return Ok(());
         }
 
-        self.play_track(&cand_track.id)
+        self.play_index(cand_idx)
     }
 
     pub fn set_queue(
@@ -769,28 +1163,51 @@ impl PlaybackCore {
         tracks: Vec<Track>,
         start_track_id: Option<&str>,
     ) -> Result<(), String> {
+        let start_index = if let Some(id) = start_track_id {
+            match tracks.iter().position(|t| t.id == id) {
+                Some(idx) => Some(idx),
+                None => {
+                    let err = format!("Requested starting track not found in queue: {id}");
+                    self.last_error = Some(err.clone());
+                    self.update_snapshot_cache();
+                    self.emit_state();
+                    return Err(err);
+                }
+            }
+        } else {
+            None
+        };
+        self.set_mixed_queue(tracks, start_index, false)
+    }
+
+    pub fn set_mixed_queue(
+        &mut self,
+        tracks: Vec<Track>,
+        start_index: Option<usize>,
+        enable_radio: bool,
+    ) -> Result<(), String> {
         if tracks.is_empty() {
             return self.clear_queue();
         }
 
-        let target_id = start_track_id
-            .map(|s| s.to_string())
-            .or_else(|| tracks.first().map(|t| t.id.clone()));
+        let target_idx = start_index.unwrap_or(0).min(tracks.len() - 1);
+        let target_track = tracks[target_idx].clone();
 
-        let target_track = target_id
+        let is_unready_ytmusic = !target_track
+            .file_uri
             .as_deref()
-            .and_then(|id| tracks.iter().find(|t| t.id == id))
-            .cloned()
-            .ok_or_else(|| {
-                let err = format!(
-                    "Requested starting track not found in queue: {}",
-                    target_id.as_deref().unwrap_or("unknown")
-                );
-                self.last_error = Some(err.clone());
-                self.update_snapshot_cache();
-                self.emit_state();
-                err
-            })?;
+            .is_some_and(is_playable_source_available)
+            && ytmusic_video_id(&target_track).is_some()
+            && self.resolver_tx.is_some();
+
+        if is_unready_ytmusic {
+            self.queue.set_queue_at_index(tracks, Some(target_idx));
+            self.radio_enabled = enable_radio;
+            self.radio_seen_ids.clear();
+            self.radio_seen_titles.clear();
+            self.radio_seed_video_id = None;
+            return self.play_index(target_idx);
+        }
 
         let file_path = target_track.file_uri.clone().ok_or_else(|| {
             let err = format!("Track {} has no associated file path", target_track.id);
@@ -800,8 +1217,7 @@ impl PlaybackCore {
             err
         })?;
 
-        let path = Path::new(&file_path);
-        if !path.exists() {
+        if !is_playable_source_available(&file_path) {
             let err = format!("Audio file does not exist at path: {file_path}");
             self.last_error = Some(err.clone());
             self.update_snapshot_cache();
@@ -829,7 +1245,13 @@ impl PlaybackCore {
         }
 
         // Candidate successfully prepared: commit new queue and selection atomically
-        self.queue.set_queue(tracks, Some(&target_track.id));
+        self.queue.set_queue_at_index(tracks, Some(target_idx));
+        self.loading_generation = None;
+        self.radio_enabled = enable_radio;
+        self.radio_seen_ids.clear();
+        self.radio_seen_titles.clear();
+        self.radio_seed_video_id = None;
+        self.record_radio_seed(&target_track);
         self.last_error = None;
         self.restored_position_ms = None;
         self.generation += 1;
@@ -874,6 +1296,7 @@ impl PlaybackCore {
             .unwrap_or(false);
 
         if is_current {
+            self.loading_generation = None;
             let _ = self.backend.stop();
         }
 
@@ -889,6 +1312,7 @@ impl PlaybackCore {
         let is_current = self.queue.current_index() == Some(index);
 
         if is_current {
+            self.loading_generation = None;
             let _ = self.backend.stop();
         }
 
@@ -913,6 +1337,11 @@ impl PlaybackCore {
     }
 
     pub fn clear_queue(&mut self) -> Result<(), String> {
+        self.loading_generation = None;
+        self.radio_enabled = false;
+        self.radio_seed_video_id = None;
+        self.radio_seen_ids.clear();
+        self.radio_seen_titles.clear();
         let _ = self.backend.stop();
         self.queue.clear();
         self.restored_position_ms = None;
@@ -947,6 +1376,7 @@ impl PlaybackCore {
             self.queue.set_queue(tracks, valid_start_id);
         }
 
+        self.loading_generation = None;
         self.queue
             .set_repeat_mode(RepeatMode::from(repeat_mode.as_str()));
         self.queue.set_shuffle(shuffle_enabled);
@@ -969,11 +1399,12 @@ impl PlaybackCore {
         };
 
         // Preload track at saved position in Paused state (NEVER auto-resumes playback)
-        if saved_position_ms > 0 {
-            if let Some(track) = self.queue.current_track().cloned() {
-                if let Some(ref uri) = track.file_uri {
-                    let path = Path::new(uri);
-                    if !path.exists() {
+        if let Some(track) = self.queue.current_track().cloned() {
+            let should_report_missing = saved_position_ms > 0 || track.source_kind != "provider";
+            if let Some(ref uri) = track.file_uri {
+                let path = Path::new(uri);
+                if !is_playable_source_available(uri) {
+                    if should_report_missing {
                         let is_volume_unavailable = {
                             #[cfg(windows)]
                             {
@@ -992,23 +1423,27 @@ impl PlaybackCore {
                             format!("Media file not found during restore: {uri}")
                         };
                         self.last_error = Some(err);
-                    } else {
-                        match self.backend.load(uri, saved_position_ms as u64) {
-                            Ok(()) => {
-                                let _ = self.backend.pause();
-                                self.restored_position_ms = None;
-                                let _ = self.update_media_metadata(&track);
-                                let _ = self.sync_media_playback_state();
-                            }
-                            Err(e) => {
+                    }
+                } else {
+                    match self
+                        .backend
+                        .load_paused(uri, saved_position_ms.max(0) as u64)
+                    {
+                        Ok(()) => {
+                            self.restored_position_ms = None;
+                            let _ = self.update_media_metadata(&track);
+                            let _ = self.sync_media_playback_state();
+                        }
+                        Err(e) => {
+                            if saved_position_ms > 0 {
                                 self.last_error =
                                     Some(format!("Failed to load audio during restore: {e}"));
                             }
                         }
                     }
-                } else {
-                    self.last_error = Some("Restored track has no file URI".to_string());
                 }
+            } else if saved_position_ms > 0 {
+                self.last_error = Some("Restored track has no file URI".to_string());
             }
         }
 
@@ -1039,7 +1474,7 @@ impl PlaybackCore {
     }
 
     pub fn snapshot(&self) -> PlaybackSnapshot {
-        let status_str = match self.backend.status() {
+        let status_str = match self.effective_status() {
             PlaybackStatus::Idle => "idle",
             PlaybackStatus::Loading => "loading",
             PlaybackStatus::Playing => "playing",
@@ -1049,6 +1484,7 @@ impl PlaybackCore {
         };
 
         let current_track = self.queue.current_track().cloned();
+        let current_index = self.queue.current_index();
         let duration_ms = if self.backend.duration_ms() > 0 {
             self.backend.duration_ms() as i64
         } else {
@@ -1067,6 +1503,7 @@ impl PlaybackCore {
             generation: self.generation,
             status: status_str.to_string(),
             current_track,
+            current_index,
             position_ms,
             duration_ms,
             volume: self.volume,
@@ -1111,6 +1548,12 @@ impl PlaybackCore {
     }
 
     pub fn auto_advance(&mut self) {
+        if self.fallback_active && self.fallback_restore_armed.swap(false, Ordering::SeqCst) {
+            if let Some(tx) = &self.coordinator_tx {
+                let _ = tx.send(CoordinatorEvent::RequestRestoreOriginalQueue);
+            }
+            return;
+        }
         let max_attempts = self.queue.len();
         if max_attempts == 0 {
             let _ = self.backend.stop();
@@ -1119,9 +1562,9 @@ impl PlaybackCore {
             return;
         }
 
-        if self.queue.repeat_mode() == RepeatMode::One {
-            if let Some(track) = self.queue.current_track().cloned() {
-                if let Err(e) = self.play_track(&track.id) {
+        if self.queue.repeat_mode() == RepeatMode::One && !self.fallback_active {
+            if let Some(curr_idx) = self.queue.current_index() {
+                if let Err(e) = self.play_index(curr_idx) {
                     eprintln!("[PlaybackCore] Repeat-one failed to reload: {e}");
                     let _ = self.backend.stop();
                     self.last_error = Some(format!("Repeat-one failed: {e}"));
@@ -1135,14 +1578,38 @@ impl PlaybackCore {
         let mut attempts = 0;
         while attempts < max_attempts {
             attempts += 1;
-            if let Some(next_track) = self.queue.next().cloned() {
-                match self.play_track(&next_track.id) {
+            if self.queue.next().is_some()
+                && let Some(next_idx) = self.queue.current_index()
+            {
+                if !self.fallback_active
+                    && let Some(tx) = &self.coordinator_tx
+                {
+                    let _ = tx.send(CoordinatorEvent::PlaybackAdvanced);
+                }
+                match self.play_index(next_idx) {
                     Ok(()) => return,
                     Err(e) => {
                         eprintln!("[PlaybackCore] Skipped failed track during auto-advance: {e}");
                     }
                 }
             } else {
+                if self.fallback_active {
+                    let _ = self.backend.stop();
+                    let _ = self.sync_media_playback_state();
+                    self.last_error = Some(
+                        "Offline fallback exhausted — all verified cached songs have been played."
+                            .into(),
+                    );
+                    if let Some(tx) = &self.coordinator_tx {
+                        let _ = tx.send(CoordinatorEvent::FallbackExhausted);
+                    }
+                    self.update_snapshot_cache();
+                    self.emit_state();
+                    return;
+                }
+                if self.trigger_radio_fetch_if_enabled() {
+                    return;
+                }
                 let _ = self.backend.stop();
                 let _ = self.sync_media_playback_state();
                 self.update_snapshot_cache();
@@ -1168,11 +1635,10 @@ impl PlaybackCore {
             if matches!(
                 backend_status,
                 PlaybackStatus::Paused | PlaybackStatus::Stopped
-            ) {
-                if let Err(error) = self.persist_state() {
-                    self.last_error = Some(error);
-                    self.update_snapshot_cache();
-                }
+            ) && let Err(error) = self.persist_state()
+            {
+                self.last_error = Some(error);
+                self.update_snapshot_cache();
             }
         }
         if !self.backend.is_device_ready() {
@@ -1182,8 +1648,6 @@ impl PlaybackCore {
                     self.device_error = Some(error);
                 }
             }
-            self.update_snapshot_cache();
-            self.emit_position();
             return;
         }
 
@@ -1216,6 +1680,128 @@ impl PlaybackCore {
         if let Ok(mut cache) = self.snapshot_cache.write() {
             *cache = self.snapshot();
         }
+        if let Some(tx) = &self.coordinator_tx {
+            let current = self.queue.current_track().cloned();
+            let upcoming: Vec<Track> = self
+                .queue
+                .upcoming_tracks_and_indices()
+                .into_iter()
+                .map(|(_, t)| t)
+                .collect();
+            let mut sig = Vec::with_capacity(1 + upcoming.len());
+            if let Some(cur) = &current {
+                sig.push(format!(
+                    "{}:{}:{}",
+                    cur.id,
+                    cur.queue_entry_id.as_deref().unwrap_or(""),
+                    cur.file_uri.as_deref().unwrap_or("")
+                ));
+            }
+            for item in upcoming.iter().take(25) {
+                sig.push(format!(
+                    "{}:{}:{}",
+                    item.id,
+                    item.queue_entry_id.as_deref().unwrap_or(""),
+                    item.file_uri.as_deref().unwrap_or("")
+                ));
+            }
+            if let Ok(mut last_sig) = self.last_window_signature.lock()
+                && *last_sig != sig
+            {
+                *last_sig = sig;
+                let _ = tx.send(CoordinatorEvent::QueueSnapshotChanged { current, upcoming });
+            }
+        }
+    }
+
+    pub fn set_coordinator_tx(
+        &mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<CoordinatorEvent>,
+        fallback_restore_armed: Arc<AtomicBool>,
+    ) {
+        self.coordinator_tx = Some(tx);
+        self.fallback_restore_armed = fallback_restore_armed;
+        let current = self.queue.current_track().cloned();
+        let upcoming: Vec<Track> = self
+            .queue
+            .upcoming_tracks_and_indices()
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+        if let Some(sender) = &self.coordinator_tx {
+            let _ = sender.send(CoordinatorEvent::QueueSnapshotChanged { current, upcoming });
+        }
+    }
+
+    pub fn apply_collaborative_sequence(
+        &mut self,
+        current: Option<Track>,
+        upcoming: Vec<Track>,
+        start_if_idle: bool,
+    ) -> Result<(), String> {
+        let was_idle = self.queue.current_track().is_none()
+            || matches!(
+                self.effective_status(),
+                PlaybackStatus::Idle | PlaybackStatus::Stopped
+            );
+        self.queue.apply_collaborative_upcoming(current, upcoming);
+        if start_if_idle && was_idle && !self.queue.is_empty() {
+            return self.play_index(0);
+        }
+        let _ = self.persist_state();
+        self.update_snapshot_cache();
+        self.emit_state();
+        Ok(())
+    }
+
+    pub fn enter_offline_fallback(&mut self, fallback_tracks: Vec<Track>) -> Result<(), String> {
+        if fallback_tracks.is_empty() {
+            return Err("No verified offline tracks available".into());
+        }
+        let has_active_audio = matches!(
+            self.backend.status(),
+            PlaybackStatus::Playing | PlaybackStatus::Paused
+        ) && self.queue.current_track().is_some();
+
+        self.fallback_active = true;
+        self.fallback_restore_armed.store(false, Ordering::SeqCst);
+        self.queue.set_repeat_mode(RepeatMode::Off);
+        self.last_error = None;
+
+        if has_active_audio {
+            // Keep currently playing/loaded song undisturbed; swap only upcoming tracks.
+            let current = self.queue.current_track().cloned();
+            self.queue
+                .apply_collaborative_upcoming(current, fallback_tracks);
+            self.update_snapshot_cache();
+            self.emit_state();
+            Ok(())
+        } else {
+            self.queue.set_queue_at_index(fallback_tracks, Some(0));
+            self.play_index(0)
+        }
+    }
+
+    pub fn exit_offline_fallback(
+        &mut self,
+        saved: SavedQueueSnapshot,
+        played_entry_ids: HashSet<String>,
+        played_track_ids: HashSet<String>,
+        auto_play: bool,
+    ) -> Result<(), String> {
+        self.fallback_active = false;
+        self.fallback_restore_armed.store(false, Ordering::SeqCst);
+        self.queue.restore_snapshot(saved);
+        self.queue
+            .advance_past_played_during_fallback(&played_entry_ids, &played_track_ids);
+        self.last_error = None;
+        let _ = self.persist_state();
+        if auto_play && let Some(idx) = self.queue.current_index() {
+            return self.play_index(idx);
+        }
+        self.update_snapshot_cache();
+        self.emit_state();
+        Ok(())
     }
 
     fn emit_state(&self) {
@@ -1237,6 +1823,9 @@ impl PlaybackCore {
     }
 
     fn persist_state(&mut self) -> Result<(), String> {
+        if self.fallback_active {
+            return Ok(());
+        }
         self.last_persist = Instant::now();
         if let Some(tx) = &self.persistence_tx {
             let current_track_id = self.queue.current_track().map(|track| track.id.clone());
@@ -1293,31 +1882,27 @@ impl PlaybackCore {
     }
 
     fn update_media_metadata(&mut self, track: &Track) -> Result<(), String> {
-        if let Some(controls) = &mut self.media_controls_host {
+        if self.media_controls_host.is_some() {
+            let cover_url = local_cover_url(track.artwork_uri.as_deref());
             let metadata = MediaMetadataDTO {
                 title: Some(track.title.clone()),
                 artist: Some(track.artist.clone()),
                 album: Some(track.album.clone()),
-                duration: Some(Duration::from_millis(track.duration_ms as u64)),
-                cover_url: None,
+                duration: Some(Duration::from_millis(track.duration_ms.max(0) as u64)),
+                cover_url,
             };
-            let meta_res = controls.set_metadata(metadata);
-            let play_res = controls.set_playback(souvlaki::MediaPlayback::Playing {
-                progress: Some(souvlaki::MediaPosition(Duration::from_millis(0))),
-            });
+            let meta_res = self
+                .media_controls_host
+                .as_mut()
+                .expect("checked is_some")
+                .set_metadata(metadata);
             if let Err(e) = meta_res {
                 let err = format!("SMTC set_metadata error: {e:?}");
                 eprintln!("[PlaybackCore] {err}");
                 self.record_smtc_failure(err.clone());
                 return Err(err);
             }
-            if let Err(e) = play_res {
-                let err = format!("SMTC set_playback error: {e:?}");
-                eprintln!("[PlaybackCore] {err}");
-                self.record_smtc_failure(err.clone());
-                return Err(err);
-            }
-            self.record_smtc_success();
+            self.sync_media_playback_state()?;
         }
         Ok(())
     }
@@ -1402,11 +1987,13 @@ pub struct PlaybackService {
     cmd_tx: std::sync::mpsc::Sender<PlaybackCommand>,
     snapshot_cache: Arc<RwLock<PlaybackSnapshot>>,
     database: SqlitePool,
+    backend_engine_id: &'static str,
     shutdown_flag: Arc<AtomicBool>,
     shutdown_state: Arc<Mutex<ShutdownProgress>>,
     pub shutdown_watch: Arc<tokio::sync::watch::Sender<ShutdownProgress>>,
     command_gate: Arc<std::sync::RwLock<()>>,
     persistence_health: Arc<RwLock<PersistenceHealthInfo>>,
+    preload_coordinator: Arc<Mutex<Option<Arc<PreloadCoordinator>>>>,
     _worker_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     _persist_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
@@ -1555,6 +2142,7 @@ impl PlaybackService {
     pub fn new(database: SqlitePool, app_handle: Option<AppHandle>) -> Result<Self, String> {
         let backend = create_platform_backend(app_handle.clone())
             .map_err(|e| format!("Failed to create audio backend: {e}"))?;
+        let backend_engine_id = backend.engine_id();
         let backend_device_ready = backend.is_device_ready();
         let backend_capabilities = backend.capabilities();
 
@@ -1562,6 +2150,7 @@ impl PlaybackService {
             generation: 1,
             status: "idle".to_string(),
             current_track: None,
+            current_index: None,
             position_ms: 0,
             duration_ms: 0,
             volume: 85,
@@ -1643,6 +2232,9 @@ impl PlaybackService {
                             PlaybackCommand::PlayTrack { track_id, reply } => {
                                 let _ = reply.send(core.play_track(&track_id));
                             }
+                            PlaybackCommand::PlayQueueIndex { index, reply } => {
+                                let _ = reply.send(core.play_index(index));
+                            }
                             PlaybackCommand::Play { reply } => {
                                 let _ = reply.send(core.play());
                             }
@@ -1691,6 +2283,18 @@ impl PlaybackService {
                                 let _ =
                                     reply.send(core.set_queue(tracks, start_track_id.as_deref()));
                             }
+                            PlaybackCommand::SetMixedQueue {
+                                tracks,
+                                start_index,
+                                enable_radio,
+                                reply,
+                            } => {
+                                let _ = reply.send(core.set_mixed_queue(
+                                    tracks,
+                                    start_index,
+                                    enable_radio,
+                                ));
+                            }
                             PlaybackCommand::AddToQueue { track, reply } => {
                                 let _ = reply.send(core.add_to_queue(track));
                             }
@@ -1735,6 +2339,21 @@ impl PlaybackService {
                                 core.set_app_handle(app_handle);
                                 let _ = reply.send(Ok(()));
                             }
+                            PlaybackCommand::SetResolverTx { tx, reply } => {
+                                core.set_resolver_tx(tx);
+                                let _ = reply.send(Ok(()));
+                            }
+                            PlaybackCommand::FinishTrackResolution {
+                                generation,
+                                index,
+                                track_id,
+                                result,
+                            } => {
+                                core.finish_track_resolution(generation, index, &track_id, result);
+                            }
+                            PlaybackCommand::FinishRadioFetch { generation, result } => {
+                                core.finish_radio_fetch(generation, result);
+                            }
                             PlaybackCommand::InitMediaControls { hwnd, reply } => {
                                 let _ = reply.send(core.init_media_controls(hwnd));
                             }
@@ -1743,6 +2362,49 @@ impl PlaybackService {
                             }
                             PlaybackCommand::RetryDevice { reply } => {
                                 let _ = reply.send(core.retry_device());
+                            }
+                            PlaybackCommand::SetCoordinatorTx {
+                                tx,
+                                fallback_restore_armed,
+                                reply,
+                            } => {
+                                core.set_coordinator_tx(tx, fallback_restore_armed);
+                                let _ = reply.send(Ok(()));
+                            }
+                            PlaybackCommand::QueueSnapshot { reply } => {
+                                let _ = reply.send(Ok(core.queue.snapshot_state()));
+                            }
+                            PlaybackCommand::ApplyCollaborativeSequence {
+                                current,
+                                upcoming,
+                                start_if_idle,
+                                reply,
+                            } => {
+                                let _ = reply.send(core.apply_collaborative_sequence(
+                                    current,
+                                    upcoming,
+                                    start_if_idle,
+                                ));
+                            }
+                            PlaybackCommand::EnterOfflineFallback {
+                                fallback_tracks,
+                                reply,
+                            } => {
+                                let _ = reply.send(core.enter_offline_fallback(fallback_tracks));
+                            }
+                            PlaybackCommand::ExitOfflineFallback {
+                                saved,
+                                played_entry_ids,
+                                played_track_ids,
+                                auto_play,
+                                reply,
+                            } => {
+                                let _ = reply.send(core.exit_offline_fallback(
+                                    saved,
+                                    played_entry_ids,
+                                    played_track_ids,
+                                    auto_play,
+                                ));
                             }
                             PlaybackCommand::Shutdown { reply } => {
                                 let res = core.shutdown();
@@ -1769,14 +2431,278 @@ impl PlaybackService {
             cmd_tx,
             snapshot_cache,
             database,
+            backend_engine_id,
             shutdown_flag,
             shutdown_state,
             shutdown_watch,
             command_gate,
             persistence_health,
+            preload_coordinator: Arc::new(Mutex::new(None)),
             _worker_thread: Arc::new(Mutex::new(Some(worker_join))),
             _persist_thread: Arc::new(Mutex::new(Some(persist_thread))),
         })
+    }
+
+    pub async fn attach_coordinators(
+        &self,
+        preload: Arc<PreloadCoordinator>,
+        connect: Arc<ConnectService>,
+        offline: Arc<OfflineFallbackService>,
+    ) -> Result<(), String> {
+        if let Ok(mut guard) = self.preload_coordinator.lock() {
+            *guard = Some(Arc::clone(&preload));
+        }
+
+        preload.start_worker();
+
+        let (coord_tx, mut coord_rx) = tokio::sync::mpsc::unbounded_channel::<CoordinatorEvent>();
+        let fallback_restore_armed = Arc::new(AtomicBool::new(false));
+
+        let rx = self.send_command(|reply| PlaybackCommand::SetCoordinatorTx {
+            tx: coord_tx,
+            fallback_restore_armed: Arc::clone(&fallback_restore_armed),
+            reply,
+        })?;
+        rx.await
+            .map_err(|_| "Audio worker thread terminated unexpectedly".to_string())??;
+
+        let service = self.clone();
+        let preload_ev = Arc::clone(&preload);
+        let connect_ev = Arc::clone(&connect);
+        let offline_ev = Arc::clone(&offline);
+        let restore_armed_ev = Arc::clone(&fallback_restore_armed);
+        let shutdown_ev = Arc::clone(&self.shutdown_flag);
+
+        tokio::spawn(async move {
+            while let Some(ev) = coord_rx.recv().await {
+                if shutdown_ev.load(Ordering::SeqCst) {
+                    break;
+                }
+                match ev {
+                    CoordinatorEvent::QueueSnapshotChanged { current, upcoming } => {
+                        if !connect_ev.is_active() {
+                            preload_ev.update_window(current, upcoming, Vec::new());
+                        }
+                    }
+                    CoordinatorEvent::TrackStarted { track } => {
+                        offline_ev.record_track_played(&track);
+                    }
+                    CoordinatorEvent::TrackResolutionFinished { error } => {
+                        if let Some(err) = error {
+                            if is_connectivity_error(&err) {
+                                preload_ev.set_offline_paused(true);
+                                let queue_tracks = service.snapshot().queue;
+                                offline_ev.notify_connectivity_lost(&queue_tracks).await;
+                            }
+                        } else {
+                            handle_connectivity_restored(
+                                &service,
+                                &preload_ev,
+                                &connect_ev,
+                                &offline_ev,
+                                &restore_armed_ev,
+                            )
+                            .await;
+                        }
+                    }
+                    CoordinatorEvent::PlaybackAdvanced => {
+                        if connect_ev.is_active() && !offline_ev.is_fallback_active() {
+                            let _ = connect_ev.advance_playback().await;
+                        }
+                    }
+                    CoordinatorEvent::FallbackExhausted => {
+                        offline_ev.mark_fallback_exhausted();
+                    }
+                    CoordinatorEvent::RequestRestoreOriginalQueue => {
+                        restore_original_queue_now(&service, &connect_ev, &offline_ev, true).await;
+                    }
+                }
+            }
+        });
+
+        // Background connectivity recovery probe that sleeps cleanly and only probes the network
+        // while an outage / offline_paused state is active.
+        let service_probe = self.clone();
+        let preload_probe = Arc::clone(&preload);
+        let connect_probe = Arc::clone(&connect);
+        let offline_probe = Arc::clone(&offline);
+        let armed_probe = Arc::clone(&fallback_restore_armed);
+        let shutdown_probe = Arc::clone(&self.shutdown_flag);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(6)).await;
+                if shutdown_probe.load(Ordering::SeqCst) {
+                    break;
+                }
+                let needs_probe =
+                    offline_probe.snapshot().is_offline || preload_probe.snapshot().offline_paused;
+                if needs_probe && probe_internet_connectivity().await {
+                    handle_connectivity_restored(
+                        &service_probe,
+                        &preload_probe,
+                        &connect_probe,
+                        &offline_probe,
+                        &armed_probe,
+                    )
+                    .await;
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    pub async fn queue_snapshot(&self) -> Result<SavedQueueSnapshot, String> {
+        let rx = {
+            let _gate = self
+                .command_gate
+                .read()
+                .map_err(|_| "Command gate poisoned".to_string())?;
+            if self.shutdown_flag.load(Ordering::SeqCst) {
+                return Err("Playback service is shutting down".to_string());
+            }
+            let (tx, rx) = oneshot::channel();
+            self.cmd_tx
+                .send(PlaybackCommand::QueueSnapshot { reply: tx })
+                .map_err(|_| "Audio worker thread is offline".to_string())?;
+            rx
+        };
+        rx.await
+            .map_err(|_| "Audio worker thread terminated unexpectedly".to_string())?
+    }
+
+    pub async fn apply_collaborative_sequence(
+        &self,
+        current: Option<Track>,
+        upcoming: Vec<Track>,
+        start_if_idle: bool,
+    ) -> Result<(), String> {
+        let rx = self.send_command(|reply| PlaybackCommand::ApplyCollaborativeSequence {
+            current,
+            upcoming,
+            start_if_idle,
+            reply,
+        })?;
+        rx.await
+            .map_err(|_| "Audio worker thread terminated unexpectedly".to_string())?
+    }
+
+    pub async fn enter_offline_fallback(&self, fallback_tracks: Vec<Track>) -> Result<(), String> {
+        let rx = self.send_command(|reply| PlaybackCommand::EnterOfflineFallback {
+            fallback_tracks,
+            reply,
+        })?;
+        rx.await
+            .map_err(|_| "Audio worker thread terminated unexpectedly".to_string())?
+    }
+
+    pub async fn exit_offline_fallback(
+        &self,
+        saved: SavedQueueSnapshot,
+        played_entry_ids: HashSet<String>,
+        played_track_ids: HashSet<String>,
+        auto_play: bool,
+    ) -> Result<(), String> {
+        let rx = self.send_command(|reply| PlaybackCommand::ExitOfflineFallback {
+            saved,
+            played_entry_ids,
+            played_track_ids,
+            auto_play,
+            reply,
+        })?;
+        rx.await
+            .map_err(|_| "Audio worker thread terminated unexpectedly".to_string())?
+    }
+
+    /// Attaches `YtMusicService` so `PlaybackCore` can resolve uncached YouTube Music
+    /// tracks and fetch radio continuations natively in Rust without blocking the audio thread.
+    pub async fn attach_ytmusic(&self, ytmusic: Arc<YtMusicService>) -> Result<(), String> {
+        let (work_tx, mut work_rx) = tokio::sync::mpsc::unbounded_channel::<ProviderWork>();
+        let cmd_tx = self.cmd_tx.clone();
+        let shutdown_flag = Arc::clone(&self.shutdown_flag);
+        let preload_holder = Arc::clone(&self.preload_coordinator);
+
+        tokio::spawn(async move {
+            while let Some(work) = work_rx.recv().await {
+                if shutdown_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+                match work {
+                    ProviderWork::ResolveTrack {
+                        generation,
+                        index,
+                        track,
+                    } => {
+                        let preload_opt = preload_holder.lock().ok().and_then(|g| g.clone());
+                        let res = match ytmusic_video_id(&track) {
+                            Some(vid) => {
+                                if let Some(cached) = ytmusic.cached_playable_path(vid) {
+                                    Ok(cached.to_string_lossy().to_string())
+                                } else {
+                                    if let Some(p) = &preload_opt {
+                                        p.begin_active_playback_resolution();
+                                    }
+                                    let resolved_res = match ytmusic.resolve_audio(vid).await {
+                                        Ok(resolved) => ytmusic
+                                            .ensure_cached_with_mime(
+                                                vid,
+                                                &resolved.url,
+                                                &resolved.mime_type,
+                                            )
+                                            .await
+                                            .map(|p| p.to_string_lossy().to_string()),
+                                        Err(err) => Err(err),
+                                    };
+                                    if let Some(p) = &preload_opt {
+                                        p.end_active_playback_resolution();
+                                    }
+                                    resolved_res
+                                }
+                            }
+                            None => Err("Unsupported provider track identifier".to_string()),
+                        };
+                        let _ = cmd_tx.send(PlaybackCommand::FinishTrackResolution {
+                            generation,
+                            index,
+                            track_id: track.id,
+                            result: res,
+                        });
+                    }
+                    ProviderWork::FetchRadio {
+                        generation,
+                        video_id,
+                        seen_ids,
+                        seen_titles,
+                    } => {
+                        let res = ytmusic.related(&video_id).await.map(|items| {
+                            items
+                                .into_iter()
+                                .filter(|item| {
+                                    let tid = format!("ytmusic:{}", item.video_id);
+                                    if seen_ids.contains(&tid) {
+                                        return false;
+                                    }
+                                    let base = base_song_title(&item.title);
+                                    let key = (item.artist.trim().to_lowercase(), base);
+                                    !key.1.is_empty() && !seen_titles.contains(&key)
+                                })
+                                .take(10)
+                                .map(ytmusic_track_to_domain)
+                                .collect::<Vec<_>>()
+                        });
+                        let _ = cmd_tx.send(PlaybackCommand::FinishRadioFetch {
+                            generation,
+                            result: res,
+                        });
+                    }
+                }
+            }
+        });
+
+        let rx =
+            self.send_command(|reply| PlaybackCommand::SetResolverTx { tx: work_tx, reply })?;
+        rx.await
+            .map_err(|_| "Audio worker thread terminated unexpectedly".to_string())?
     }
 
     pub fn persistence_health(&self) -> PersistenceHealthInfo {
@@ -1847,6 +2773,28 @@ impl PlaybackService {
         let track_id_owned = track_id.to_string();
         let rx = self.send_command(|reply| PlaybackCommand::PlayTrack {
             track_id: track_id_owned,
+            reply,
+        })?;
+        rx.await
+            .map_err(|_| "Audio worker thread terminated unexpectedly".to_string())?
+    }
+
+    pub async fn play_queue_index(&self, index: usize) -> Result<(), String> {
+        let rx = self.send_command(|reply| PlaybackCommand::PlayQueueIndex { index, reply })?;
+        rx.await
+            .map_err(|_| "Audio worker thread terminated unexpectedly".to_string())?
+    }
+
+    pub async fn set_mixed_queue(
+        &self,
+        tracks: Vec<Track>,
+        start_index: Option<usize>,
+        enable_radio: bool,
+    ) -> Result<(), String> {
+        let rx = self.send_command(|reply| PlaybackCommand::SetMixedQueue {
+            tracks,
+            start_index,
+            enable_radio,
             reply,
         })?;
         rx.await
@@ -2049,22 +2997,7 @@ impl PlaybackService {
     }
 
     pub fn backend_name(&self) -> String {
-        #[cfg(target_os = "windows")]
-        {
-            "rodio_native".to_string()
-        }
-        #[cfg(target_os = "macos")]
-        {
-            "rodio_native".to_string()
-        }
-        #[cfg(target_os = "android")]
-        {
-            "android_media3_exoplayer".to_string()
-        }
-        #[cfg(target_os = "ios")]
-        {
-            "ios_avplayer_unintegrated".to_string()
-        }
+        self.backend_engine_id.to_string()
     }
 
     pub fn is_shutting_down(&self) -> bool {
@@ -2187,6 +3120,49 @@ impl PlaybackService {
     }
 }
 
+pub async fn handle_connectivity_restored(
+    playback: &PlaybackService,
+    preload: &PreloadCoordinator,
+    connect: &ConnectService,
+    offline: &OfflineFallbackService,
+    fallback_restore_armed: &AtomicBool,
+) {
+    preload.set_offline_paused(false);
+    if connect.is_active() {
+        let _ = connect.sync_pending_events().await;
+    }
+    let snap = playback.snapshot();
+    let actively_playing = matches!(snap.status.as_str(), "playing" | "paused");
+    let status = offline.mark_reconnected(actively_playing);
+    if status.fallback_active {
+        if actively_playing {
+            fallback_restore_armed.store(true, Ordering::SeqCst);
+        } else {
+            restore_original_queue_now(playback, connect, offline, false).await;
+        }
+    }
+}
+
+pub async fn restore_original_queue_now(
+    playback: &PlaybackService,
+    connect: &ConnectService,
+    offline: &OfflineFallbackService,
+    auto_play: bool,
+) {
+    if let Some((saved, played_entries, played_tracks)) = offline.take_restore_bundle() {
+        let _ = playback
+            .exit_offline_fallback(saved, played_entries, played_tracks, auto_play)
+            .await;
+    }
+    if connect.is_active()
+        && let Some((current, upcoming)) = connect.upcoming_playback_tracks()
+    {
+        let _ = playback
+            .apply_collaborative_sequence(current, upcoming, false)
+            .await;
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -2275,6 +3251,10 @@ pub mod tests {
             is_liked: false,
             play_count: 0,
             date_added: "2025-01-01T00:00:00Z".to_string(),
+            queue_entry_id: None,
+            contributor_id: None,
+            contributor_name: None,
+            priority_override: None,
         }
     }
 
@@ -2283,6 +3263,7 @@ pub mod tests {
             generation: 1,
             status: "idle".to_string(),
             current_track: None,
+            current_index: None,
             position_ms: 0,
             duration_ms: 0,
             volume: 85,
@@ -4837,5 +5818,91 @@ pub mod tests {
         assert_eq!(core.snapshot().status, "playing");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn offline_fallback_preserves_original_queue_stops_when_exhausted_and_restores_cleanly() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("cavia_offline_core_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let wav_a = temp_dir.join("cached_a.wav");
+        let wav_b = temp_dir.join("cached_b.wav");
+        std::fs::write(&wav_a, minimal_wav()).unwrap();
+        std::fs::write(&wav_b, minimal_wav()).unwrap();
+
+        let backend = Box::new(TestMockBackend {
+            status: PlaybackStatus::Idle,
+            duration_ms: 1000,
+            position_ms: 0,
+            should_fail_load: false,
+        });
+        let mut core = new_test_core(backend);
+
+        let (coord_tx, mut coord_rx) = tokio::sync::mpsc::unbounded_channel();
+        let armed = Arc::new(AtomicBool::new(false));
+        core.set_coordinator_tx(coord_tx, Arc::clone(&armed));
+
+        let t1 = dummy_track("orig1", "Orig 1", Some(wav_a.to_str().unwrap()));
+        let t2 = dummy_track("orig2", "Orig 2 Uncached", None);
+        let t3 = dummy_track("orig3", "Orig 3", Some(wav_b.to_str().unwrap()));
+        core.queue
+            .set_queue(vec![t1, t2, t3.clone()], Some("orig1"));
+        core.play_index(0).unwrap();
+
+        let saved = core.queue.snapshot_state();
+        let mut fallback_track = t3.clone();
+        fallback_track.queue_entry_id = t3.queue_entry_id.clone();
+
+        // Enter offline fallback while track 0 is actively playing -> preserves current track and
+        // swaps only upcoming tail without losing original queue snapshot.
+        core.enter_offline_fallback(vec![fallback_track.clone()])
+            .unwrap();
+        assert!(core.fallback_active);
+        assert_eq!(core.queue.current_track().unwrap().id, "orig1");
+
+        // Advance to fallback track, then exhaust pool -> must stop instead of looping.
+        core.next().unwrap();
+        assert_eq!(core.queue.current_track().unwrap().id, "orig3");
+        core.next().unwrap();
+        let mut saw_exhausted = false;
+        while let Ok(ev) = coord_rx.try_recv() {
+            if matches!(ev, CoordinatorEvent::FallbackExhausted) {
+                saw_exhausted = true;
+            }
+        }
+        assert!(
+            saw_exhausted,
+            "Offline fallback exhaustion must notify coordinator rather than looping"
+        );
+
+        // Simulate reconnection armed and exiting fallback -> restores original queue advancing
+        // past tracks already heard during fallback.
+        let mut played_ids = HashSet::new();
+        played_ids.insert("orig3".to_string());
+        core.exit_offline_fallback(saved, HashSet::new(), played_ids, false)
+            .unwrap();
+        assert!(!core.fallback_active);
+        assert_eq!(core.queue.len(), 3, "Original queue items must stay intact");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    fn minimal_wav() -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(44 + 64);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36u32 + 64).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&44100u32.to_le_bytes());
+        bytes.extend_from_slice(&(44100u32 * 2).to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&64u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 64]);
+        bytes
     }
 }

@@ -26,7 +26,7 @@ To enable optional cloud synchronization for a Cavia deployment:
    - Optionally run `test/verify_supabase_rls.sql` to verify RLS isolation.
    - The `user_id` columns default to `auth.uid()`, and `cloud_playlists.client_updated_at` defaults to `now()`, so a client insert can never create a row owned by another account.
 
-   The live project (`wycltgbzbhvnfavwxgpm`) already has this schema applied. Email confirmation is disabled on it because the desktop client authenticates with email + password and expects a session immediately; enable confirmation only once transactional email is configured.
+   - Your Supabase project must have this schema applied before enabling sync. Email confirmation is typically disabled when desktop/mobile clients authenticate directly with email + password and expect an immediate session; enable confirmation only once transactional email is configured.
 3. **Configure the Client**:
    - Open **Settings → Account → Sync backend** in the installed app and paste the project URL and the publishable `anon` key. The project URL must use `https://` (plain `http://` is accepted only for a loopback development project), and only the public anon key is permitted.
    - The anon key is stored in the local app database because it is publishable by design. The account refresh token is stored separately in the OS credential manager.

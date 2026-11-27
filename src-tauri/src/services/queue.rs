@@ -1,5 +1,30 @@
 use crate::domain::Track;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedQueueSnapshot {
+    pub tracks: Vec<Track>,
+    pub current_index: Option<usize>,
+    pub repeat_mode: RepeatMode,
+    pub shuffle_enabled: bool,
+    pub shuffle_order: Vec<usize>,
+    pub shuffle_pos: usize,
+}
+
+pub fn ensure_track_entry_id(track: &mut Track) {
+    if track
+        .queue_entry_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
+        track.queue_entry_id = Some(format!("qe-{}", Uuid::new_v4()));
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,10 +95,20 @@ impl QueueManager {
         } else {
             0
         };
+        self.set_queue_at_index(tracks, Some(initial_index));
+    }
 
+    pub fn set_queue_at_index(&mut self, tracks: Vec<Track>, start_index: Option<usize>) {
         let has_items = !tracks.is_empty();
+        let clamped_index = if has_items {
+            Some(start_index.unwrap_or(0).min(tracks.len() - 1))
+        } else {
+            None
+        };
+
         self.tracks = tracks;
-        self.current_index = if has_items { Some(initial_index) } else { None };
+        self.assign_missing_entry_ids();
+        self.current_index = clamped_index;
 
         if self.shuffle_enabled {
             self.rebuild_shuffle(self.current_index);
@@ -83,7 +118,8 @@ impl QueueManager {
         }
     }
 
-    pub fn add_track(&mut self, track: Track) {
+    pub fn add_track(&mut self, mut track: Track) {
+        ensure_track_entry_id(&mut track);
         let new_idx = self.tracks.len();
         self.tracks.push(track);
         if self.current_index.is_none() {
@@ -103,7 +139,8 @@ impl QueueManager {
     /// Insert a track directly after the current track. When the queue is
     /// empty the inserted track becomes current. Shuffle history is preserved
     /// by inserting the new entry immediately after the current position.
-    pub fn insert_next(&mut self, track: Track) -> usize {
+    pub fn insert_next(&mut self, mut track: Track) -> usize {
+        ensure_track_entry_id(&mut track);
         let insert_pos = match self.current_index {
             Some(idx) => (idx + 1).min(self.tracks.len()),
             None => 0,
@@ -205,6 +242,21 @@ impl QueueManager {
 
     pub fn find_track_by_id(&self, track_id: &str) -> Option<&Track> {
         self.tracks.iter().find(|t| t.id == track_id)
+    }
+
+    pub fn update_track_file_uri(
+        &mut self,
+        index: usize,
+        track_id: &str,
+        file_uri: String,
+    ) -> bool {
+        if let Some(track) = self.tracks.get_mut(index)
+            && track.id == track_id
+        {
+            track.file_uri = Some(file_uri);
+            return true;
+        }
+        false
     }
 
     pub fn reorder(&mut self, from: usize, to: usize) -> bool {
@@ -323,12 +375,12 @@ impl QueueManager {
                         let next_idx = curr + 1;
                         self.tracks.get(next_idx).map(|t| (next_idx, t))
                     } else if self.repeat_mode == RepeatMode::All {
-                        self.tracks.get(0).map(|t| (0, t))
+                        self.tracks.first().map(|t| (0, t))
                     } else {
                         None
                     }
                 }
-                None => self.tracks.get(0).map(|t| (0, t)),
+                None => self.tracks.first().map(|t| (0, t)),
             }
         }
     }
@@ -369,11 +421,12 @@ impl QueueManager {
                             .and_then(|idx| self.tracks.get(idx).map(|t| (idx, t)))
                     }
                 }
-                None => self.tracks.get(0).map(|t| (0, t)),
+                None => self.tracks.first().map(|t| (0, t)),
             }
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&Track> {
         let (next_idx, _) = self.peek_next()?;
         self.set_current_index(next_idx)
@@ -417,6 +470,157 @@ impl QueueManager {
         self.tracks.len()
     }
 
+    pub fn assign_missing_entry_ids(&mut self) {
+        for track in &mut self.tracks {
+            ensure_track_entry_id(track);
+        }
+    }
+
+    pub fn upcoming_tracks_and_indices(&self) -> Vec<(usize, Track)> {
+        if self.tracks.is_empty() {
+            return Vec::new();
+        }
+        let Some(cur) = self.current_index else {
+            return self.tracks.iter().cloned().enumerate().collect();
+        };
+
+        let mut indices: Vec<usize> = Vec::new();
+        let mut seen = HashSet::new();
+        if self.shuffle_enabled && !self.shuffle_order.is_empty() {
+            for &idx in self.shuffle_order.iter().skip(self.shuffle_pos + 1) {
+                if idx < self.tracks.len() && idx != cur && seen.insert(idx) {
+                    indices.push(idx);
+                }
+            }
+            if self.repeat_mode == RepeatMode::All {
+                for &idx in self.shuffle_order.iter().take(self.shuffle_pos) {
+                    if idx < self.tracks.len() && idx != cur && seen.insert(idx) {
+                        indices.push(idx);
+                    }
+                }
+            }
+        } else {
+            for idx in (cur + 1)..self.tracks.len() {
+                if seen.insert(idx) {
+                    indices.push(idx);
+                }
+            }
+            if self.repeat_mode == RepeatMode::All {
+                for idx in 0..cur {
+                    if seen.insert(idx) {
+                        indices.push(idx);
+                    }
+                }
+            }
+        }
+
+        indices
+            .into_iter()
+            .map(|idx| (idx, self.tracks[idx].clone()))
+            .collect()
+    }
+
+    pub fn preload_window(&self, target: usize) -> Vec<Track> {
+        let clamped = target.min(20);
+        if clamped == 0 {
+            return Vec::new();
+        }
+        self.upcoming_tracks_and_indices()
+            .into_iter()
+            .take(clamped)
+            .map(|(_, track)| track)
+            .collect()
+    }
+
+    pub fn snapshot_state(&self) -> SavedQueueSnapshot {
+        SavedQueueSnapshot {
+            tracks: self.tracks.clone(),
+            current_index: self.current_index,
+            repeat_mode: self.repeat_mode,
+            shuffle_enabled: self.shuffle_enabled,
+            shuffle_order: self.shuffle_order.clone(),
+            shuffle_pos: self.shuffle_pos,
+        }
+    }
+
+    pub fn restore_snapshot(&mut self, saved: SavedQueueSnapshot) {
+        self.tracks = saved.tracks;
+        self.assign_missing_entry_ids();
+        self.current_index = saved.current_index.filter(|&idx| idx < self.tracks.len());
+        self.repeat_mode = saved.repeat_mode;
+        self.shuffle_enabled = saved.shuffle_enabled;
+        self.shuffle_order = saved.shuffle_order;
+        self.shuffle_pos = saved.shuffle_pos;
+    }
+
+    /// Updates upcoming entries behind the currently playing track without replacing the current
+    /// song or resetting playback cursor. Used when Cavia Connect updates the tail sequence.
+    pub fn apply_collaborative_upcoming(
+        &mut self,
+        current_track: Option<Track>,
+        upcoming: Vec<Track>,
+    ) {
+        let mut combined: Vec<Track> = Vec::new();
+        let has_current = if let Some(mut cur) = current_track {
+            ensure_track_entry_id(&mut cur);
+            combined.push(cur);
+            true
+        } else if let Some(cur) = self.current_track().cloned() {
+            combined.push(cur);
+            true
+        } else {
+            false
+        };
+
+        for mut t in upcoming {
+            ensure_track_entry_id(&mut t);
+            combined.push(t);
+        }
+
+        self.tracks = combined;
+        self.current_index = if has_current && !self.tracks.is_empty() {
+            Some(0)
+        } else {
+            None
+        };
+        if self.shuffle_enabled {
+            self.shuffle_enabled = false;
+            self.shuffle_order.clear();
+            self.shuffle_pos = 0;
+        }
+    }
+
+    /// Removes or advances past tracks that were already played during offline fallback so
+    /// reconnecting does not immediately replay them while keeping queue continuity intact.
+    pub fn advance_past_played_during_fallback(
+        &mut self,
+        played_entry_ids: &HashSet<String>,
+        played_track_ids: &HashSet<String>,
+    ) {
+        if self.tracks.is_empty() {
+            return;
+        }
+        let cur = self.current_index.unwrap_or(0);
+        let matches_played = |t: &Track| {
+            t.queue_entry_id
+                .as_deref()
+                .map(|id| played_entry_ids.contains(id))
+                .unwrap_or(false)
+                || played_track_ids.contains(&t.id)
+        };
+
+        // Advance forward cleanly over any imminent tracks already heard during fallback.
+        let mut next_idx = cur;
+        while next_idx < self.tracks.len() && matches_played(&self.tracks[next_idx]) {
+            next_idx += 1;
+        }
+        if next_idx < self.tracks.len() {
+            self.current_index = Some(next_idx);
+        } else if !self.tracks.is_empty() {
+            self.current_index = Some(cur.min(self.tracks.len() - 1));
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.tracks.is_empty()
     }
@@ -445,10 +649,10 @@ impl QueueManager {
         }
 
         // Keep pinned current track at index 0 of the shuffle list
-        if let Some(pinned) = pinned_index {
-            if let Some(found_pos) = indices.iter().position(|&idx| idx == pinned) {
-                indices.swap(0, found_pos);
-            }
+        if let Some(pinned) = pinned_index
+            && let Some(found_pos) = indices.iter().position(|&idx| idx == pinned)
+        {
+            indices.swap(0, found_pos);
         }
 
         self.shuffle_order = indices;
@@ -479,6 +683,10 @@ mod tests {
             is_liked: false,
             play_count: 0,
             date_added: "2026-01-01T00:00:00Z".to_string(),
+            queue_entry_id: None,
+            contributor_id: None,
+            contributor_name: None,
+            priority_override: None,
         }
     }
 
@@ -756,5 +964,21 @@ mod tests {
         let mut indices = q.shuffle_order.clone();
         indices.sort_unstable();
         assert_eq!(indices, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_set_queue_at_index_preserves_exact_duplicate_position() {
+        let mut q = QueueManager::new();
+        q.set_queue_at_index(
+            vec![
+                dummy_track("1", "Duplicate First"),
+                dummy_track("2", "Middle"),
+                dummy_track("1", "Duplicate Third"),
+            ],
+            Some(2),
+        );
+
+        assert_eq!(q.current_index(), Some(2));
+        assert_eq!(q.current_track().unwrap().title, "Duplicate Third");
     }
 }

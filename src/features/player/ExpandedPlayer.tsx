@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { usePlaybackPosition } from '../../lib/usePlaybackPosition';
 import { getActiveLyricLine, useTrackLyrics } from '../../lib/useTrackLyrics';
+import { acquireOverlayLock, isTopOverlay, releaseOverlayLock } from '../../lib/modalStack';
 import {
   AlertCircle,
   Check,
@@ -23,7 +24,8 @@ import { IconButton } from '../../components/IconButton';
 import { Slider } from '../../components/Slider';
 import { ArtworkImage } from '../../components/ArtworkImage';
 import { formatArtworkUri } from '../../lib/library';
-import type { PlaybackState } from '../../lib/types';
+import { PreloadPill } from './PreloadPill';
+import type { PlaybackState, PreloadStatusSnapshot } from '../../lib/types';
 
 interface ExpandedPlayerProps {
   isOpen: boolean;
@@ -31,6 +33,9 @@ interface ExpandedPlayerProps {
   playback: PlaybackState;
   isBackendReady: boolean;
   audioBackendStatus?: 'ready' | 'device_unavailable' | 'not_integrated' | 'error' | 'unsupported' | 'initializing';
+  preloadStatus?: PreloadStatusSnapshot | null;
+  onChangePreloadTarget?: (target: number) => void;
+  onRetryPreload?: () => void;
   onOpenQueue: () => void;
   onOpenLyrics: () => void;
   onTogglePlay?: () => void;
@@ -51,6 +56,9 @@ export function ExpandedPlayer({
   playback,
   isBackendReady,
   audioBackendStatus,
+  preloadStatus,
+  onChangePreloadTarget,
+  onRetryPreload,
   onOpenQueue,
   onOpenLyrics,
   onTogglePlay,
@@ -83,6 +91,7 @@ export function ExpandedPlayer({
 
   const overlayRef = useRef<HTMLDivElement>(null);
   const previousActiveElementRef = useRef<HTMLElement | null>(null);
+  const overlayId = `expanded-player-${useId()}`;
 
   // Inline onClose props would otherwise re-run this effect on every parent
   // render and repeatedly move focus back to the first control.
@@ -95,7 +104,7 @@ export function ExpandedPlayer({
     if (!isOpen) return;
 
     previousActiveElementRef.current = document.activeElement as HTMLElement | null;
-    document.body.style.overflow = 'hidden';
+    acquireOverlayLock(overlayId);
 
     const timer = setTimeout(() => {
       const overlay = overlayRef.current;
@@ -109,6 +118,8 @@ export function ExpandedPlayer({
     }, 50);
 
     function handleKeyDown(e: KeyboardEvent) {
+      if (!isTopOverlay(overlayId)) return;
+
       if (e.key === 'Escape') {
         e.preventDefault();
         onCloseRef.current();
@@ -141,13 +152,13 @@ export function ExpandedPlayer({
 
     return () => {
       clearTimeout(timer);
-      document.body.style.overflow = '';
+      releaseOverlayLock(overlayId);
       window.removeEventListener('keydown', handleKeyDown);
       if (previousActiveElementRef.current && typeof previousActiveElementRef.current.focus === 'function') {
         previousActiveElementRef.current.focus();
       }
     };
-  }, [isOpen]);
+  }, [isOpen, overlayId]);
 
   const handleShareTrack = async () => {
     if (!currentTrack) return;
@@ -281,6 +292,7 @@ export function ExpandedPlayer({
             <Slider
               value={activePosition}
               max={displayDuration || 100}
+              step={5000}
               onChange={setScrubPosition}
               onCommit={(newPos) => {
                 setScrubPosition(null);
@@ -369,6 +381,15 @@ export function ExpandedPlayer({
             >
               {playbackSpeed}x
             </button>
+
+            {onChangePreloadTarget && (
+              <PreloadPill
+                status={preloadStatus ?? null}
+                onChangeTarget={onChangePreloadTarget}
+                onRetry={onRetryPreload}
+                placement="expanded"
+              />
+            )}
 
             <div className="expanded-volume-control">
               <IconButton

@@ -21,7 +21,7 @@ class CaviaPlaybackService : MediaSessionService() {
     instance = this
   }
 
-  fun load(path: String, startMs: Long) {
+  fun load(path: String, startMs: Long, autoPlay: Boolean = true) {
     val uri = if (path.startsWith("content://") || path.startsWith("file://")) {
       Uri.parse(path)
     } else {
@@ -29,7 +29,7 @@ class CaviaPlaybackService : MediaSessionService() {
     }
     player.setMediaItem(MediaItem.fromUri(uri), startMs.coerceAtLeast(0))
     player.prepare()
-    player.play()
+    player.playWhenReady = autoPlay
   }
 
   fun setSpeed(speed: Float) {
@@ -38,9 +38,20 @@ class CaviaPlaybackService : MediaSessionService() {
   }
 
   fun setMetadata(title: String, artist: String, album: String) {
-    player.replaceMediaItem(0, player.currentMediaItem!!.buildUpon()
-      .setMediaMetadata(MediaMetadata.Builder().setTitle(title).setArtist(artist).setAlbumTitle(album).build())
-      .build())
+    val current = player.currentMediaItem ?: return
+    val updated = current.buildUpon()
+      .setMediaMetadata(
+        MediaMetadata.Builder()
+          .setTitle(title)
+          .setArtist(artist)
+          .setAlbumTitle(album)
+          .build(),
+      )
+      .build()
+    val wasPlaying = player.playWhenReady
+    val positionMs = player.currentPosition.coerceAtLeast(0)
+    player.setMediaItem(updated, positionMs)
+    player.playWhenReady = wasPlaying
   }
 
   override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession

@@ -1,12 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { extractShutdownErrorMessage } from '../src/lib/diagnostics.js';
 
-export function handleShutdownErrorPayload(payload, setError) {
-  if (payload && typeof payload.error === 'string') {
-    setError(payload.error);
-  } else {
-    setError(payload?.error ?? null);
-  }
+function handleShutdownErrorPayload(payload, setError) {
+  setError(extractShutdownErrorMessage(payload));
 }
 
 describe('Shutdown Error Event Contract', () => {

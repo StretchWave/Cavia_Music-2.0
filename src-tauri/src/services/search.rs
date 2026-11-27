@@ -185,8 +185,8 @@ async fn search_like_fallback(
         let rows = sqlx::query(
             r#"
             SELECT
-                COALESCE(NULLIF(t.album, ''), 'Unknown Album') AS title,
-                COALESCE(NULLIF(t.album_artist, ''), NULLIF(t.artist, ''), 'Unknown Artist') AS artist,
+                COALESCE(NULLIF(t.album, ''), 'Unknown Album') AS album_title,
+                COALESCE(NULLIF(t.album_artist, ''), NULLIF(t.artist, ''), 'Unknown Artist') AS album_artist_name,
                 MIN(t.release_year) AS release_year,
                 COUNT(*) AS track_count,
                 MAX(t.artwork_uri) AS artwork_uri
@@ -197,8 +197,8 @@ async fn search_like_fallback(
                   OR t.artist LIKE ?1 ESCAPE '\'
                   OR COALESCE(t.album_artist, '') LIKE ?1 ESCAPE '\'
               )
-            GROUP BY t.album, COALESCE(NULLIF(t.album_artist, ''), NULLIF(t.artist, ''))
-            ORDER BY t.album COLLATE NOCASE ASC, t.artist COLLATE NOCASE ASC
+            GROUP BY album_title COLLATE NOCASE, album_artist_name COLLATE NOCASE
+            ORDER BY album_title COLLATE NOCASE ASC, album_artist_name COLLATE NOCASE ASC
             LIMIT ?2
             "#,
         )
@@ -217,7 +217,7 @@ async fn search_like_fallback(
         let rows = sqlx::query(
             r#"
             SELECT
-                COALESCE(NULLIF(t.artist, ''), 'Unknown Artist') AS name,
+                COALESCE(NULLIF(t.artist, ''), 'Unknown Artist') AS artist_name,
                 COUNT(*) AS track_count,
                 COUNT(DISTINCT NULLIF(t.album, '')) AS album_count,
                 MAX(t.artwork_uri) AS artwork_uri
@@ -227,8 +227,8 @@ async fn search_like_fallback(
                   t.artist LIKE ?1 ESCAPE '\'
                   OR COALESCE(t.album_artist, '') LIKE ?1 ESCAPE '\'
               )
-            GROUP BY t.artist
-            ORDER BY t.artist COLLATE NOCASE ASC
+            GROUP BY artist_name COLLATE NOCASE
+            ORDER BY artist_name COLLATE NOCASE ASC
             LIMIT ?2
             "#,
         )
@@ -253,7 +253,7 @@ async fn search_like_fallback(
                 p.artwork_uri,
                 p.source_provider,
                 p.created_at,
-                (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) AS track_count
+                (SELECT COUNT(*) FROM playlist_tracks pt LEFT JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND (t.is_deleted IS NULL OR t.is_deleted = 0)) AS track_count
             FROM playlists p
             WHERE p.is_deleted = 0
               AND (
@@ -322,8 +322,8 @@ async fn search_fts5(
         let rows = sqlx::query(
             r#"
             SELECT
-                COALESCE(NULLIF(t.album, ''), 'Unknown Album') AS title,
-                COALESCE(NULLIF(t.album_artist, ''), NULLIF(t.artist, ''), 'Unknown Artist') AS artist,
+                COALESCE(NULLIF(t.album, ''), 'Unknown Album') AS album_title,
+                COALESCE(NULLIF(t.album_artist, ''), NULLIF(t.artist, ''), 'Unknown Artist') AS album_artist_name,
                 MIN(t.release_year) AS release_year,
                 COUNT(*) AS track_count,
                 MAX(t.artwork_uri) AS artwork_uri
@@ -331,8 +331,8 @@ async fn search_fts5(
             JOIN tracks_fts f ON t.rowid = f.rowid
             WHERE t.is_deleted = 0
               AND f.tracks_fts MATCH ?1
-            GROUP BY t.album, COALESCE(NULLIF(t.album_artist, ''), NULLIF(t.artist, ''))
-            ORDER BY t.album COLLATE NOCASE ASC, t.artist COLLATE NOCASE ASC
+            GROUP BY album_title COLLATE NOCASE, album_artist_name COLLATE NOCASE
+            ORDER BY album_title COLLATE NOCASE ASC, album_artist_name COLLATE NOCASE ASC
             LIMIT ?2
             "#,
         )
@@ -351,7 +351,7 @@ async fn search_fts5(
         let rows = sqlx::query(
             r#"
             SELECT
-                COALESCE(NULLIF(t.artist, ''), 'Unknown Artist') AS name,
+                COALESCE(NULLIF(t.artist, ''), 'Unknown Artist') AS artist_name,
                 COUNT(*) AS track_count,
                 COUNT(DISTINCT NULLIF(t.album, '')) AS album_count,
                 MAX(t.artwork_uri) AS artwork_uri
@@ -359,8 +359,8 @@ async fn search_fts5(
             JOIN tracks_fts f ON t.rowid = f.rowid
             WHERE t.is_deleted = 0
               AND f.tracks_fts MATCH ?1
-            GROUP BY t.artist
-            ORDER BY t.artist COLLATE NOCASE ASC
+            GROUP BY artist_name COLLATE NOCASE
+            ORDER BY artist_name COLLATE NOCASE ASC
             LIMIT ?2
             "#,
         )
@@ -385,7 +385,7 @@ async fn search_fts5(
                 p.artwork_uri,
                 p.source_provider,
                 p.created_at,
-                (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) AS track_count
+                (SELECT COUNT(*) FROM playlist_tracks pt LEFT JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND (t.is_deleted IS NULL OR t.is_deleted = 0)) AS track_count
             FROM playlists p
             JOIN playlists_fts f ON p.rowid = f.rowid
             WHERE p.is_deleted = 0
@@ -428,6 +428,10 @@ fn map_tracks(rows: Vec<sqlx::sqlite::SqliteRow>) -> Vec<Track> {
             is_liked: row.get::<i64, _>("is_liked") == 1,
             play_count: row.get("play_count"),
             date_added: row.get("date_added"),
+            queue_entry_id: None,
+            contributor_id: None,
+            contributor_name: None,
+            priority_override: None,
         })
         .collect()
 }
@@ -435,9 +439,13 @@ fn map_tracks(rows: Vec<sqlx::sqlite::SqliteRow>) -> Vec<Track> {
 fn map_albums(rows: Vec<sqlx::sqlite::SqliteRow>) -> Vec<Album> {
     rows.into_iter()
         .map(|row| {
-            let title: String = row.get("title");
-            let artist: String = row.get("artist");
-            let id = format!("{title}_{artist}");
+            let title: String = row.get("album_title");
+            let artist: String = row.get("album_artist_name");
+            let id = format!(
+                "album:{}:{}",
+                hex::encode(title.to_lowercase()),
+                hex::encode(artist.to_lowercase())
+            );
             Album {
                 id,
                 title,
@@ -453,8 +461,8 @@ fn map_albums(rows: Vec<sqlx::sqlite::SqliteRow>) -> Vec<Album> {
 fn map_artists(rows: Vec<sqlx::sqlite::SqliteRow>) -> Vec<Artist> {
     rows.into_iter()
         .map(|row| {
-            let name: String = row.get("name");
-            let id = name.clone();
+            let name: String = row.get("artist_name");
+            let id = format!("artist:{}", hex::encode(name.to_lowercase()));
             Artist {
                 id,
                 name,

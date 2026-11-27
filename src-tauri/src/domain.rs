@@ -20,6 +20,14 @@ pub struct Track {
     pub is_liked: bool,
     pub play_count: i64,
     pub date_added: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_entry_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contributor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contributor_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_override: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,9 +1,13 @@
 pub mod artwork;
+pub mod connect;
 pub mod credentials;
+pub mod fair_queue;
 pub mod library;
 pub mod lyrics;
 pub mod metadata;
+pub mod offline;
 pub mod playback;
+pub mod preload;
 pub mod queue;
 pub mod scanner;
 pub mod search;

@@ -1,31 +1,50 @@
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import {
   ChevronDown,
   ChevronUp,
   Disc3,
+  DownloadCloud,
   GripVertical,
   ListMusic,
+  Minus,
   Play,
+  Plus,
+  Radio,
   Shuffle,
   Trash2,
+  WifiOff,
   X,
 } from 'lucide-react';
 import { IconButton } from '../../components/IconButton';
 import { Button } from '../../components/Button';
 import { Badge } from '../../components/Badge';
-import type { Track } from '../../lib/types';
+import { acquireOverlayLock, isTopOverlay, releaseOverlayLock } from '../../lib/modalStack';
+import { MAX_PRELOAD_TARGET } from '../../lib/connect';
+import type {
+  ConnectSessionSnapshot,
+  OfflineFallbackStatus,
+  PreloadStatusSnapshot,
+  Track,
+} from '../../lib/types';
 
 interface QueueDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   currentTrack: Track | null;
+  currentIndex?: number | null;
   queue: Track[];
   isPlaying?: boolean;
   status?: string;
   isBackendReady?: boolean;
+  preloadStatus?: PreloadStatusSnapshot | null;
+  offlineStatus?: OfflineFallbackStatus | null;
+  connectSession?: ConnectSessionSnapshot | null;
+  onChangePreloadTarget?: (target: number) => void;
+  onExitOfflineFallback?: () => void;
+  onOpenConnect?: () => void;
   onClearQueue?: () => void;
   onRemoveTrack?: (id: string, index?: number) => void;
-  onSelectTrack?: (id: string) => void;
+  onSelectTrack?: (index: number, id: string) => void;
   onShuffleQueue?: () => void;
   onReorderQueue?: (fromIndex: number, toIndex: number) => void;
 }
@@ -34,10 +53,17 @@ export function QueueDrawer({
   isOpen,
   onClose,
   currentTrack,
+  currentIndex,
   queue,
   isPlaying = false,
   status = 'idle',
   isBackendReady = true,
+  preloadStatus,
+  offlineStatus,
+  connectSession,
+  onChangePreloadTarget,
+  onExitOfflineFallback,
+  onOpenConnect,
   onClearQueue,
   onRemoveTrack,
   onSelectTrack,
@@ -48,6 +74,7 @@ export function QueueDrawer({
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
   const previousActiveElementRef = useRef<HTMLElement | null>(null);
+  const overlayId = `queue-drawer-${useId()}`;
 
   // Inline onClose props would otherwise re-run this effect on every parent
   // render and repeatedly move focus back to the first control.
@@ -60,7 +87,7 @@ export function QueueDrawer({
     if (!isOpen) return;
 
     previousActiveElementRef.current = document.activeElement as HTMLElement | null;
-    document.body.style.overflow = 'hidden';
+    acquireOverlayLock(overlayId);
 
     const timer = setTimeout(() => {
       const drawer = drawerRef.current;
@@ -74,6 +101,8 @@ export function QueueDrawer({
     }, 50);
 
     function handleKeyDown(e: KeyboardEvent) {
+      if (!isTopOverlay(overlayId)) return;
+
       if (e.key === 'Escape') {
         e.preventDefault();
         onCloseRef.current();
@@ -107,13 +136,13 @@ export function QueueDrawer({
 
     return () => {
       clearTimeout(timer);
-      document.body.style.overflow = '';
+      releaseOverlayLock(overlayId);
       window.removeEventListener('keydown', handleKeyDown);
       if (previousActiveElementRef.current && typeof previousActiveElementRef.current.focus === 'function') {
         previousActiveElementRef.current.focus();
       }
     };
-  }, [isOpen]);
+  }, [isOpen, overlayId]);
 
   if (!isOpen) return null;
 
@@ -157,16 +186,96 @@ export function QueueDrawer({
               </Badge>
             </div>
           </div>
-          <IconButton
-            label="Close queue"
-            icon={<X size={18} />}
-            variant="ghost"
-            onClick={onClose}
-          />
+          <div className="queue-header-actions">
+            {onOpenConnect && (
+              <button
+                type="button"
+                className="queue-action-link"
+                onClick={() => {
+                  onClose();
+                  onOpenConnect();
+                }}
+                title="Open Cavia Connect session"
+              >
+                <Radio size={13} aria-hidden="true" />
+                <span>{connectSession ? connectSession.joinCode : 'Connect'}</span>
+              </button>
+            )}
+            <IconButton
+              label="Close queue"
+              icon={<X size={18} />}
+              variant="ghost"
+              onClick={onClose}
+            />
+          </div>
         </div>
 
         {/* Content */}
         <div className="drawer-body">
+          {offlineStatus?.fallbackActive && (
+            <div className="cavia-banner banner-info offline-queue-banner">
+              <WifiOff size={16} className="banner-icon-accent" />
+              <div className="banner-content">
+                <strong>
+                  {offlineStatus.reconnectPendingFinish
+                    ? 'Online again — finishing current track'
+                    : 'Offline Cached Fallback Active'}
+                </strong>
+                <p>
+                  {offlineStatus.statusMessage ??
+                    `Shuffling ${offlineStatus.eligibleCachedCount} verified offline tracks while preserving your queue.`}
+                </p>
+              </div>
+              {onExitOfflineFallback && !offlineStatus.isOffline && (
+                <Button size="sm" variant="outline" onClick={onExitOfflineFallback}>
+                  Return to Queue
+                </Button>
+              )}
+            </div>
+          )}
+
+          {preloadStatus && onChangePreloadTarget && (
+            <div className="queue-preload-bar">
+              <div className="queue-preload-meta">
+                <DownloadCloud size={14} aria-hidden="true" />
+                <span>
+                  Preload next{' '}
+                  <strong>
+                    {preloadStatus.targetCount > 0
+                      ? `${preloadStatus.readyCount}/${preloadStatus.targetCount} ready`
+                      : 'disabled (0)'}
+                  </strong>
+                </span>
+              </div>
+              <div className="queue-preload-stepper">
+                <button
+                  type="button"
+                  className="preload-step-btn"
+                  disabled={preloadStatus.targetCount <= 0}
+                  onClick={() =>
+                    onChangePreloadTarget(Math.max(0, preloadStatus.targetCount - 1))
+                  }
+                  aria-label="Decrease preload count"
+                >
+                  <Minus size={12} />
+                </button>
+                <span className="queue-preload-num">{preloadStatus.targetCount}</span>
+                <button
+                  type="button"
+                  className="preload-step-btn"
+                  disabled={preloadStatus.targetCount >= MAX_PRELOAD_TARGET}
+                  onClick={() =>
+                    onChangePreloadTarget(
+                      Math.min(MAX_PRELOAD_TARGET, preloadStatus.targetCount + 1)
+                    )
+                  }
+                  aria-label="Increase preload count"
+                >
+                  <Plus size={12} />
+                </button>
+              </div>
+            </div>
+          )}
           {/* Currently Selected Track */}
           <div className="queue-section">
             <span className="queue-section-label">
@@ -226,7 +335,10 @@ export function QueueDrawer({
             {queue.length > 0 ? (
               <ol className="queue-list" aria-label="Upcoming tracks in queue">
                 {queue.map((track, index) => {
-                  const isCurrent = currentTrack?.id === track.id;
+                  const isCurrent =
+                    typeof currentIndex === 'number'
+                      ? currentIndex === index
+                      : currentTrack?.id === track.id;
                   const isDragging = draggedIndex === index;
                   const isDragOver = dragOverIndex === index;
                   return (
@@ -277,14 +389,18 @@ export function QueueDrawer({
                         type="button"
                         className="queue-track-play-trigger"
                         onClick={() => {
-                          if (isBackendReady) onSelectTrack?.(track.id);
+                          if (isBackendReady) onSelectTrack?.(index, track.id);
                         }}
                         disabled={!isBackendReady}
                         title={!isBackendReady ? 'Audio engine unavailable' : `Play ${track.title}`}
                       >
                         <span className="queue-item-meta">
                           <strong className="queue-item-title">{track.title}</strong>
-                          <span className="queue-item-artist">{track.artist}</span>
+                          <span className="queue-item-artist">
+                            {track.artist}
+                            {track.contributorName ? ` · by ${track.contributorName}` : ''}
+                            {track.priorityOverride ? ' · Priority' : ''}
+                          </span>
                         </span>
                         <span className="queue-time">{formatDuration(track.durationMs)}</span>
                       </button>

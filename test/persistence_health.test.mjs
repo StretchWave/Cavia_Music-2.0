@@ -1,22 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-
-export function getPersistenceBadgeConfig(status) {
-  switch (status) {
-    case 'healthy':
-      return { label: 'PERSISTENCE READY', variant: 'ready' };
-    case 'write_pending':
-      return { label: 'SAVING PLAYBACK STATE', variant: 'warn' };
-    case 'write_failed':
-      return { label: 'SAVE FAILED', variant: 'vermilion' };
-    case 'worker_unavailable':
-      return { label: 'PERSISTENCE UNAVAILABLE', variant: 'vermilion' };
-    case 'shutting_down':
-      return { label: 'SAVING BEFORE EXIT', variant: 'warn' };
-    default:
-      return { label: 'PERSISTENCE READY', variant: 'ready' };
-  }
-}
+import { getPersistenceBadgeConfig } from '../src/lib/diagnostics.js';
 
 describe('Persistence Health Frontend Contract', () => {
   it('parses PlatformHealth with persistence_status and persistence_error', () => {

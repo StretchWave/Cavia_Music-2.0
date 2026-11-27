@@ -46,12 +46,10 @@ pub fn resolve_app_data_dir_internal(
     env_override: Option<&str>,
     is_debug: bool,
 ) -> PathBuf {
-    if is_debug {
-        if let Some(val) = env_override {
-            let trimmed = val.trim();
-            if !trimmed.is_empty() {
-                return PathBuf::from(trimmed);
-            }
+    if is_debug && let Some(val) = env_override {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
         }
     }
     platform_dir
@@ -116,12 +114,12 @@ pub fn run() {
 
             #[cfg(target_os = "windows")]
             {
-                if let Some(window) = app.get_webview_window("main") {
-                    if let Ok(hwnd) = window.hwnd() {
-                        let _ = tauri::async_runtime::block_on(async {
-                            playback.init_media_controls(Some(hwnd.0 as isize)).await
-                        });
-                    }
+                if let Some(window) = app.get_webview_window("main")
+                    && let Ok(hwnd) = window.hwnd()
+                {
+                    let _ = tauri::async_runtime::block_on(async {
+                        playback.init_media_controls(Some(hwnd.0 as isize)).await
+                    });
                 }
             }
             #[cfg(not(target_os = "windows"))]
@@ -158,11 +156,86 @@ pub fn run() {
                 services::ytmusic::YtMusicService::new(app_data_dir.join("stream-cache"))
                     .map_err(io::Error::other)?,
             );
+            tauri::async_runtime::block_on(playback.attach_ytmusic(ytmusic.clone()))
+                .map_err(io::Error::other)?;
 
             let import_manager = Arc::new(services::spotify::ImportManager::new(
                 pool.clone(),
                 ytmusic.clone(),
             ));
+
+            let offline = services::offline::OfflineFallbackService::new(
+                pool.clone(),
+                ytmusic.clone(),
+                Some(app.handle().clone()),
+            );
+            let connect = services::connect::ConnectService::new(
+                pool.clone(),
+                Some(app.handle().clone()),
+                Some(ytmusic.clone()),
+                Some(sync.clone()),
+            );
+
+            let preload_target = tauri::async_runtime::block_on(
+                services::preload::PreloadCoordinator::load_persisted_target(&pool),
+            );
+            let app_preload_emit = app.handle().clone();
+            let connect_for_late = connect.clone();
+            let playback_for_late = playback.clone();
+            let offline_for_late = offline.clone();
+            let offline_for_conn = offline.clone();
+            let playback_for_conn = playback.clone();
+
+            let preload = services::preload::PreloadCoordinator::new(
+                ytmusic.clone(),
+                Some(pool.clone()),
+                preload_target,
+                services::preload::PreloadCallbacks {
+                    on_status_changed: Arc::new(move |snap| {
+                        let _ = app_preload_emit.emit("playback:preload-changed", snap);
+                    }),
+                    on_late_verified: Arc::new(move |entry_id, _path| {
+                        let connect_c = connect_for_late.clone();
+                        let playback_c = playback_for_late.clone();
+                        let offline_c = offline_for_late.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Ok(Some(_)) =
+                                connect_c.promote_pending_entry_ready(&entry_id).await
+                                && !offline_c.is_fallback_active()
+                                && let Some((cur, up)) = connect_c.upcoming_playback_tracks()
+                            {
+                                let _ = playback_c
+                                    .apply_collaborative_sequence(cur, up, false)
+                                    .await;
+                            }
+                        });
+                    }),
+                    on_connectivity_lost: Arc::new(move |_err| {
+                        let offline_c = offline_for_conn.clone();
+                        let playback_c = playback_for_conn.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let queue_tracks = playback_c.snapshot().queue;
+                            offline_c.notify_connectivity_lost(&queue_tracks).await;
+                        });
+                    }),
+                },
+            );
+
+            connect.attach_preload(preload.clone());
+            tauri::async_runtime::block_on(playback.attach_coordinators(
+                preload.clone(),
+                connect.clone(),
+                offline.clone(),
+            ))
+            .map_err(io::Error::other)?;
+
+            if let Ok(Some(_)) = tauri::async_runtime::block_on(connect.restore_active_session())
+                && let Some((cur, up)) = connect.upcoming_playback_tracks()
+            {
+                let _ = tauri::async_runtime::block_on(
+                    playback.apply_collaborative_sequence(cur, up, false),
+                );
+            }
 
             app.manage(AppState::new(
                 pool,
@@ -174,6 +247,9 @@ pub fn run() {
                 sync,
                 ytmusic,
                 import_manager,
+                preload,
+                connect,
+                offline,
             ));
             Ok(())
         })
@@ -186,6 +262,8 @@ pub fn run() {
             commands::lyrics::get_track_lyrics,
             commands::lyrics::refresh_track_lyrics,
             commands::spotify::spotify_start_import,
+            commands::spotify::ytmusic_start_import,
+            commands::spotify::playlist_start_import,
             commands::spotify::import_pause,
             commands::spotify::import_resume,
             commands::spotify::import_cancel,
@@ -239,6 +317,7 @@ pub fn run() {
             commands::sync::sync_set_config,
             commands::playback::get_playback_state,
             commands::playback::play_track,
+            commands::playback::play_queue_index,
             commands::playback::play,
             commands::playback::pause,
             commands::playback::play_pause,
@@ -252,8 +331,10 @@ pub fn run() {
             commands::playback::next_track,
             commands::playback::previous_track,
             commands::playback::set_queue,
+            commands::playback::set_playback_queue,
             commands::playback::add_to_queue,
             commands::playback::play_next,
+            commands::playback::enqueue_track,
             commands::playback::remove_from_queue,
             commands::playback::remove_from_queue_by_index,
             commands::playback::reorder_queue,
@@ -261,6 +342,25 @@ pub fn run() {
             commands::playback::retry_audio_device,
             commands::playback::retry_shutdown,
             commands::playback::force_exit,
+            commands::connect::preload_get_status,
+            commands::connect::preload_set_target,
+            commands::connect::preload_retry,
+            commands::connect::offline_get_status,
+            commands::connect::offline_choose_shuffle_cached,
+            commands::connect::offline_decline_fallback,
+            commands::connect::offline_exit_fallback,
+            commands::connect::offline_probe_reconnect,
+            commands::connect::connect_get_session,
+            commands::connect::connect_create_session,
+            commands::connect::connect_join_session,
+            commands::connect::connect_set_participant_connected,
+            commands::connect::connect_contribute_track,
+            commands::connect::connect_contribute_ytmusic_playlist,
+            commands::connect::connect_remove_entry,
+            commands::connect::connect_host_reorder,
+            commands::connect::connect_set_alpha,
+            commands::connect::connect_sync_now,
+            commands::connect::connect_end_session,
         ])
         .build(tauri::generate_context!())
         .expect("Cavia Music failed to build");

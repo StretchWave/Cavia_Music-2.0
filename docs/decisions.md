@@ -29,3 +29,13 @@
 **Decision:** A new install contains no fabricated tracks, albums, artists, playlists, artwork, playback position or sync time. UI demonstrates its visual hierarchy without pretending sample data is real.
 
 **Reason:** Feature status and test evidence must be honest.
+
+## ADR-006 — Dynamic Fair Queue, Sequential Preload, Cavia Connect & Offline Fallback
+
+**Decision:**
+- Separate collaborative state into **Shared Queue**, **Upcoming Playback Sequence**, and **Preload Window (`0–20`, default `10`)** using unique `queue_entry_id` identifiers independent of canonical track/provider IDs.
+- Extend `YtMusicService`'s verified stream cache rather than introducing a second cache; bound preloading to concurrency 1 and yield immediately when active playback resolution runs.
+- Persist Cavia Connect sessions, participant penalties, and idempotent outbox events in SQLite (`0010_fair_queue_preload_connect.sql`) with optional Supabase cloud synchronization (`20261127000000_cavia_connect_schema.sql`).
+- Preserve the original queue intact during internet outages; shuffle only decoder-verified cached streaming tracks plus verified local library tracks.
+
+**Reason:** Collaborative listening stays fair across bursts and disconnects, upcoming tracks prepare sequentially without starving active playback, and offline recovery resumes seamlessly without mutating the user's queue.

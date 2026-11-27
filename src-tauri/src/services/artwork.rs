@@ -28,15 +28,50 @@ pub fn is_valid_artwork_filename(name: &str) -> bool {
     matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp" | "gif")
 }
 
-/// Resolves a file URI or local path string into a local PathBuf.
-pub fn local_path_from_uri(uri: &str) -> PathBuf {
-    if let Some(rest) = uri.strip_prefix("file:///") {
-        PathBuf::from(rest)
-    } else if let Some(rest) = uri.strip_prefix("file://") {
-        PathBuf::from(rest)
-    } else {
-        PathBuf::from(uri)
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
+}
+
+fn percent_decode_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Resolves a file URI or local path string into a local PathBuf.
+/// Uses `url::Url::parse` so POSIX/macOS `file:///Users/...` retains its leading `/`
+/// and Windows `file:///C:/...` maps cleanly to `C:\...`.
+pub fn local_path_from_uri(uri: &str) -> PathBuf {
+    if uri.starts_with("file://") {
+        if let Ok(parsed) = url::Url::parse(uri) {
+            if let Ok(path) = parsed.to_file_path() {
+                return path;
+            }
+            return PathBuf::from(percent_decode_path(parsed.path()));
+        }
+        if let Some(rest) = uri.strip_prefix("file://") {
+            return PathBuf::from(percent_decode_path(rest));
+        }
+    }
+    PathBuf::from(uri)
 }
 
 /// Normalizes a path string for comparison across slashes and platforms.
@@ -274,146 +309,155 @@ impl ArtworkService {
         .await
         .map_err(|e| format!("Failed to query active track artwork: {e}"))?;
 
-        let mut missing_referenced_files = 0u64;
-        let mut checked_active_uris = HashSet::new();
+        let active_uris: Vec<String> = active_rows
+            .into_iter()
+            .filter_map(|row| {
+                let uri: String = row.get(0);
+                let trimmed = uri.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+            .collect();
 
-        for row in active_rows {
-            let uri: String = row.get(0);
-            let trimmed = uri.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let norm = trimmed.to_ascii_lowercase();
-            if checked_active_uris.insert(norm) {
-                let local_path = local_path_from_uri(trimmed);
-                if !local_path.exists() {
-                    missing_referenced_files += 1;
+        let artworks_dir = self.artworks_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut missing_referenced_files = 0u64;
+            let mut checked_active_uris = HashSet::new();
+
+            for trimmed in active_uris {
+                let norm = trimmed.to_ascii_lowercase();
+                if checked_active_uris.insert(norm) {
+                    let local_path = local_path_from_uri(&trimmed);
+                    if !local_path.exists() {
+                        missing_referenced_files += 1;
+                    }
                 }
             }
-        }
 
-        let read_dir = match fs::read_dir(&self.artworks_dir) {
-            Ok(rd) => rd,
-            Err(e) => {
-                return Ok(ArtworkCacheSummary {
-                    total_bytes: 0,
-                    total_files: 0,
-                    referenced_files: 0,
-                    orphaned_files: 0,
-                    reclaimable_bytes: 0,
-                    missing_referenced_files,
-                    cache_dir_exists: true,
-                    cache_dir_path: self.artworks_dir.to_string_lossy().to_string(),
-                    inspection_errors: vec![format!("Failed to read cache directory: {e}")],
-                    format_counts: HashMap::new(),
-                });
-            }
-        };
-
-        let mut total_bytes = 0u64;
-        let mut total_files = 0u64;
-        let mut referenced_files = 0u64;
-        let mut orphaned_files = 0u64;
-        let mut reclaimable_bytes = 0u64;
-        let mut inspection_errors = Vec::new();
-        let mut format_counts = HashMap::new();
-
-        let canonical_dir = self.artworks_dir.canonicalize().ok();
-
-        for entry_res in read_dir {
-            let entry = match entry_res {
-                Ok(e) => e,
+            let read_dir = match fs::read_dir(&artworks_dir) {
+                Ok(rd) => rd,
                 Err(e) => {
-                    inspection_errors.push(format!("Failed to inspect directory entry: {e}"));
-                    continue;
+                    return Ok(ArtworkCacheSummary {
+                        total_bytes: 0,
+                        total_files: 0,
+                        referenced_files: 0,
+                        orphaned_files: 0,
+                        reclaimable_bytes: 0,
+                        missing_referenced_files,
+                        cache_dir_exists: true,
+                        cache_dir_path: artworks_dir.to_string_lossy().to_string(),
+                        inspection_errors: vec![format!("Failed to read cache directory: {e}")],
+                        format_counts: HashMap::new(),
+                    });
                 }
             };
 
-            let file_type = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(e) => {
-                    inspection_errors.push(format!(
-                        "Failed to inspect file type for {}: {e}",
-                        entry.path().display()
-                    ));
-                    continue;
-                }
-            };
+            let mut total_bytes = 0u64;
+            let mut total_files = 0u64;
+            let mut referenced_files = 0u64;
+            let mut orphaned_files = 0u64;
+            let mut reclaimable_bytes = 0u64;
+            let mut inspection_errors = Vec::new();
+            let mut format_counts = HashMap::new();
 
-            if file_type.is_dir() {
-                // Directories inside cache are never treated as artwork files
-                continue;
-            }
+            let canonical_dir = artworks_dir.canonicalize().ok();
 
-            if file_type.is_symlink() {
-                // Reparse point / symlink safety: verify target stays within canonical cache dir
-                if let (Some(canon_dir), Ok(canon_target)) =
-                    (&canonical_dir, entry.path().canonicalize())
-                {
-                    if !canon_target.starts_with(canon_dir) {
-                        // Symlink points outside cache; fail closed and ignore
+            for entry_res in read_dir {
+                let entry = match entry_res {
+                    Ok(e) => e,
+                    Err(e) => {
+                        inspection_errors.push(format!("Failed to inspect directory entry: {e}"));
                         continue;
                     }
+                };
+
+                let file_type = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(e) => {
+                        inspection_errors.push(format!(
+                            "Failed to inspect file type for {}: {e}",
+                            entry.path().display()
+                        ));
+                        continue;
+                    }
+                };
+
+                if file_type.is_dir() {
+                    // Directories inside cache are never treated as artwork files
+                    continue;
+                }
+
+                if file_type.is_symlink() {
+                    // Reparse point / symlink safety: verify target stays within canonical cache dir
+                    if let (Some(canon_dir), Ok(canon_target)) =
+                        (&canonical_dir, entry.path().canonicalize())
+                    {
+                        if !canon_target.starts_with(canon_dir) {
+                            // Symlink points outside cache; fail closed and ignore
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                if !is_valid_artwork_filename(&file_name) {
+                    // Non-artwork or temporary files are ignored in artwork counts
+                    continue;
+                }
+
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(e) if e.kind() == ErrorKind::NotFound => {
+                        // File disappeared during inspection
+                        continue;
+                    }
+                    Err(e) => {
+                        inspection_errors.push(format!(
+                            "Failed to read metadata for {}: {e}",
+                            entry.path().display()
+                        ));
+                        continue;
+                    }
+                };
+
+                let file_size = metadata.len();
+                total_files += 1;
+                total_bytes = total_bytes.saturating_add(file_size);
+
+                if let Some(ext) = Path::new(&file_name).extension().and_then(|s| s.to_str()) {
+                    *format_counts.entry(ext.to_ascii_lowercase()).or_insert(0) += 1;
+                }
+
+                let lower_name = file_name.to_ascii_lowercase();
+                let norm_path = normalize_path_string(&entry.path());
+
+                let is_referenced = referenced_filenames.contains(&lower_name)
+                    || referenced_paths.contains(&norm_path);
+
+                if is_referenced {
+                    referenced_files += 1;
                 } else {
-                    continue;
+                    orphaned_files += 1;
+                    reclaimable_bytes = reclaimable_bytes.saturating_add(file_size);
                 }
             }
 
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            if !is_valid_artwork_filename(&file_name) {
-                // Non-artwork or temporary files are ignored in artwork counts
-                continue;
-            }
-
-            let metadata = match entry.metadata() {
-                Ok(m) => m,
-                Err(e) if e.kind() == ErrorKind::NotFound => {
-                    // File disappeared during inspection
-                    continue;
-                }
-                Err(e) => {
-                    inspection_errors.push(format!(
-                        "Failed to read metadata for {}: {e}",
-                        entry.path().display()
-                    ));
-                    continue;
-                }
-            };
-
-            let file_size = metadata.len();
-            total_files += 1;
-            total_bytes = total_bytes.saturating_add(file_size);
-
-            if let Some(ext) = Path::new(&file_name).extension().and_then(|s| s.to_str()) {
-                *format_counts.entry(ext.to_ascii_lowercase()).or_insert(0) += 1;
-            }
-
-            let lower_name = file_name.to_ascii_lowercase();
-            let norm_path = normalize_path_string(&entry.path());
-
-            let is_referenced =
-                referenced_filenames.contains(&lower_name) || referenced_paths.contains(&norm_path);
-
-            if is_referenced {
-                referenced_files += 1;
-            } else {
-                orphaned_files += 1;
-                reclaimable_bytes = reclaimable_bytes.saturating_add(file_size);
-            }
-        }
-
-        Ok(ArtworkCacheSummary {
-            total_bytes,
-            total_files,
-            referenced_files,
-            orphaned_files,
-            reclaimable_bytes,
-            missing_referenced_files,
-            cache_dir_exists: true,
-            cache_dir_path: self.artworks_dir.to_string_lossy().to_string(),
-            inspection_errors,
-            format_counts,
+            Ok(ArtworkCacheSummary {
+                total_bytes,
+                total_files,
+                referenced_files,
+                orphaned_files,
+                reclaimable_bytes,
+                missing_referenced_files,
+                cache_dir_exists: true,
+                cache_dir_path: artworks_dir.to_string_lossy().to_string(),
+                inspection_errors,
+                format_counts,
+            })
         })
+        .await
+        .map_err(|e| format!("Artwork summary task failed: {e}"))?
     }
 
     /// Finds all orphaned artwork files currently residing in `artworks_dir`.
@@ -425,58 +469,64 @@ impl ArtworkService {
         }
 
         let (referenced_filenames, referenced_paths) = self.fetch_referenced_identifiers().await?;
+        let artworks_dir = self.artworks_dir.clone();
 
-        let canonical_dir = self.artworks_dir.canonicalize().ok();
-        let read_dir = fs::read_dir(&self.artworks_dir)
-            .map_err(|e| format!("Failed to read cache directory: {e}"))?;
+        tokio::task::spawn_blocking(move || {
+            let canonical_dir = artworks_dir.canonicalize().ok();
+            let read_dir = fs::read_dir(&artworks_dir)
+                .map_err(|e| format!("Failed to read cache directory: {e}"))?;
 
-        let mut orphans = Vec::new();
+            let mut orphans = Vec::new();
 
-        for entry in read_dir.flatten() {
-            let file_type = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(_) => continue,
-            };
+            for entry in read_dir.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
 
-            if file_type.is_dir() {
-                continue;
-            }
+                if file_type.is_dir() {
+                    continue;
+                }
 
-            if file_type.is_symlink() {
-                if let (Some(canon_dir), Ok(canon_target)) =
-                    (&canonical_dir, entry.path().canonicalize())
-                {
-                    if !canon_target.starts_with(canon_dir) {
+                if file_type.is_symlink() {
+                    if let (Some(canon_dir), Ok(canon_target)) =
+                        (&canonical_dir, entry.path().canonicalize())
+                    {
+                        if !canon_target.starts_with(canon_dir) {
+                            continue;
+                        }
+                    } else {
                         continue;
                     }
-                } else {
+                }
+
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                if !is_valid_artwork_filename(&file_name) {
                     continue;
+                }
+
+                let lower_name = file_name.to_ascii_lowercase();
+                let norm_path = normalize_path_string(&entry.path());
+
+                if referenced_filenames.contains(&lower_name)
+                    || referenced_paths.contains(&norm_path)
+                {
+                    // Referenced
+                    continue;
+                }
+
+                if let Ok(meta) = entry.metadata() {
+                    orphans.push(OrphanedArtworkFile {
+                        path: entry.path(),
+                        filename: file_name,
+                        size_bytes: meta.len(),
+                    });
                 }
             }
 
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            if !is_valid_artwork_filename(&file_name) {
-                continue;
-            }
-
-            let lower_name = file_name.to_ascii_lowercase();
-            let norm_path = normalize_path_string(&entry.path());
-
-            if referenced_filenames.contains(&lower_name) || referenced_paths.contains(&norm_path) {
-                // Referenced
-                continue;
-            }
-
-            if let Ok(meta) = entry.metadata() {
-                orphans.push(OrphanedArtworkFile {
-                    path: entry.path(),
-                    filename: file_name,
-                    size_bytes: meta.len(),
-                });
-            }
-        }
-
-        Ok(orphans)
+            Ok(orphans)
+        })
+        .await
+        .map_err(|e| format!("Artwork orphan scan task failed: {e}"))?
     }
 
     /// Safely deletes orphaned artwork files.
@@ -545,25 +595,21 @@ impl ArtworkService {
                 hook(self.pool.clone(), orphan.filename.clone()).await;
             }
 
-            // Immediate re-check in SQLite to guard against concurrent imports
+            // Fail-closed validation: A candidate may ONLY be deleted when both
+            // database checks succeed (Ok(None)). Any Err(_) preserves the file
+            // and identifies which reference table check failed.
             let like_pattern = format!("%{}", orphan.filename);
-            let track_ref = sqlx::query("SELECT 1 FROM tracks WHERE artwork_uri LIKE ? LIMIT 1")
+            let track_ref = sqlx::query("SELECT 1 FROM tracks WHERE artwork_uri LIKE ?1 LIMIT 1")
                 .bind(&like_pattern)
                 .fetch_optional(&self.pool)
                 .await;
 
-            let playlist_ref =
-                sqlx::query("SELECT 1 FROM playlists WHERE artwork_uri LIKE ? LIMIT 1")
-                    .bind(&like_pattern)
-                    .fetch_optional(&self.pool)
-                    .await;
-
-            // Fail-closed validation: A candidate may ONLY be deleted when BOTH database
-            // checks succeed (Ok) and BOTH confirm no reference exists (None).
-            // Any Err(_) indicates unknown reference status and must fail closed (preserve the file).
-            let (track_has_ref, playlist_has_ref) = match (track_ref, playlist_ref) {
-                (Ok(t), Ok(p)) => (t.is_some(), p.is_some()),
-                (Err(e), _) => {
+            match track_ref {
+                Ok(Some(_)) => {
+                    skipped_files += 1;
+                    continue;
+                }
+                Err(e) => {
                     skipped_files += 1;
                     failures.push(format!(
                         "Database error checking track reference for {}: {e}",
@@ -571,7 +617,21 @@ impl ArtworkService {
                     ));
                     continue;
                 }
-                (_, Err(e)) => {
+                Ok(None) => {}
+            }
+
+            let playlist_ref =
+                sqlx::query("SELECT 1 FROM playlists WHERE artwork_uri LIKE ?1 LIMIT 1")
+                    .bind(&like_pattern)
+                    .fetch_optional(&self.pool)
+                    .await;
+
+            match playlist_ref {
+                Ok(Some(_)) => {
+                    skipped_files += 1;
+                    continue;
+                }
+                Err(e) => {
                     skipped_files += 1;
                     failures.push(format!(
                         "Database error checking playlist reference for {}: {e}",
@@ -579,37 +639,38 @@ impl ArtworkService {
                     ));
                     continue;
                 }
-            };
-
-            if track_has_ref || playlist_has_ref {
-                skipped_files += 1;
-                continue;
+                Ok(None) => {}
             }
 
-            // Path containment verification
-            if let Some(canon_dir) = &canonical_dir {
-                if let Ok(canon_file) = orphan.path.canonicalize() {
-                    if !canon_file.starts_with(canon_dir) {
-                        failures.push(format!(
-                            "Refusing to delete file outside cache: {}",
-                            orphan.path.display()
-                        ));
-                        continue;
-                    }
+            // Path containment verification and deletion off the async executor
+            let orphan_path = orphan.path.clone();
+            let canon_dir_opt = canonical_dir.clone();
+            let delete_outcome = tokio::task::spawn_blocking(move || {
+                if let Some(canon_dir) = &canon_dir_opt
+                    && let Ok(canon_file) = orphan_path.canonicalize()
+                    && !canon_file.starts_with(canon_dir)
+                {
+                    return Err(format!(
+                        "Refusing to delete file outside cache: {}",
+                        orphan_path.display()
+                    ));
                 }
-            }
+                match fs::remove_file(&orphan_path) {
+                    Ok(()) => Ok(true),
+                    Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+                    Err(e) => Err(format!("Failed to delete {}: {e}", orphan_path.display())),
+                }
+            })
+            .await;
 
-            match fs::remove_file(&orphan.path) {
-                Ok(()) => {
+            match delete_outcome {
+                Ok(Ok(true)) => {
                     deleted_files += 1;
                     reclaimed_bytes = reclaimed_bytes.saturating_add(orphan.size_bytes);
                 }
-                Err(e) if e.kind() == ErrorKind::NotFound => {
-                    // Already gone; ignore
-                }
-                Err(e) => {
-                    failures.push(format!("Failed to delete {}: {e}", orphan.path.display()));
-                }
+                Ok(Ok(false)) => {}
+                Ok(Err(err)) => failures.push(err),
+                Err(err) => failures.push(format!("Delete task failed: {err}")),
             }
         }
 
@@ -1685,5 +1746,18 @@ mod tests {
         let final_path = local_path_from_uri(&art_uri);
         assert!(final_path.exists());
         assert_eq!(fs::read(&final_path).unwrap(), pic_bytes);
+    }
+
+    #[test]
+    fn test_local_path_from_uri_preserves_posix_root_and_decodes_percent() {
+        assert_eq!(
+            local_path_from_uri("file:///Users/alice/Music/track%20one.flac"),
+            PathBuf::from("/Users/alice/Music/track one.flac")
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            local_path_from_uri("file:///C:/Music/Song%20Two.mp3"),
+            PathBuf::from("C:\\Music\\Song Two.mp3")
+        );
     }
 }

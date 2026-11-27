@@ -80,6 +80,7 @@ pub enum ImportStatus {
 #[serde(rename_all = "camelCase")]
 pub struct ImportJob {
     pub id: String,
+    pub source: String,
     pub playlist_id: String,
     pub playlist_name: String,
     pub total: usize,
@@ -90,7 +91,7 @@ pub struct ImportJob {
     pub current_track: Option<String>,
     pub status: ImportStatus,
     pub error: Option<String>,
-    /// Honest note about tracks Spotify listed but Cavia could not import.
+    /// Honest note about tracks the provider listed but Cavia could not import.
     pub notice: Option<String>,
     pub created_at_ms: u64,
 }
@@ -116,6 +117,10 @@ impl SpotifyImportService {
             .build()
             .map_err(|e| format!("Could not create HTTP client for Spotify: {e}"))?;
         Ok(Self { client })
+    }
+
+    pub fn with_client(client: reqwest::Client) -> Self {
+        Self { client }
     }
 
     pub async fn fetch_playlist(&self, url: &str) -> Result<SpotifyPlaylist, String> {
@@ -629,16 +634,206 @@ pub struct ImportManager {
     controls: Arc<Mutex<HashMap<String, JobControl>>>,
     pool: SqlitePool,
     ytmusic: Arc<crate::services::ytmusic::YtMusicService>,
+    client: reqwest::Client,
 }
 
 impl ImportManager {
     pub fn new(pool: SqlitePool, ytmusic: Arc<crate::services::ytmusic::YtMusicService>) -> Self {
+        let client = reqwest::Client::builder()
+            .user_agent(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0",
+            )
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
             jobs: Arc::new(RwLock::new(HashMap::new())),
             controls: Arc::new(Mutex::new(HashMap::new())),
             pool,
             ytmusic,
+            client,
         }
+    }
+
+    async fn cleanup_job_control(&self, job_id: &str) {
+        let mut controls_guard = self.controls.lock().await;
+        controls_guard.remove(job_id);
+    }
+
+    /// Auto-detects Spotify vs YouTube Music playlist URLs and starts the import.
+    pub async fn start_playlist_import(
+        &self,
+        app: AppHandle,
+        url: &str,
+    ) -> Result<ImportJob, String> {
+        self.start_playlist_import_internal(Some(app), url).await
+    }
+
+    pub async fn start_playlist_import_internal(
+        &self,
+        app: Option<AppHandle>,
+        url: &str,
+    ) -> Result<ImportJob, String> {
+        if playlist_id_from_url(url).is_some() {
+            self.start_import_internal(app, url).await
+        } else if crate::services::ytmusic::playlist_id_from_url(url).is_some() {
+            self.start_ytmusic_import_internal(app, url).await
+        } else {
+            Err("Paste a public Spotify or YouTube Music playlist link.".into())
+        }
+    }
+
+    /// Starts a YouTube Music playlist import. All readable tracks carry exact video ids,
+    /// so they are immediately playable while a background worker matches local library copies
+    /// and queues cloud sync entries.
+    pub async fn start_ytmusic_import(
+        &self,
+        app: AppHandle,
+        url: &str,
+    ) -> Result<ImportJob, String> {
+        self.start_ytmusic_import_internal(Some(app), url).await
+    }
+
+    pub async fn start_ytmusic_import_internal(
+        &self,
+        app: Option<AppHandle>,
+        url: &str,
+    ) -> Result<ImportJob, String> {
+        let remote = self.ytmusic.fetch_playlist(url).await?;
+        if remote.tracks.is_empty() {
+            return Err("YouTube Music returned a playlist with no readable tracks".into());
+        }
+
+        let notice = if remote.truncated {
+            Some(format!(
+                "YouTube Music lists more than {} tracks. Cavia imported the first {}.",
+                MAX_IMPORT_TRACKS,
+                remote.tracks.len()
+            ))
+        } else if remote.unreadable_tracks > 0 {
+            Some(format!(
+                "{} YouTube Music tracks could not be read and were left out of this import.",
+                remote.unreadable_tracks
+            ))
+        } else {
+            None
+        };
+
+        let desc = if remote.description.is_empty() {
+            "Imported from YouTube Music".to_string()
+        } else {
+            format!("{} (Imported from YouTube Music)", remote.description)
+        };
+
+        let playlist =
+            crate::services::library::create_playlist(&self.pool, &remote.title, &desc).await?;
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+        for (pos, track) in remote.tracks.iter().enumerate() {
+            let entry_id = format!("plt-{}", Uuid::new_v4());
+            let cloud_track_id = format!("youtube_music:{}", track.video_id);
+            sqlx::query(
+                r#"
+                INSERT INTO playlist_tracks (
+                    id, playlist_id, track_id, cloud_track_id, title, artist, album, duration_ms,
+                    position, provider_id, provider_track_id, artwork_uri
+                ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, 'youtube_music', ?, ?)
+                "#,
+            )
+            .bind(&entry_id)
+            .bind(&playlist.id)
+            .bind(&cloud_track_id)
+            .bind(&track.title)
+            .bind(&track.artist)
+            .bind(&track.album)
+            .bind(track.duration_ms)
+            .bind(pos as i64)
+            .bind(&track.video_id)
+            .bind(track.artwork_url.as_deref())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to insert track: {e}"))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| format!("Failed to commit tracks: {e}"))?;
+
+        if let Some(ref a) = app {
+            let _ = a.emit("playlist://created", &playlist.id);
+        }
+
+        let created_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let job_id = format!("imp-{}", Uuid::new_v4());
+        let job = ImportJob {
+            id: job_id.clone(),
+            source: "youtube_music".to_string(),
+            playlist_id: playlist.id.clone(),
+            playlist_name: remote.title.clone(),
+            total: remote.tracks.len(),
+            processed: 0,
+            matched_local: 0,
+            matched_online: 0,
+            skipped: 0,
+            current_track: None,
+            status: ImportStatus::Running,
+            error: None,
+            notice,
+            created_at_ms,
+        };
+
+        let paused = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(Notify::new());
+
+        {
+            let mut jobs_guard = self.jobs.write().await;
+            jobs_guard.insert(job_id.clone(), job.clone());
+        }
+        {
+            let mut controls_guard = self.controls.lock().await;
+            controls_guard.insert(
+                job_id.clone(),
+                JobControl {
+                    paused: paused.clone(),
+                    cancelled: cancelled.clone(),
+                    notify: notify.clone(),
+                },
+            );
+        }
+
+        if let Some(ref a) = app {
+            let _ = a.emit("import://progress", &job);
+        }
+
+        let manager_clone = self.clone();
+        let job_id_clone = job_id.clone();
+        let playlist_id_clone = playlist.id.clone();
+
+        tokio::spawn(async move {
+            manager_clone
+                .run_matching_worker(
+                    app,
+                    job_id_clone,
+                    playlist_id_clone,
+                    true,
+                    paused,
+                    cancelled,
+                    notify,
+                )
+                .await;
+        });
+
+        Ok(job)
     }
 
     /// Fetches playlist metadata, inserts every readable track into the
@@ -654,7 +849,7 @@ impl ImportManager {
         app: Option<AppHandle>,
         url: &str,
     ) -> Result<ImportJob, String> {
-        let service = SpotifyImportService::new()?;
+        let service = SpotifyImportService::with_client(self.client.clone());
         let remote = service.fetch_playlist(url).await?;
 
         if remote.tracks.is_empty() {
@@ -735,6 +930,7 @@ impl ImportManager {
         let job_id = format!("imp-{}", Uuid::new_v4());
         let job = ImportJob {
             id: job_id.clone(),
+            source: "spotify".to_string(),
             playlist_id: playlist.id.clone(),
             playlist_name: remote.name.clone(),
             total: remote.tracks.len(),
@@ -784,6 +980,7 @@ impl ImportManager {
                     app,
                     job_id_clone,
                     playlist_id_clone,
+                    false,
                     paused,
                     cancelled,
                     notify,
@@ -864,6 +1061,8 @@ impl ImportManager {
         jobs_guard.retain(|_, job| {
             job.status == ImportStatus::Running || job.status == ImportStatus::Paused
         });
+        let mut controls_guard = self.controls.lock().await;
+        controls_guard.retain(|id, _| jobs_guard.contains_key(id));
     }
 
     pub async fn remove_job(&self, job_id: &str) -> Result<(), String> {
@@ -906,11 +1105,13 @@ impl ImportManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_matching_worker(
         &self,
         app: Option<AppHandle>,
         job_id: String,
         playlist_id: String,
+        pre_resolved_ytmusic: bool,
         paused: Arc<AtomicBool>,
         cancelled: Arc<AtomicBool>,
         notify: Arc<Notify>,
@@ -920,23 +1121,44 @@ impl ImportManager {
             id: String,
             title: String,
             artist: String,
+            album: String,
+            duration_ms: i64,
+            position: i64,
+            provider_track_id: Option<String>,
         }
 
-        let pending = sqlx::query_as::<_, PendingTrack>(
-            r#"
-            SELECT id, title, artist
-            FROM playlist_tracks
-            WHERE playlist_id = ?
-              AND track_id IS NULL
-              AND provider_track_id IS NULL
-              AND (provider_id = 'pending' OR provider_id IS NULL)
-            ORDER BY position ASC
-            "#,
-        )
-        .bind(&playlist_id)
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
+        let pending = if pre_resolved_ytmusic {
+            sqlx::query_as::<_, PendingTrack>(
+                r#"
+                SELECT id, title, artist, album, duration_ms, position, provider_track_id
+                FROM playlist_tracks
+                WHERE playlist_id = ?
+                  AND track_id IS NULL
+                  AND provider_id = 'youtube_music'
+                ORDER BY position ASC
+                "#,
+            )
+            .bind(&playlist_id)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default()
+        } else {
+            sqlx::query_as::<_, PendingTrack>(
+                r#"
+                SELECT id, title, artist, album, duration_ms, position, provider_track_id
+                FROM playlist_tracks
+                WHERE playlist_id = ?
+                  AND track_id IS NULL
+                  AND provider_track_id IS NULL
+                  AND (provider_id = 'pending' OR provider_id IS NULL)
+                ORDER BY position ASC
+                "#,
+            )
+            .bind(&playlist_id)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default()
+        };
 
         for track in pending {
             if cancelled.load(Ordering::SeqCst) {
@@ -948,6 +1170,7 @@ impl ImportManager {
                         let _ = a.emit("import://progress", &*job);
                     }
                 }
+                self.cleanup_job_control(&job_id).await;
                 return;
             }
 
@@ -961,12 +1184,14 @@ impl ImportManager {
                             let _ = a.emit("import://progress", &*job);
                         }
                     }
+                    self.cleanup_job_control(&job_id).await;
                     return;
                 }
                 notify.notified().await;
             }
 
             if cancelled.load(Ordering::SeqCst) {
+                self.cleanup_job_control(&job_id).await;
                 return;
             }
 
@@ -990,13 +1215,52 @@ impl ImportManager {
             .await;
 
             if let Some(local_id) = local_id {
-                let _ = sqlx::query(
-                    "UPDATE playlist_tracks SET track_id = ?, provider_id = NULL WHERE id = ?",
-                )
-                .bind(&local_id)
-                .bind(&track.id)
-                .execute(&self.pool)
-                .await;
+                if let Ok(mut tx) = self.pool.begin().await {
+                    let local_meta: Option<(String, String, String, i64, Option<String>)> =
+                        sqlx::query_as(
+                            "SELECT title, artist, album, duration_ms, content_hash FROM tracks WHERE id = ? AND is_deleted = 0",
+                        )
+                        .bind(&local_id)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .ok()
+                        .flatten();
+
+                    if let Some((l_title, l_artist, l_album, l_duration, l_hash)) = local_meta {
+                        let _ = sqlx::query(
+                            r#"
+                            UPDATE playlist_tracks
+                            SET track_id = ?,
+                                cloud_track_id = ?,
+                                content_hash = ?,
+                                provider_id = NULL,
+                                provider_track_id = NULL
+                            WHERE id = ?
+                            "#,
+                        )
+                        .bind(&local_id)
+                        .bind(&local_id)
+                        .bind(&l_hash)
+                        .bind(&track.id)
+                        .execute(&mut *tx)
+                        .await;
+
+                        let _ = crate::services::sync::outbox::OutboxService::record_track_add(
+                            &mut *tx,
+                            &playlist_id,
+                            &track.id,
+                            &local_id,
+                            &l_title,
+                            &l_artist,
+                            &l_album,
+                            l_duration,
+                            l_hash.as_deref(),
+                            track.position,
+                        )
+                        .await;
+                        let _ = tx.commit().await;
+                    }
+                }
 
                 let mut jobs_guard = self.jobs.write().await;
                 if let Some(job) = jobs_guard.get_mut(&job_id) {
@@ -1009,7 +1273,41 @@ impl ImportManager {
                 continue;
             }
 
-            // 2. Try YouTube Music search (video_id ONLY — zero artwork download, zero lyrics overhead)
+            // 2. For YouTube Music imports, the track already carries its exact video_id.
+            // Just record sync outbox and update job counters without re-searching.
+            if pre_resolved_ytmusic {
+                if let Some(ref vid) = track.provider_track_id {
+                    if let Ok(mut tx) = self.pool.begin().await {
+                        let cloud_track_id = format!("youtube_music:{vid}");
+                        let _ = crate::services::sync::outbox::OutboxService::record_track_add(
+                            &mut *tx,
+                            &playlist_id,
+                            &track.id,
+                            &cloud_track_id,
+                            &track.title,
+                            &track.artist,
+                            &track.album,
+                            track.duration_ms,
+                            None,
+                            track.position,
+                        )
+                        .await;
+                        let _ = tx.commit().await;
+                    }
+                }
+
+                let mut jobs_guard = self.jobs.write().await;
+                if let Some(job) = jobs_guard.get_mut(&job_id) {
+                    job.matched_online += 1;
+                    job.processed += 1;
+                    if let Some(ref a) = app {
+                        let _ = a.emit("import://progress", &*job);
+                    }
+                }
+                continue;
+            }
+
+            // 3. Try YouTube Music search for Spotify tracks
             let query = if track.artist.is_empty() {
                 track.title.clone()
             } else {
@@ -1018,20 +1316,47 @@ impl ImportManager {
 
             let candidates = self.ytmusic.search(&query).await.unwrap_or_default();
             if let Some(found) = best_match(&candidates, &track.title, &track.artist) {
-                let _ = sqlx::query(
-                    r#"
-                    UPDATE playlist_tracks
-                    SET provider_id = 'youtube_music',
-                        provider_track_id = ?,
-                        album = CASE WHEN album = '' OR album IS NULL THEN ? ELSE album END
-                    WHERE id = ?
-                    "#,
-                )
-                .bind(&found.video_id)
-                .bind(&found.album)
-                .bind(&track.id)
-                .execute(&self.pool)
-                .await;
+                if let Ok(mut tx) = self.pool.begin().await {
+                    let cloud_track_id = format!("youtube_music:{}", found.video_id);
+                    let resolved_album = if track.album.is_empty() {
+                        &found.album
+                    } else {
+                        &track.album
+                    };
+                    let _ = sqlx::query(
+                        r#"
+                        UPDATE playlist_tracks
+                        SET provider_id = 'youtube_music',
+                            provider_track_id = ?,
+                            cloud_track_id = ?,
+                            artwork_uri = COALESCE(artwork_uri, ?),
+                            album = CASE WHEN album = '' OR album IS NULL THEN ? ELSE album END
+                        WHERE id = ?
+                        "#,
+                    )
+                    .bind(&found.video_id)
+                    .bind(&cloud_track_id)
+                    .bind(found.artwork_url.as_deref())
+                    .bind(&found.album)
+                    .bind(&track.id)
+                    .execute(&mut *tx)
+                    .await;
+
+                    let _ = crate::services::sync::outbox::OutboxService::record_track_add(
+                        &mut *tx,
+                        &playlist_id,
+                        &track.id,
+                        &cloud_track_id,
+                        &track.title,
+                        &track.artist,
+                        resolved_album,
+                        track.duration_ms,
+                        None,
+                        track.position,
+                    )
+                    .await;
+                    let _ = tx.commit().await;
+                }
 
                 let mut jobs_guard = self.jobs.write().await;
                 if let Some(job) = jobs_guard.get_mut(&job_id) {
@@ -1077,6 +1402,7 @@ impl ImportManager {
                 }
             }
         }
+        self.cleanup_job_control(&job_id).await;
         if let Some(ref a) = app {
             let _ = a.emit("playlist://updated", &playlist_id);
         }

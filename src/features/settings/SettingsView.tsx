@@ -5,13 +5,16 @@ import {
   CheckCircle2,
   Cloud,
   Database,
+  DownloadCloud,
   HardDrive,
   Info,
   Layers,
   Lock,
   LogOut,
+  Minus,
   Music2,
   Palette,
+  Plus,
   RefreshCw,
   ShieldCheck,
   Sliders,
@@ -26,7 +29,8 @@ import { Button } from '../../components/Button';
 import { Modal } from '../../components/Modal';
 import type { PlatformHealth } from '../../lib/platform';
 import type { MotionSetting } from '../../lib/motion';
-import type { SyncAccountStatus, SyncConfigDTO } from '../../lib/types';
+import type { PreloadStatusSnapshot, SyncAccountStatus, SyncConfigDTO } from '../../lib/types';
+import { MAX_PRELOAD_TARGET } from '../../lib/connect';
 import {
   getArtworkCacheSummary,
   cleanOrphanedArtwork,
@@ -37,6 +41,10 @@ import {
   type ArtworkRecoveryResult,
 } from '../../lib/artwork';
 import { isNativeApp } from '../../lib/library';
+import {
+  formatSmtcDiagnostic,
+  getPersistenceBadgeConfig,
+} from '../../lib/diagnostics.js';
 import {
   getSyncStatus,
   syncSignup,
@@ -56,6 +64,8 @@ interface SettingsViewProps {
   motion: MotionSetting;
   onMotionChange: (motion: MotionSetting) => void;
   onSyncConfigurationChanged: (enabled: boolean) => void;
+  preloadStatus?: PreloadStatusSnapshot | null;
+  onChangePreloadTarget?: (target: number) => void;
 }
 
 type SettingsSection = 'appearance' | 'audio' | 'library' | 'account' | 'about';
@@ -75,6 +85,8 @@ export const SettingsView = memo(function SettingsView({
   motion,
   onMotionChange,
   onSyncConfigurationChanged,
+  preloadStatus,
+  onChangePreloadTarget,
 }: SettingsViewProps) {
   const [activeSection, setActiveSection] = useState<SettingsSection>('appearance');
 
@@ -434,8 +446,11 @@ export const SettingsView = memo(function SettingsView({
               <div className="banner-content">
                 <strong>Playback engine</strong>
                 <p>
-                  Controls stay disabled until a real audio backend initializes. Windows and macOS use the
-                  native Rodio path; mobile engines are not integrated in this build.
+                  {health?.platform === 'android'
+                    ? 'Android uses the native Media3 foreground engine when integrated.'
+                    : health?.platform === 'ios'
+                      ? 'iOS native AVPlayer backend integration is not enabled in this build.'
+                      : 'Controls stay disabled until a real audio backend initializes. Desktop platforms use the native Rodio audio engine.'}
                 </p>
               </div>
             </div>
@@ -475,7 +490,11 @@ export const SettingsView = memo(function SettingsView({
                                 : 'STANDBY'}
                   </Badge>
                   <span className="text-muted-xs">
-                    {health?.smtc_status === 'ready' ? 'Media controls active' : 'Media controls unavailable'}
+                    {formatSmtcDiagnostic(
+                      health?.smtc_status,
+                      health?.smtc_error,
+                      health?.system_media_controls
+                    )}
                   </span>
                 </div>
               </div>
@@ -485,7 +504,15 @@ export const SettingsView = memo(function SettingsView({
                   <Volume2 size={18} className="card-icon" />
                   <div>
                     <h3>Output</h3>
-                    <p>Direct WASAPI / CoreAudio path.</p>
+                    <p>
+                      {health?.platform === 'android'
+                        ? 'Android Media3 audio pipeline.'
+                        : health?.platform === 'darwin'
+                          ? 'Direct CoreAudio path.'
+                          : health?.platform === 'windows'
+                            ? 'Direct WASAPI path.'
+                            : 'Native audio output path.'}
+                    </p>
                   </div>
                 </div>
                 <div className="setting-status-line">
@@ -503,34 +530,71 @@ export const SettingsView = memo(function SettingsView({
                   </div>
                 </div>
                 <div className="setting-status-line">
-                  <Badge
-                    variant={
-                      health?.persistence_status === 'healthy'
-                        ? 'ready'
-                        : health?.persistence_status === 'write_failed' ||
-                            health?.persistence_status === 'worker_unavailable'
-                          ? 'vermilion'
-                          : 'warn'
-                    }
-                    size="md"
-                  >
-                    {health?.persistence_status === 'healthy'
-                      ? 'PERSISTENCE READY'
-                      : health?.persistence_status === 'write_pending'
-                        ? 'SAVING'
-                        : health?.persistence_status === 'write_failed'
-                          ? 'SAVE FAILED'
-                          : health?.persistence_status === 'worker_unavailable'
-                            ? 'UNAVAILABLE'
-                            : health?.persistence_status === 'shutting_down'
-                              ? 'SAVING BEFORE EXIT'
-                              : 'PERSISTENCE READY'}
-                  </Badge>
+                  {(() => {
+                    const persistenceBadge = getPersistenceBadgeConfig(health?.persistence_status);
+                    return (
+                      <Badge variant={persistenceBadge.variant} size="md">
+                        {persistenceBadge.label}
+                      </Badge>
+                    );
+                  })()}
                   <span className="text-muted-xs">
                     {health?.persistence_error ? health.persistence_error : 'Non-blocking WAL writes'}
                   </span>
                 </div>
               </div>
+
+              {onChangePreloadTarget && (
+                <div className="settings-card">
+                  <div className="card-head">
+                    <DownloadCloud size={18} className="card-icon" />
+                    <div>
+                      <h3>Queue preload window</h3>
+                      <p>
+                        Sequential verified cache for upcoming tracks (0–20). Set to 0 to disable and hide the Now Playing pill.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="setting-status-line">
+                    <div className="queue-preload-stepper">
+                      <button
+                        type="button"
+                        className="preload-step-btn"
+                        disabled={!preloadStatus || preloadStatus.targetCount <= 0}
+                        onClick={() =>
+                          onChangePreloadTarget(
+                            Math.max(0, (preloadStatus?.targetCount ?? 0) - 1)
+                          )
+                        }
+                        aria-label="Decrease preload count"
+                      >
+                        <Minus size={12} />
+                      </button>
+                      <span className="queue-preload-num">
+                        {preloadStatus?.targetCount ?? 10} tracks
+                      </span>
+                      <button
+                        type="button"
+                        className="preload-step-btn"
+                        disabled={(preloadStatus?.targetCount ?? 10) >= MAX_PRELOAD_TARGET}
+                        onClick={() =>
+                          onChangePreloadTarget(
+                            Math.min(MAX_PRELOAD_TARGET, (preloadStatus?.targetCount ?? 0) + 1)
+                          )
+                        }
+                        aria-label="Increase preload count"
+                      >
+                        <Plus size={12} />
+                      </button>
+                    </div>
+                    <span className="text-muted-xs">
+                      {preloadStatus?.enabled
+                        ? `${preloadStatus.readyCount}/${preloadStatus.targetCount} ready (${formatBytes(preloadStatus.cacheUsedBytes)} used)`
+                        : 'Disabled'}
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
           </section>
 

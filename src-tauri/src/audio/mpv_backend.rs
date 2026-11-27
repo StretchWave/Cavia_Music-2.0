@@ -1,7 +1,8 @@
-//! Evaluated desktop libmpv backend adapter.
+//! Optional desktop libmpv backend placeholder.
 //!
-//! Provides libmpv playback integration via rsmpv when compiled with the
-//! `desktop-mpv` Cargo feature and linked with packaged mpv-2 dynamic libraries.
+//! `rsmpv` integration is not yet wired to libmpv playback calls in this build;
+//! per `AGENTS.md`, this adapter honestly reports `BackendUnavailable` rather
+//! than simulating playback.
 
 use super::{AudioBackend, AudioCapabilities, PlaybackError, PlaybackStatus};
 
@@ -14,66 +15,38 @@ pub struct MpvBackend {
 
 impl MpvBackend {
     pub fn new() -> Result<Self, PlaybackError> {
-        #[cfg(feature = "desktop-mpv")]
-        {
-            // libmpv initialization requires runtime mpv-2.dll discovery
-            Ok(Self {
-                status: PlaybackStatus::Idle,
-                volume: 0.85,
-                speed: 1.0,
-                capabilities: AudioCapabilities {
-                    local_files: true,
-                    progressive_http: true,
-                    hls: true,
-                    dash: true,
-                    background_playback: true,
-                    system_media_controls: false,
-                    gapless: true,
-                    crossfade: true,
-                },
-            })
-        }
-        #[cfg(not(feature = "desktop-mpv"))]
-        {
-            Err(PlaybackError::BackendUnavailable(
-                "libmpv backend requires compiling with the 'desktop-mpv' feature".into(),
-            ))
-        }
+        let _ = (PlaybackStatus::Idle, 0.85_f32, 1.0_f32);
+        Err(PlaybackError::BackendUnavailable(
+            "libmpv (rsmpv) playback backend is not integrated in this build".into(),
+        ))
     }
 }
 
 impl AudioBackend for MpvBackend {
     fn name(&self) -> &'static str {
-        "desktop_mpv"
+        "desktop_mpv_unintegrated"
     }
 
     fn load(&mut self, _file_path: &str, _start_ms: u64) -> Result<(), PlaybackError> {
-        #[cfg(feature = "desktop-mpv")]
-        {
-            self.status = PlaybackStatus::Playing;
-            Ok(())
-        }
-        #[cfg(not(feature = "desktop-mpv"))]
-        {
-            Err(PlaybackError::BackendUnavailable(
-                "desktop-mpv feature not active".into(),
-            ))
-        }
+        self.status = PlaybackStatus::Error;
+        Err(PlaybackError::BackendUnavailable(
+            "libmpv (rsmpv) playback backend is not integrated in this build".into(),
+        ))
     }
 
     fn play(&mut self) -> Result<(), PlaybackError> {
-        self.status = PlaybackStatus::Playing;
-        Ok(())
+        self.status = PlaybackStatus::Error;
+        Err(PlaybackError::BackendUnavailable(
+            "libmpv (rsmpv) playback backend is not integrated in this build".into(),
+        ))
     }
 
     fn pause(&mut self) -> Result<(), PlaybackError> {
-        self.status = PlaybackStatus::Paused;
         Ok(())
     }
 
     fn resume(&mut self) -> Result<(), PlaybackError> {
-        self.status = PlaybackStatus::Playing;
-        Ok(())
+        self.play()
     }
 
     fn stop(&mut self) -> Result<(), PlaybackError> {
@@ -82,7 +55,9 @@ impl AudioBackend for MpvBackend {
     }
 
     fn seek(&mut self, _position_ms: u64) -> Result<(), PlaybackError> {
-        Ok(())
+        Err(PlaybackError::BackendUnavailable(
+            "libmpv (rsmpv) playback backend is not integrated in this build".into(),
+        ))
     }
 
     fn set_volume(&mut self, volume: f32) -> Result<(), PlaybackError> {
@@ -113,5 +88,9 @@ impl AudioBackend for MpvBackend {
 
     fn capabilities(&self) -> AudioCapabilities {
         self.capabilities.clone()
+    }
+
+    fn is_device_ready(&self) -> bool {
+        false
     }
 }

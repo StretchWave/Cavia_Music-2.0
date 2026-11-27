@@ -245,34 +245,42 @@ impl LrclibClient {
             return Ok(LrclibResult::NotFound);
         }
 
-        let mut gate = self.gate.lock().await;
-
-        let now = Instant::now();
-        let mut wait = Duration::ZERO;
-        if let Some(prev) = gate.last_request {
-            wait = wait.max(MIN_REQUEST_SPACING.saturating_sub(now.duration_since(prev)));
-        }
-        if let Some(until) = gate.cooldown_until {
-            if until > now {
-                wait = wait.max(until.duration_since(now));
-            }
-        }
-        if wait > MAX_COOLDOWN_WAIT {
-            let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
-            let error = match &gate.cooldown_error {
-                Some(LrclibError::ServiceUnavailable { .. }) => LrclibError::ServiceUnavailable {
-                    retry_after_s: Some(seconds),
-                },
-                _ => LrclibError::RateLimited {
-                    retry_after_s: Some(seconds),
-                },
+        // Wait outside the mutex so sleeping and network I/O do not serialize callers.
+        loop {
+            let wait = {
+                let mut gate = self.gate.lock().await;
+                let now = Instant::now();
+                let mut wait = Duration::ZERO;
+                if let Some(prev) = gate.last_request {
+                    wait = wait.max(MIN_REQUEST_SPACING.saturating_sub(now.duration_since(prev)));
+                }
+                if let Some(until) = gate.cooldown_until
+                    && until > now
+                {
+                    wait = wait.max(until.duration_since(now));
+                }
+                if wait > MAX_COOLDOWN_WAIT {
+                    let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+                    let error = match &gate.cooldown_error {
+                        Some(LrclibError::ServiceUnavailable { .. }) => {
+                            LrclibError::ServiceUnavailable {
+                                retry_after_s: Some(seconds),
+                            }
+                        }
+                        _ => LrclibError::RateLimited {
+                            retry_after_s: Some(seconds),
+                        },
+                    };
+                    return Err(error);
+                }
+                if wait.is_zero() {
+                    gate.last_request = Some(now);
+                    break;
+                }
+                wait
             };
-            return Err(error);
-        }
-        if !wait.is_zero() {
             tokio::time::sleep(wait).await;
         }
-        gate.last_request = Some(Instant::now());
 
         let url = format!("{}/api/get", self.base_url.trim_end_matches('/'));
 
@@ -289,10 +297,10 @@ impl LrclibClient {
 
         // Omit durations outside LRCLIB's accepted range instead of provoking
         // an HTTP 400 for long tracks. Title and artist remain sufficient.
-        if let Some(dur) = duration_s {
-            if (LRCLIB_MIN_DURATION_S..=LRCLIB_MAX_DURATION_S).contains(&dur) {
-                query_params.push(("duration", dur.to_string()));
-            }
+        if let Some(dur) = duration_s
+            && (LRCLIB_MIN_DURATION_S..=LRCLIB_MAX_DURATION_S).contains(&dur)
+        {
+            query_params.push(("duration", dur.to_string()));
         }
 
         let resp = self
@@ -360,12 +368,14 @@ impl LrclibClient {
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             let error = LrclibError::RateLimited { retry_after_s };
+            let mut gate = self.gate.lock().await;
             apply_cooldown(&mut gate, &error, DEFAULT_RATE_LIMIT_COOLDOWN);
             return Err(error);
         }
 
         if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
             let error = LrclibError::ServiceUnavailable { retry_after_s };
+            let mut gate = self.gate.lock().await;
             apply_cooldown(&mut gate, &error, DEFAULT_UNAVAILABLE_COOLDOWN);
             return Err(error);
         }
@@ -464,16 +474,19 @@ fn primary_artist_raw(artist: &str) -> Option<String> {
         " vs. ",
         " vs ",
     ];
-    let earliest = SEPARATORS
-        .iter()
-        .filter_map(|separator| {
-            artist
-                .to_lowercase()
-                .find(&separator.to_lowercase())
-                .map(|index| (index, separator.len()))
+    // Search on UTF-8 char boundaries of `artist` rather than slicing `artist`
+    // with byte offsets computed on `artist.to_lowercase()` (which can differ).
+    let earliest = artist
+        .char_indices()
+        .filter_map(|(idx, _)| {
+            let tail = &artist[idx..];
+            SEPARATORS.iter().find_map(|separator| {
+                let slice = tail.get(..separator.len())?;
+                slice.eq_ignore_ascii_case(separator).then_some(idx)
+            })
         })
         .min();
-    let (index, _) = earliest?;
+    let index = earliest?;
     let primary = artist[..index].trim();
     if primary.is_empty() || primary.len() == artist.trim().len() {
         None
@@ -1455,5 +1468,22 @@ mod tests {
         .expect("gate remained locked after cancellation");
 
         assert!(matches!(result, Ok(LrclibResult::Found { .. })));
+    }
+
+    #[test]
+    fn test_primary_artist_raw_handles_multibyte_utf8() {
+        assert_eq!(
+            primary_artist_raw("İbrahim Tatlıses feat. Sibel Can").as_deref(),
+            Some("İbrahim Tatlıses")
+        );
+        assert_eq!(
+            primary_artist_raw("Björk & Jónsi").as_deref(),
+            Some("Björk")
+        );
+        assert_eq!(
+            primary_artist_raw("宇多田ヒカル, 椎名林檎").as_deref(),
+            Some("宇多田ヒカル")
+        );
+        assert_eq!(primary_artist_raw("Solo Artist"), None);
     }
 }

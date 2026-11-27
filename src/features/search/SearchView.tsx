@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import {
   ArrowLeft,
   Disc3,
+  ListPlus,
+  ListStart,
   Loader2,
   Music2,
   Play,
@@ -22,6 +24,7 @@ import {
   formatArtworkUri,
   getRecentPlays,
 } from '../../lib/library';
+import { getAlbumTracks, getArtistTracks, ytMusicTrackToTrack } from '../../lib/trackMatching';
 import {
   formatOnlineDuration,
   isOnlineSearchAvailable,
@@ -43,6 +46,7 @@ export interface SearchViewProps {
   onPlayAlbum?: (album: Album) => void;
   onPlayArtist?: (artist: Artist) => void;
   onPlayNext?: (trackId: string) => void;
+  onPlayNextTrack?: (track: Track) => void;
   onPlayOnlineTrack?: (track: YtMusicTrack) => Promise<void>;
   historyRevision?: number;
   allTracks?: Track[];
@@ -63,6 +67,7 @@ export function SearchView({
   onPlayAlbum,
   onPlayArtist,
   onPlayNext,
+  onPlayNextTrack,
   onPlayOnlineTrack,
   historyRevision = 0,
   allTracks = [],
@@ -117,7 +122,7 @@ export function SearchView({
     return () => {
       active = false;
     };
-  }, [isBackendReady, currentTrackId, historyRevision]);
+  }, [isBackendReady, historyRevision]);
 
   const handlePlayRecent = (trackId: string) => {
     const entry = recentPlays.find((track) => track.id === trackId);
@@ -192,24 +197,15 @@ export function SearchView({
     [recentPlays, allTracks]
   );
 
-  const albumTracks = useMemo(() => {
-    if (!selectedAlbum) return [];
-    return allTracks.filter(
-      (track) =>
-        track.album.toLowerCase() === selectedAlbum.title.toLowerCase() &&
-        (track.albumArtist?.toLowerCase() === selectedAlbum.artist.toLowerCase() ||
-          track.artist.toLowerCase() === selectedAlbum.artist.toLowerCase())
-    );
-  }, [allTracks, selectedAlbum]);
+  const albumTracks = useMemo(
+    () => (selectedAlbum ? getAlbumTracks(allTracks, selectedAlbum) : []),
+    [allTracks, selectedAlbum]
+  );
 
-  const artistTracks = useMemo(() => {
-    if (!selectedArtist) return [];
-    return allTracks.filter(
-      (track) =>
-        track.artist.toLowerCase() === selectedArtist.name.toLowerCase() ||
-        track.albumArtist?.toLowerCase() === selectedArtist.name.toLowerCase()
-    );
-  }, [allTracks, selectedArtist]);
+  const artistTracks = useMemo(
+    () => (selectedArtist ? getArtistTracks(allTracks, selectedArtist) : []),
+    [allTracks, selectedArtist]
+  );
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Enter') {
@@ -524,35 +520,62 @@ export function SearchView({
             <div className="playlist-rows">
               {onlineResults.map((track) => {
                 const isResolving = playingOnlineId === track.videoId;
+                const mappedTrack = ytMusicTrackToTrack(track);
                 return (
-                  <button
-                    key={track.videoId}
-                    type="button"
-                    className="playlist-row"
-                    onClick={() => void handlePlayOnline(track)}
-                    disabled={playingOnlineId !== null}
-                    aria-label={`Play ${track.title} by ${track.artist} from YouTube Music`}
-                  >
-                    <ArtworkImage
-                      src={track.artworkUrl}
-                      alt=""
-                      className="yt-result-art"
-                      fallbackIcon={<Music2 size={16} />}
-                    />
-                    <span className="playlist-row-copy">
-                      <strong>{track.title}</strong>
-                      <span>
-                        {track.artist || 'Unknown artist'}
-                        {track.album ? ` · ${track.album}` : ''}
+                  <div key={track.videoId} className="playlist-row-wrapper yt-online-row-wrapper">
+                    <button
+                      type="button"
+                      className="playlist-row"
+                      onClick={() => void handlePlayOnline(track)}
+                      disabled={playingOnlineId !== null}
+                      aria-label={`Play ${track.title} by ${track.artist} from YouTube Music`}
+                    >
+                      <ArtworkImage
+                        src={track.artworkUrl}
+                        alt=""
+                        className="yt-result-art"
+                        fallbackIcon={<Music2 size={16} />}
+                      />
+                      <span className="playlist-row-copy">
+                        <strong>{track.title}</strong>
+                        <span>
+                          {track.artist || 'Unknown artist'}
+                          {track.album ? ` · ${track.album}` : ''}
+                        </span>
                       </span>
-                    </span>
-                    {isResolving ? (
-                      <Loader2 size={16} className="search-loading-spinner" aria-hidden="true" />
-                    ) : (
-                      <Play size={15} aria-hidden="true" />
-                    )}
-                    <span className="yt-result-duration">{formatOnlineDuration(track.durationMs)}</span>
-                  </button>
+                      {isResolving ? (
+                        <Loader2 size={16} className="search-loading-spinner" aria-hidden="true" />
+                      ) : (
+                        <Play size={15} aria-hidden="true" />
+                      )}
+                      <span className="yt-result-duration">{formatOnlineDuration(track.durationMs)}</span>
+                    </button>
+                    <div className="yt-result-actions">
+                      {onPlayNextTrack && (
+                        <button
+                          type="button"
+                          className="yt-result-action-btn"
+                          disabled={!isBackendReady}
+                          onClick={() => onPlayNextTrack(mappedTrack)}
+                          title={!isBackendReady ? 'Playback engine unavailable' : `Play ${track.title} next`}
+                          aria-label={`Play ${track.title} next`}
+                        >
+                          <ListStart size={15} />
+                        </button>
+                      )}
+                      {onAddToPlaylist && (
+                        <button
+                          type="button"
+                          className="yt-result-action-btn"
+                          onClick={() => onAddToPlaylist(mappedTrack)}
+                          title={`Add ${track.title} to playlist`}
+                          aria-label={`Add ${track.title} to playlist`}
+                        >
+                          <ListPlus size={15} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 );
               })}
             </div>

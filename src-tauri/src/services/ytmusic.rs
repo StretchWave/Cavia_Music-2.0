@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, Weak};
+use std::sync::{Mutex, RwLock, Weak};
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -22,11 +22,15 @@ use serde_json::{Value, json};
 
 const SEARCH_URL: &str = "https://music.youtube.com/youtubei/v1/search";
 const NEXT_URL: &str = "https://music.youtube.com/youtubei/v1/next";
+const BROWSE_URL: &str = "https://music.youtube.com/youtubei/v1/browse";
 const PLAYER_URL: &str = "https://music.youtube.com/youtubei/v1/player";
 const GUIDE_URL: &str = "https://music.youtube.com/youtubei/v1/guide";
 const ORIGIN: &str = "https://music.youtube.com";
 const BOOTSTRAP_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const MAX_BOOTSTRAP_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PLAYLIST_TRACKS: usize = 1000;
+const MAX_PLAYLIST_PAGES: usize = 25;
+const CACHE_EXTENSIONS: &[&str] = &["m4a", "webm", "ogg", "opus", "mp4"];
 /// Base64 `params` selecting the Songs tab of a YouTube Music search.
 const SONGS_FILTER: &str = "EgWKAQIIAWoKEAkQBRAKEAMQBA==";
 
@@ -65,6 +69,21 @@ pub struct YtMusicTrack {
     pub artwork_url: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YtMusicPlaylist {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub tracks: Vec<YtMusicTrack>,
+    #[serde(skip)]
+    pub provider_total: usize,
+    #[serde(skip)]
+    pub unreadable_tracks: usize,
+    #[serde(skip)]
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedAudio {
     pub url: String,
@@ -72,6 +91,7 @@ pub struct ResolvedAudio {
     pub bitrate: u64,
 }
 
+#[derive(Clone)]
 struct ProviderBootstrap {
     api_key: String,
     client_version: String,
@@ -81,9 +101,10 @@ pub struct YtMusicService {
     client: reqwest::Client,
     cache_dir: PathBuf,
     visitor: Mutex<Option<String>>,
-    bootstrap: tokio::sync::OnceCell<ProviderBootstrap>,
+    bootstrap: tokio::sync::Mutex<Option<ProviderBootstrap>>,
     cache_locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
     search_cancellations: Mutex<SearchCancellationState>,
+    protected_video_ids: RwLock<HashSet<String>>,
 }
 
 #[derive(Default)]
@@ -109,10 +130,127 @@ impl YtMusicService {
             client,
             cache_dir,
             visitor: Mutex::new(None),
-            bootstrap: tokio::sync::OnceCell::new(),
+            bootstrap: tokio::sync::Mutex::new(None),
             cache_locks: Mutex::new(HashMap::new()),
             search_cancellations: Mutex::new(SearchCancellationState::default()),
+            protected_video_ids: RwLock::new(HashSet::new()),
         })
+    }
+
+    pub fn set_protected_video_ids(&self, ids: HashSet<String>) {
+        if let Ok(mut guard) = self.protected_video_ids.write() {
+            *guard = ids;
+        }
+    }
+
+    pub fn protected_video_ids(&self) -> HashSet<String> {
+        self.protected_video_ids
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
+    /// Returns a finalized, verified decodable cache path for `video_id` if present.
+    pub fn cached_playable_path(&self, video_id: &str) -> Option<PathBuf> {
+        if !is_valid_video_id(video_id) || !self.cache_dir.exists() {
+            return None;
+        }
+        for ext in CACHE_EXTENSIONS {
+            let candidate = self.cache_dir.join(format!("{video_id}.{ext}"));
+            if candidate.is_file()
+                && candidate
+                    .metadata()
+                    .map(|meta| meta.len() > 0)
+                    .unwrap_or(false)
+                && audio_file_is_decodable(&candidate)
+            {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    /// Lists video IDs of finalized, decoder-verified cached audio files (excludes `.part` files).
+    pub fn list_verified_cached_video_ids(&self) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(&self.cache_dir) else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        let mut seen = HashSet::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            if !CACHE_EXTENSIONS.contains(&ext) {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if path.metadata().map(|m| m.len() > 0).unwrap_or(false)
+                && audio_file_is_decodable(&path)
+                && seen.insert(stem.to_string())
+            {
+                ids.push(stem.to_string());
+            }
+        }
+        ids
+    }
+
+    /// Total finalized cache size and configured limit (`MAX_TOTAL_CACHE_BYTES`).
+    pub fn cache_usage_bytes(&self) -> (u64, u64) {
+        let Ok(entries) = std::fs::read_dir(&self.cache_dir) else {
+            return (0, MAX_TOTAL_CACHE_BYTES);
+        };
+        let mut total = 0_u64;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| CACHE_EXTENSIONS.contains(&ext))
+                && let Ok(meta) = path.metadata()
+            {
+                total = total.saturating_add(meta.len());
+            }
+        }
+        (total, MAX_TOTAL_CACHE_BYTES)
+    }
+
+    /// Returns `true` when protected active/preloaded tracks alone already saturate the cache cap.
+    pub fn protected_cache_budget_exceeded(&self) -> bool {
+        let protected = self.protected_video_ids();
+        if protected.is_empty() {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(&self.cache_dir) else {
+            return false;
+        };
+        let mut protected_bytes = 0_u64;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| CACHE_EXTENSIONS.contains(&ext))
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && protected.contains(stem)
+                && let Ok(meta) = path.metadata()
+            {
+                protected_bytes = protected_bytes.saturating_add(meta.len());
+            }
+        }
+        protected_bytes >= MAX_TOTAL_CACHE_BYTES
+    }
+
+    pub fn cleanup_partial_files(&self) {
+        clean_abandoned_partials(&self.cache_dir);
     }
 
     pub fn cache_dir(&self) -> &Path {
@@ -174,56 +312,68 @@ impl YtMusicService {
         }
     }
 
-    async fn provider_bootstrap(&self) -> Result<&ProviderBootstrap, String> {
-        self.bootstrap
-            .get_or_try_init(|| async {
-                let mut response = self
-                    .client
-                    .get(ORIGIN)
-                    .header("User-Agent", BOOTSTRAP_UA)
-                    .send()
-                    .await
-                    .map_err(|_| "YouTube Music configuration is unreachable".to_string())?;
-                if !response.status().is_success() {
-                    return Err(format!(
-                        "YouTube Music configuration failed with status {}",
-                        response.status().as_u16()
-                    ));
-                }
+    pub async fn invalidate_session(&self) {
+        *self.bootstrap.lock().await = None;
+        if let Ok(mut guard) = self.visitor.lock() {
+            *guard = None;
+        }
+    }
 
-                let mut html = Vec::new();
-                while let Some(chunk) = response.chunk().await.map_err(|_| {
-                    "YouTube Music configuration response was interrupted".to_string()
-                })? {
-                    if html.len().saturating_add(chunk.len()) > MAX_BOOTSTRAP_BYTES {
-                        return Err("YouTube Music configuration response was too large".into());
-                    }
-                    html.extend_from_slice(&chunk);
-                }
-                let html = String::from_utf8(html)
-                    .map_err(|_| "YouTube Music configuration was not valid UTF-8".to_string())?;
-                let api_key = extract_bootstrap_field(&html, "INNERTUBE_API_KEY")
-                    .filter(|key| {
-                        (20..=128).contains(&key.len())
-                            && key
-                                .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
-                    })
-                    .ok_or_else(|| "YouTube Music API configuration was not found".to_string())?;
-                let client_version = extract_bootstrap_field(&html, "INNERTUBE_CLIENT_VERSION")
-                    .filter(|version| {
-                        (8..=64).contains(&version.len())
-                            && version
-                                .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || c == '.')
-                    })
-                    .ok_or_else(|| "YouTube Music client version was not found".to_string())?;
-                Ok(ProviderBootstrap {
-                    api_key,
-                    client_version,
-                })
-            })
+    async fn provider_bootstrap(&self) -> Result<ProviderBootstrap, String> {
+        let mut guard = self.bootstrap.lock().await;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+
+        let mut response = self
+            .client
+            .get(ORIGIN)
+            .header("User-Agent", BOOTSTRAP_UA)
+            .send()
             .await
+            .map_err(|_| "YouTube Music configuration is unreachable".to_string())?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "YouTube Music configuration failed with status {}",
+                response.status().as_u16()
+            ));
+        }
+
+        let mut html = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| "YouTube Music configuration response was interrupted".to_string())?
+        {
+            if html.len().saturating_add(chunk.len()) > MAX_BOOTSTRAP_BYTES {
+                return Err("YouTube Music configuration response was too large".into());
+            }
+            html.extend_from_slice(&chunk);
+        }
+        let html = String::from_utf8(html)
+            .map_err(|_| "YouTube Music configuration was not valid UTF-8".to_string())?;
+        let api_key = extract_bootstrap_field(&html, "INNERTUBE_API_KEY")
+            .filter(|key| {
+                (20..=128).contains(&key.len())
+                    && key
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+            })
+            .ok_or_else(|| "YouTube Music API configuration was not found".to_string())?;
+        let client_version = extract_bootstrap_field(&html, "INNERTUBE_CLIENT_VERSION")
+            .filter(|version| {
+                (8..=64).contains(&version.len())
+                    && version
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '.')
+            })
+            .ok_or_else(|| "YouTube Music client version was not found".to_string())?;
+        let bootstrap = ProviderBootstrap {
+            api_key,
+            client_version,
+        };
+        *guard = Some(bootstrap.clone());
+        Ok(bootstrap)
     }
 
     /// Cached visitor data. The VISIONOS player request is answered with
@@ -314,56 +464,66 @@ impl YtMusicService {
         region: &str,
         language: &str,
     ) -> Result<Vec<YtMusicTrack>, String> {
-        let bootstrap = self.provider_bootstrap().await?;
-        let mut body = json!({
-            "context": {
-                "client": {
-                    "clientName": "WEB_REMIX",
-                    "clientVersion": bootstrap.client_version,
-                    "gl": region,
-                    "hl": language
-                }
-            },
-            "query": query
-        });
-        if let Some(params) = params {
-            body["params"] = Value::String(params.to_string());
-        }
-
-        let response = self
-            .client
-            .post(SEARCH_URL)
-            .query(&[
-                ("key", bootstrap.api_key.as_str()),
-                ("prettyPrint", "false"),
-            ])
-            .header("Content-Type", "application/json")
-            .header("Origin", ORIGIN)
-            .header("X-YouTube-Client-Name", "67")
-            .header("X-YouTube-Client-Version", &bootstrap.client_version)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|_| "YouTube Music search request failed".to_string())?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            if should_fallback_search_filter(status, params.is_some()) {
-                // InnerTube sometimes rejects the Songs-tab params after a
-                // web-client rollout. Retry the same query without that
-                // optional filter instead of failing the whole search.
-                return Ok(Vec::new());
+        let mut value = None;
+        for attempt in 0..2 {
+            let bootstrap = self.provider_bootstrap().await?;
+            let mut body = json!({
+                "context": {
+                    "client": {
+                        "clientName": "WEB_REMIX",
+                        "clientVersion": bootstrap.client_version,
+                        "gl": region,
+                        "hl": language
+                    }
+                },
+                "query": query
+            });
+            if let Some(params) = params {
+                body["params"] = Value::String(params.to_string());
             }
-            return Err(format!(
-                "YouTube Music search failed with status {}",
-                status.as_u16()
-            ));
-        }
 
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("YouTube Music returned an unreadable response: {e}"))?;
+            let response = self
+                .client
+                .post(SEARCH_URL)
+                .query(&[
+                    ("key", bootstrap.api_key.as_str()),
+                    ("prettyPrint", "false"),
+                ])
+                .header("Content-Type", "application/json")
+                .header("Origin", ORIGIN)
+                .header("X-YouTube-Client-Name", "67")
+                .header("X-YouTube-Client-Version", &bootstrap.client_version)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|_| "YouTube Music search request failed".to_string())?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                if attempt == 0 && should_refresh_session(status) {
+                    self.invalidate_session().await;
+                    continue;
+                }
+                if should_fallback_search_filter(status, params.is_some()) {
+                    // InnerTube sometimes rejects the Songs-tab params after a
+                    // web-client rollout. Retry the same query without that
+                    // optional filter instead of failing the whole search.
+                    return Ok(Vec::new());
+                }
+                return Err(format!(
+                    "YouTube Music search failed with status {}",
+                    status.as_u16()
+                ));
+            }
+
+            let parsed: Value = response
+                .json()
+                .await
+                .map_err(|e| format!("YouTube Music returned an unreadable response: {e}"))?;
+            value = Some(parsed);
+            break;
+        }
+        let value = value.ok_or_else(|| "YouTube Music search request failed".to_string())?;
 
         let mut items = Vec::new();
         collect_search_items(&value, &mut items);
@@ -382,49 +542,60 @@ impl YtMusicService {
             return Err("Invalid YouTube Music video id".into());
         }
 
-        let bootstrap = self.provider_bootstrap().await?;
-        let body = json!({
-            "context": {
-                "client": {
-                    "clientName": "WEB_REMIX",
-                    "clientVersion": bootstrap.client_version,
-                    "gl": "US",
-                    "hl": "en"
+        let mut value = None;
+        for attempt in 0..2 {
+            let bootstrap = self.provider_bootstrap().await?;
+            let body = json!({
+                "context": {
+                    "client": {
+                        "clientName": "WEB_REMIX",
+                        "clientVersion": bootstrap.client_version,
+                        "gl": "US",
+                        "hl": "en"
+                    }
+                },
+                "videoId": video_id,
+                "playlistId": format!("RDAMVM{video_id}"),
+                "isAudioOnly": true,
+                "enablePersistentPlaylistPanel": true
+            });
+
+            let response = self
+                .client
+                .post(NEXT_URL)
+                .query(&[
+                    ("key", bootstrap.api_key.as_str()),
+                    ("prettyPrint", "false"),
+                ])
+                .header("Content-Type", "application/json")
+                .header("Origin", ORIGIN)
+                .header("X-YouTube-Client-Name", "67")
+                .header("X-YouTube-Client-Version", &bootstrap.client_version)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|_| "YouTube Music radio request failed".to_string())?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                if attempt == 0 && should_refresh_session(status) {
+                    self.invalidate_session().await;
+                    continue;
                 }
-            },
-            "videoId": video_id,
-            "playlistId": format!("RDAMVM{video_id}"),
-            "isAudioOnly": true,
-            "enablePersistentPlaylistPanel": true
-        });
+                return Err(format!(
+                    "YouTube Music radio failed with status {}",
+                    status.as_u16()
+                ));
+            }
 
-        let response = self
-            .client
-            .post(NEXT_URL)
-            .query(&[
-                ("key", bootstrap.api_key.as_str()),
-                ("prettyPrint", "false"),
-            ])
-            .header("Content-Type", "application/json")
-            .header("Origin", ORIGIN)
-            .header("X-YouTube-Client-Name", "67")
-            .header("X-YouTube-Client-Version", &bootstrap.client_version)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|_| "YouTube Music radio request failed".to_string())?;
-
-        if !response.status().is_success() {
-            return Err(format!(
-                "YouTube Music radio failed with status {}",
-                response.status().as_u16()
-            ));
+            let parsed: Value = response
+                .json()
+                .await
+                .map_err(|e| format!("YouTube Music returned an unreadable radio response: {e}"))?;
+            value = Some(parsed);
+            break;
         }
-
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("YouTube Music returned an unreadable radio response: {e}"))?;
+        let value = value.ok_or_else(|| "YouTube Music radio request failed".to_string())?;
 
         let mut items = Vec::new();
         collect_panel_items(&value, &mut items);
@@ -435,77 +606,212 @@ impl YtMusicService {
         Ok(items)
     }
 
+    async fn fetch_browse_page(
+        &self,
+        browse_id: Option<&str>,
+        continuation: Option<&str>,
+    ) -> Result<Value, String> {
+        for attempt in 0..2 {
+            let bootstrap = self.provider_bootstrap().await?;
+            let mut body = json!({
+                "context": {
+                    "client": {
+                        "clientName": "WEB_REMIX",
+                        "clientVersion": bootstrap.client_version,
+                        "gl": "US",
+                        "hl": "en"
+                    }
+                }
+            });
+            if let Some(bid) = browse_id {
+                body["browseId"] = Value::String(bid.to_string());
+            }
+            if let Some(token) = continuation {
+                body["continuation"] = Value::String(token.to_string());
+            }
+
+            let response = self
+                .client
+                .post(BROWSE_URL)
+                .query(&[
+                    ("key", bootstrap.api_key.as_str()),
+                    ("prettyPrint", "false"),
+                ])
+                .header("Content-Type", "application/json")
+                .header("Origin", ORIGIN)
+                .header("X-YouTube-Client-Name", "67")
+                .header("X-YouTube-Client-Version", &bootstrap.client_version)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|_| "YouTube Music playlist request failed".to_string())?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                if attempt == 0 && should_refresh_session(status) {
+                    self.invalidate_session().await;
+                    continue;
+                }
+                if status == reqwest::StatusCode::NOT_FOUND {
+                    return Err(
+                        "YouTube Music could not find that playlist. It may be private or removed."
+                            .into(),
+                    );
+                }
+                return Err(format!(
+                    "YouTube Music playlist failed with status {}",
+                    status.as_u16()
+                ));
+            }
+
+            return response.json().await.map_err(|e| {
+                format!("YouTube Music returned an unreadable playlist response: {e}")
+            });
+        }
+
+        Err("YouTube Music playlist request failed".to_string())
+    }
+
+    /// Reads tracks from a public YouTube Music or YouTube playlist URL (up to [`MAX_PLAYLIST_TRACKS`]).
+    pub async fn fetch_playlist(&self, url: &str) -> Result<YtMusicPlaylist, String> {
+        let id = playlist_id_from_url(url)
+            .ok_or_else(|| "That does not look like a YouTube Music playlist link".to_string())?;
+        let browse_id = format!("VL{id}");
+
+        let initial_value = self.fetch_browse_page(Some(&browse_id), None).await?;
+        let (title, description, mut continuation, mut tracks, mut unreadable_tracks) =
+            parse_playlist_initial(&initial_value);
+
+        let mut seen_tokens = HashSet::new();
+        let mut page_count = 0usize;
+        while let Some(token) = continuation.take() {
+            if tracks.len() >= MAX_PLAYLIST_TRACKS
+                || page_count >= MAX_PLAYLIST_PAGES
+                || !seen_tokens.insert(token.clone())
+            {
+                break;
+            }
+            page_count += 1;
+            let page_value = self.fetch_browse_page(None, Some(&token)).await?;
+            let (page_tracks, page_unreadable, next_token) =
+                parse_playlist_continuation(&page_value);
+            if page_tracks.is_empty() && next_token.is_none() {
+                break;
+            }
+            tracks.extend(page_tracks);
+            unreadable_tracks += page_unreadable;
+            continuation = next_token;
+        }
+
+        if tracks.is_empty() {
+            return Err(
+                "YouTube Music returned no playable tracks for that playlist. It may be empty or private."
+                    .into(),
+            );
+        }
+
+        let total_before_cap = tracks.len();
+        let truncated = total_before_cap > MAX_PLAYLIST_TRACKS || continuation.is_some();
+        tracks.truncate(MAX_PLAYLIST_TRACKS);
+
+        Ok(YtMusicPlaylist {
+            id,
+            title,
+            description,
+            tracks,
+            provider_total: total_before_cap,
+            unreadable_tracks,
+            truncated,
+        })
+    }
+
     pub async fn resolve_audio(&self, video_id: &str) -> Result<ResolvedAudio, String> {
-        let bootstrap = self.provider_bootstrap().await?;
-        let visitor = self.visitor_id().await;
+        let mut value = None;
+        for attempt in 0..2 {
+            let bootstrap = self.provider_bootstrap().await?;
+            let visitor = self.visitor_id().await;
 
-        let mut client_context = json!({
-            "clientName": "VISIONOS",
-            "clientVersion": "1.02",
-            "deviceMake": "Apple",
-            "deviceModel": "RealityDevice17,1",
-            "osName": "visionOS",
-            "osVersion": "26.5.23O471",
-            "gl": "US",
-            "hl": "en"
-        });
-        if let Some(visitor) = visitor.as_ref() {
-            client_context["visitorData"] = Value::String(visitor.clone());
-        }
+            let mut client_context = json!({
+                "clientName": "VISIONOS",
+                "clientVersion": "1.02",
+                "deviceMake": "Apple",
+                "deviceModel": "RealityDevice17,1",
+                "osName": "visionOS",
+                "osVersion": "26.5.23O471",
+                "gl": "US",
+                "hl": "en"
+            });
+            if let Some(visitor) = visitor.as_ref() {
+                client_context["visitorData"] = Value::String(visitor.clone());
+            }
 
-        let body = json!({
-            "context": { "client": client_context },
-            "videoId": video_id,
-            "contentCheckOk": true,
-            "racyCheckOk": true
-        });
+            let body = json!({
+                "context": { "client": client_context },
+                "videoId": video_id,
+                "contentCheckOk": true,
+                "racyCheckOk": true
+            });
 
-        let mut request = self
-            .client
-            .post(PLAYER_URL)
-            .query(&[
-                ("key", bootstrap.api_key.as_str()),
-                ("prettyPrint", "false"),
-            ])
-            .header("Content-Type", "application/json")
-            .header("Origin", ORIGIN)
-            .header("User-Agent", VISIONOS_UA)
-            .header("X-YouTube-Client-Name", "101")
-            .header("X-YouTube-Client-Version", "1.02");
+            let mut request = self
+                .client
+                .post(PLAYER_URL)
+                .query(&[
+                    ("key", bootstrap.api_key.as_str()),
+                    ("prettyPrint", "false"),
+                ])
+                .header("Content-Type", "application/json")
+                .header("Origin", ORIGIN)
+                .header("User-Agent", VISIONOS_UA)
+                .header("X-YouTube-Client-Name", "101")
+                .header("X-YouTube-Client-Version", "1.02");
 
-        if let Some(visitor) = visitor.as_ref() {
-            request = request.header("X-Goog-Visitor-Id", visitor);
-        }
+            if let Some(visitor) = visitor.as_ref() {
+                request = request.header("X-Goog-Visitor-Id", visitor);
+            }
 
-        let response = request
-            .json(&body)
-            .send()
-            .await
-            .map_err(|_| "YouTube Music playback request failed".to_string())?;
+            let response = request
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("YouTube Music connectivity failed: {e}"))?;
 
-        if !response.status().is_success() {
-            return Err(format!(
-                "YouTube Music could not prepare this track (status {})",
-                response.status().as_u16()
-            ));
-        }
+            if !response.status().is_success() {
+                let status = response.status();
+                if attempt == 0 && should_refresh_session(status) {
+                    self.invalidate_session().await;
+                    continue;
+                }
+                return Err(format!(
+                    "YouTube Music could not prepare this track (status {})",
+                    status.as_u16()
+                ));
+            }
 
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("YouTube Music returned an unreadable response: {e}"))?;
+            let parsed: Value = response
+                .json()
+                .await
+                .map_err(|e| format!("YouTube Music returned an unreadable response: {e}"))?;
 
-        if let Some(status) = value
-            .pointer("/playabilityStatus/status")
-            .and_then(Value::as_str)
-            && status != "OK"
-        {
-            let reason = value
-                .pointer("/playabilityStatus/reason")
+            if let Some(status) = parsed
+                .pointer("/playabilityStatus/status")
                 .and_then(Value::as_str)
-                .unwrap_or("track is not playable");
-            return Err(format!("YouTube Music refused playback: {reason}"));
+                && status != "OK"
+            {
+                if attempt == 0 && status == "LOGIN_REQUIRED" {
+                    self.invalidate_session().await;
+                    continue;
+                }
+                let reason = parsed
+                    .pointer("/playabilityStatus/reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("track is not playable");
+                return Err(format!("YouTube Music refused playback: {reason}"));
+            }
+
+            value = Some(parsed);
+            break;
         }
+        let value = value.ok_or_else(|| "YouTube Music playback request failed".to_string())?;
 
         let formats = value
             .pointer("/streamingData/adaptiveFormats")
@@ -560,7 +866,35 @@ impl YtMusicService {
     /// local path. Playback then uses the same decoder path as local files,
     /// so seeking and duration are exact.
     pub async fn ensure_cached(&self, video_id: &str, url: &str) -> Result<PathBuf, String> {
-        let path = self.cache_dir.join(format!("{video_id}.m4a"));
+        self.ensure_cached_with_mime(video_id, url, "audio/mp4")
+            .await
+    }
+
+    pub async fn ensure_cached_with_mime(
+        &self,
+        video_id: &str,
+        url: &str,
+        mime_type: &str,
+    ) -> Result<PathBuf, String> {
+        self.ensure_cached_with_mime_cancellable(video_id, url, mime_type, None)
+            .await
+    }
+
+    pub async fn ensure_cached_with_mime_cancellable(
+        &self,
+        video_id: &str,
+        url: &str,
+        mime_type: &str,
+        mut cancel_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    ) -> Result<PathBuf, String> {
+        if !is_valid_video_id(video_id) {
+            return Err("Invalid YouTube Music video id".into());
+        }
+        if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+            return Err("Preload cancelled".into());
+        }
+        let ext = cache_extension_for_mime(mime_type);
+        let path = self.cache_dir.join(format!("{video_id}.{ext}"));
         let lock = {
             let mut locks = self
                 .cache_locks
@@ -569,7 +903,7 @@ impl YtMusicService {
             locks.retain(|_, lock| lock.strong_count() > 0);
             locks
                 .entry(video_id.to_string())
-                .or_insert_with(|| Weak::new())
+                .or_insert_with(Weak::new)
                 .upgrade()
                 .unwrap_or_else(|| {
                     let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
@@ -579,12 +913,14 @@ impl YtMusicService {
         };
         let _cache_guard = lock.lock().await;
 
-        if path.metadata().map(|meta| meta.len() > 0).unwrap_or(false)
-            && audio_file_is_decodable(&path)
-        {
+        if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+            return Err("Preload cancelled".into());
+        }
+
+        if let Some(existing) = self.cached_playable_path(video_id) {
             // Refresh modification time on cache hits so LRU pruning reflects
             // actual use rather than only the original download time.
-            if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
+            if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&existing) {
                 let now = std::time::SystemTime::now();
                 let _ = file.set_times(
                     std::fs::FileTimes::new()
@@ -592,7 +928,7 @@ impl YtMusicService {
                         .set_modified(now),
                 );
             }
-            return Ok(path);
+            return Ok(existing);
         }
         // A previously finalized but corrupt cache entry must not be served as
         // a hit or silently leave playback pointed at invalid bytes.
@@ -602,8 +938,28 @@ impl YtMusicService {
         let mut download_result =
             Err(("The audio stream could not be downloaded".to_string(), true));
         for attempt in 0..MAX_STREAM_ATTEMPTS {
+            if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+                let _ = std::fs::remove_file(&partial);
+                return Err("Preload cancelled".into());
+            }
             let _ = std::fs::remove_file(&partial);
-            download_result = download_audio_to_file(&self.client, url, &partial).await;
+            if let Some(rx) = cancel_rx.as_mut() {
+                let download_fut = download_audio_to_file(&self.client, url, &partial);
+                tokio::pin!(download_fut);
+                download_result = loop {
+                    tokio::select! {
+                        res = &mut download_fut => break res,
+                        changed = rx.changed() => {
+                            if changed.is_err() || *rx.borrow() {
+                                let _ = std::fs::remove_file(&partial);
+                                return Err("Preload cancelled".into());
+                            }
+                        }
+                    }
+                };
+            } else {
+                download_result = download_audio_to_file(&self.client, url, &partial).await;
+            }
             match &download_result {
                 Ok(()) => break,
                 Err((_, retryable)) if *retryable && attempt + 1 < MAX_STREAM_ATTEMPTS => {
@@ -617,7 +973,12 @@ impl YtMusicService {
             return Err(message);
         }
 
-        if !audio_file_is_decodable(&partial) {
+        let partial_for_verify = partial.clone();
+        let decodable =
+            tokio::task::spawn_blocking(move || audio_file_is_decodable(&partial_for_verify))
+                .await
+                .unwrap_or(false);
+        if !decodable {
             let _ = std::fs::remove_file(&partial);
             return Err(
                 "YouTube Music returned audio that the playback decoder could not read".to_string(),
@@ -634,11 +995,43 @@ impl YtMusicService {
         Ok(path)
     }
 
-    /// Evicts oldest cached streams when the total stream cache size exceeds `max_bytes`.
+    pub async fn preload_video(
+        &self,
+        video_id: &str,
+        mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<PathBuf, String> {
+        if let Some(existing) = self.cached_playable_path(video_id) {
+            return Ok(existing);
+        }
+        if *cancel_rx.borrow() {
+            return Err("Preload cancelled".into());
+        }
+        if self.protected_cache_budget_exceeded() {
+            return Err("Stream cache limit reached by protected upcoming tracks".into());
+        }
+        let resolved = tokio::select! {
+            res = self.resolve_audio(video_id) => res?,
+            changed = cancel_rx.changed() => {
+                let _ = changed;
+                return Err("Preload cancelled".into());
+            }
+        };
+        self.ensure_cached_with_mime_cancellable(
+            video_id,
+            &resolved.url,
+            &resolved.mime_type,
+            Some(cancel_rx),
+        )
+        .await
+    }
+
+    /// Evicts oldest unprotected cached streams when the total stream cache size exceeds
+    /// `max_bytes`. Currently playing and active preload window entries are preserved.
     pub fn prune_cache(&self, max_bytes: u64) -> Result<(), std::io::Error> {
         if !self.cache_dir.exists() {
             return Ok(());
         }
+        let protected = self.protected_video_ids();
         let mut entries = Vec::new();
         let mut total_size: u64 = 0;
         for entry in std::fs::read_dir(&self.cache_dir)? {
@@ -646,10 +1039,20 @@ impl YtMusicService {
             let file_path = entry.path();
             // Only finalized audio objects participate in eviction. A `.part`
             // file may be actively written by a concurrent download.
-            if file_path.is_file() && file_path.extension().is_some_and(|ext| ext == "m4a") {
-                if let Ok(meta) = file_path.metadata() {
-                    let len = meta.len();
-                    total_size += len;
+            if file_path.is_file()
+                && file_path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| CACHE_EXTENSIONS.contains(&ext))
+                && let Ok(meta) = file_path.metadata()
+            {
+                let len = meta.len();
+                total_size += len;
+                let is_protected = file_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|stem| protected.contains(stem));
+                if !is_protected {
                     let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                     entries.push((file_path, len, mtime));
                 }
@@ -669,6 +1072,24 @@ impl YtMusicService {
             }
         }
         Ok(())
+    }
+}
+
+fn should_refresh_session(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    )
+}
+
+fn cache_extension_for_mime(mime_type: &str) -> &'static str {
+    let lower = mime_type.to_ascii_lowercase();
+    if lower.contains("webm") || lower.contains("opus") {
+        "webm"
+    } else if lower.contains("ogg") {
+        "ogg"
+    } else {
+        "m4a"
     }
 }
 
@@ -971,6 +1392,34 @@ fn parse_search_item(item: &Value) -> Option<YtMusicTrack> {
         duration_ms = parse_duration_ms(&fixed).unwrap_or(0);
     }
 
+    if album.is_empty() || duration_ms == 0 {
+        let col2 = flex_text(item, 2);
+        for part in col2
+            .split(['•', '·'])
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            if let Some(parsed) = parse_duration_ms(part) {
+                if duration_ms == 0 {
+                    duration_ms = parsed;
+                }
+                continue;
+            }
+            if matches!(
+                part,
+                "Song" | "Video" | "Album" | "Single" | "EP" | "Playlist"
+            ) {
+                continue;
+            }
+            if album.is_empty()
+                && !part.eq_ignore_ascii_case(&title)
+                && !part.eq_ignore_ascii_case(&artist)
+            {
+                album = part.to_string();
+            }
+        }
+    }
+
     let artwork_url = item
         .pointer("/thumbnail/musicThumbnailRenderer/thumbnail/thumbnails")
         .and_then(last_thumbnail_url)
@@ -1089,6 +1538,202 @@ fn collect_search_items(value: &Value, out: &mut Vec<YtMusicTrack>) {
         }
         _ => {}
     }
+}
+
+/// Accepts `music.youtube.com/playlist?list=...`, `youtube.com/...list=...`,
+/// `music.youtube.com/browse/VL...`, and bare YouTube playlist ids (`PL...`,
+/// `OLAK5uy_...`, `RD...`, `UU...`, `FL...`, `LP...`).
+pub fn playlist_id_from_url(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let raw_id = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        let parsed = url::Url::parse(trimmed).ok()?;
+        let host = parsed.host_str()?.to_ascii_lowercase();
+        let is_yt_host = matches!(
+            host.as_str(),
+            "music.youtube.com" | "youtube.com" | "www.youtube.com" | "m.youtube.com" | "youtu.be"
+        );
+        if !is_yt_host {
+            return None;
+        }
+        parsed
+            .query_pairs()
+            .find_map(|(k, v)| (k == "list" && !v.trim().is_empty()).then(|| v.into_owned()))
+            .or_else(|| {
+                parsed
+                    .path()
+                    .strip_prefix("/browse/")
+                    .map(|rest| rest.split('/').next().unwrap_or(rest).to_string())
+            })?
+    } else if !trimmed.contains('/') && !trimmed.contains('\\') {
+        const PREFIXES: [&str; 10] = [
+            "PL", "OLAK5uy_", "RDCLAK", "RDAM", "RDEM", "UU", "FL", "LP", "VLPL", "VLOLAK",
+        ];
+        if !PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix)) {
+            return None;
+        }
+        trimmed.to_string()
+    } else {
+        return None;
+    };
+
+    let normalized = raw_id.strip_prefix("VL").unwrap_or(&raw_id).trim();
+    let valid = (12..=64).contains(&normalized.len())
+        && normalized
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    valid.then(|| normalized.to_string())
+}
+
+fn find_playlist_header(value: &Value) -> Option<&Value> {
+    const POINTERS: [&str; 4] = [
+        "/header/musicDetailHeaderRenderer",
+        "/header/musicResponsiveHeaderRenderer",
+        "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicResponsiveHeaderRenderer",
+        "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicEditablePlaylistDetailHeaderRenderer/header/musicResponsiveHeaderRenderer",
+    ];
+    for pointer in POINTERS {
+        if let Some(header) = value.pointer(pointer) {
+            return Some(header);
+        }
+    }
+    None
+}
+
+fn find_first_playlist_shelf(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Object(map) => {
+            if let Some(shelf) = map.get("musicPlaylistShelfRenderer") {
+                return Some(shelf);
+            }
+            if let Some(shelf) = map.get("musicShelfRenderer") {
+                return Some(shelf);
+            }
+            for child in map.values() {
+                if let Some(found) = find_first_playlist_shelf(child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items.iter().find_map(find_first_playlist_shelf),
+        _ => None,
+    }
+}
+
+fn extract_continuation_token_from_list(items: &[Value]) -> Option<String> {
+    for item in items.iter().rev() {
+        if let Some(token) = item
+            .pointer("/continuationItemRenderer/continuationEndpoint/continuationCommand/token")
+            .and_then(Value::as_str)
+            && !token.is_empty()
+        {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+fn extract_shelf_continuation_token(container: &Value) -> Option<String> {
+    if let Some(token) = container
+        .pointer("/continuations/0/nextContinuationData/continuation")
+        .and_then(Value::as_str)
+        && !token.is_empty()
+    {
+        return Some(token.to_string());
+    }
+    if let Some(contents) = container.get("contents").and_then(Value::as_array)
+        && let Some(token) = extract_continuation_token_from_list(contents)
+    {
+        return Some(token);
+    }
+    None
+}
+
+fn collect_playlist_list(items: &[Value], tracks: &mut Vec<YtMusicTrack>, unreadable: &mut usize) {
+    for entry in items {
+        let Some(renderer) = entry.get("musicResponsiveListItemRenderer") else {
+            continue;
+        };
+        if let Some(track) = parse_search_item(renderer) {
+            tracks.push(track);
+        } else {
+            *unreadable += 1;
+        }
+    }
+}
+
+fn parse_playlist_initial(
+    value: &Value,
+) -> (String, String, Option<String>, Vec<YtMusicTrack>, usize) {
+    let header = find_playlist_header(value);
+    let title = header
+        .and_then(|h| h.get("title"))
+        .map(text_runs)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "YouTube Music playlist".to_string());
+
+    let description = header
+        .and_then(|h| {
+            h.get("description")
+                .or_else(|| h.pointer("/description/musicDescriptionShelfRenderer/description"))
+        })
+        .map(text_runs)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    let mut tracks = Vec::new();
+    let mut unreadable = 0usize;
+    let mut continuation = None;
+
+    if let Some(shelf) = find_first_playlist_shelf(value) {
+        if let Some(items) = shelf.get("contents").and_then(Value::as_array) {
+            collect_playlist_list(items, &mut tracks, &mut unreadable);
+        }
+        continuation = extract_shelf_continuation_token(shelf);
+    }
+
+    (title, description, continuation, tracks, unreadable)
+}
+
+fn parse_playlist_continuation(value: &Value) -> (Vec<YtMusicTrack>, usize, Option<String>) {
+    let mut tracks = Vec::new();
+    let mut unreadable = 0usize;
+    let mut continuation = None;
+
+    if let Some(shelf) = value
+        .pointer("/continuationContents/musicPlaylistShelfContinuation")
+        .or_else(|| value.pointer("/continuationContents/musicShelfContinuation"))
+    {
+        if let Some(items) = shelf.get("contents").and_then(Value::as_array) {
+            collect_playlist_list(items, &mut tracks, &mut unreadable);
+        }
+        continuation = extract_shelf_continuation_token(shelf);
+    }
+
+    if let Some(actions) = value
+        .pointer("/onResponseReceivedActions")
+        .and_then(Value::as_array)
+    {
+        for action in actions {
+            let Some(items) = action
+                .pointer("/appendContinuationItemsAction/continuationItems")
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            collect_playlist_list(items, &mut tracks, &mut unreadable);
+            if continuation.is_none() {
+                continuation = extract_continuation_token_from_list(items);
+            }
+        }
+    }
+
+    (tracks, unreadable, continuation)
 }
 
 #[cfg(test)]
@@ -1328,6 +1973,143 @@ mod tests {
             parsed.artwork_url.as_deref(),
             Some("https://lh3.googleusercontent.com/x=w544-h544-l90-rj")
         );
+    }
+
+    #[test]
+    fn parses_playlist_urls_and_browse_ids() {
+        assert_eq!(
+            playlist_id_from_url("https://music.youtube.com/playlist?list=PL1234567890ABCDEF"),
+            Some("PL1234567890ABCDEF".to_string())
+        );
+        assert_eq!(
+            playlist_id_from_url(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=OLAK5uy_k1234567890"
+            ),
+            Some("OLAK5uy_k1234567890".to_string())
+        );
+        assert_eq!(
+            playlist_id_from_url("https://music.youtube.com/browse/VLPL9876543210FEDCBA"),
+            Some("PL9876543210FEDCBA".to_string())
+        );
+        assert_eq!(
+            playlist_id_from_url("PL1234567890ABCDEF"),
+            Some("PL1234567890ABCDEF".to_string())
+        );
+        // Must not confuse a Spotify link or bare Spotify ID with YouTube Music.
+        assert_eq!(
+            playlist_id_from_url("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"),
+            None
+        );
+        assert_eq!(playlist_id_from_url("37i9dQZF1DXcBWIGoYBM5M"), None);
+    }
+
+    #[test]
+    fn parses_ytmusic_playlist_browse_and_continuation() {
+        let initial = json!({
+            "header": {
+                "musicDetailHeaderRenderer": {
+                    "title": { "runs": [{ "text": "Late Night Coding" }] },
+                    "description": { "runs": [{ "text": "Synthwave & ambient" }] }
+                }
+            },
+            "contents": {
+                "singleColumnBrowseResultsRenderer": {
+                    "tabs": [{
+                        "tabRenderer": {
+                            "content": {
+                                "sectionListRenderer": {
+                                    "contents": [{
+                                        "musicPlaylistShelfRenderer": {
+                                            "contents": [
+                                                {
+                                                    "musicResponsiveListItemRenderer": {
+                                                        "playlistItemData": { "videoId": "dQw4w9WgXcQ" },
+                                                        "flexColumns": [
+                                                            { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Nightcall" }] } } },
+                                                            { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Kavinsky" }] } } },
+                                                            { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "OutRun" }] } } }
+                                                        ],
+                                                        "fixedColumns": [
+                                                            { "musicResponsiveListItemFixedColumnRenderer": { "text": { "simpleText": "4:18" } } }
+                                                        ]
+                                                    }
+                                                },
+                                                {
+                                                    "continuationItemRenderer": {
+                                                        "continuationEndpoint": {
+                                                            "continuationCommand": { "token": "next-page-token" }
+                                                        }
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }]
+                                }
+                            }
+                        }
+                    }]
+                }
+            }
+        });
+
+        let (title, desc, cont, tracks, unreadable) = parse_playlist_initial(&initial);
+        assert_eq!(title, "Late Night Coding");
+        assert_eq!(desc, "Synthwave & ambient");
+        assert_eq!(cont.as_deref(), Some("next-page-token"));
+        assert_eq!(unreadable, 0);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].video_id, "dQw4w9WgXcQ");
+        assert_eq!(tracks[0].title, "Nightcall");
+        assert_eq!(tracks[0].artist, "Kavinsky");
+        assert_eq!(tracks[0].album, "OutRun");
+        assert_eq!(tracks[0].duration_ms, 258_000);
+
+        let cont_json = json!({
+            "onResponseReceivedActions": [{
+                "appendContinuationItemsAction": {
+                    "continuationItems": [
+                        {
+                            "musicResponsiveListItemRenderer": {
+                                "playlistItemData": { "videoId": "abcdefghijk" },
+                                "flexColumns": [
+                                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Resonance" }] } } },
+                                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "HOME • 3:32" }] } } }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }]
+        });
+        let (cont_tracks, cont_unreadable, cont_next) = parse_playlist_continuation(&cont_json);
+        assert_eq!(cont_unreadable, 0);
+        assert_eq!(cont_next, None);
+        assert_eq!(cont_tracks.len(), 1);
+        assert_eq!(cont_tracks[0].video_id, "abcdefghijk");
+        assert_eq!(cont_tracks[0].title, "Resonance");
+        assert_eq!(cont_tracks[0].artist, "HOME");
+        assert_eq!(cont_tracks[0].duration_ms, 212_000);
+    }
+
+    #[test]
+    fn maps_cache_mime_types_and_prunes_all_audio_extensions() {
+        assert_eq!(cache_extension_for_mime("audio/mp4"), "m4a");
+        assert_eq!(
+            cache_extension_for_mime("audio/webm; codecs=\"opus\""),
+            "webm"
+        );
+        assert_eq!(cache_extension_for_mime("audio/ogg"), "ogg");
+
+        let cache_dir = test_cache_dir("prune-webm");
+        let service = YtMusicService::new(cache_dir.clone()).expect("service");
+        std::fs::write(cache_dir.join("old12345678.webm"), vec![0u8; 64]).unwrap();
+        std::fs::write(cache_dir.join("active.part"), vec![0u8; 64]).unwrap();
+
+        service.prune_cache(0).expect("pruning succeeds");
+
+        assert!(!cache_dir.join("old12345678.webm").exists());
+        assert!(cache_dir.join("active.part").exists());
+        std::fs::remove_dir_all(cache_dir).unwrap();
     }
 
     #[tokio::test]

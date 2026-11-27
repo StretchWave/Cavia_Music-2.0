@@ -7,6 +7,7 @@ export interface BackendPlaybackSnapshot {
   generation?: number;
   status: 'idle' | 'loading' | 'playing' | 'paused' | 'stopped' | 'error';
   currentTrack: Track | null;
+  currentIndex?: number | null;
   positionMs: number;
   durationMs: number;
   volume: number;
@@ -43,6 +44,25 @@ export async function getPlaybackState(): Promise<BackendPlaybackSnapshot | null
 export async function playTrack(trackId: string): Promise<void> {
   if (!isNativeApp()) return;
   return invoke('play_track', { trackId });
+}
+
+export async function playQueueIndex(index: number): Promise<void> {
+  if (!isNativeApp()) return;
+  return invoke('play_queue_index', { index });
+}
+
+export async function setPlaybackQueue(
+  tracks: Track[],
+  startIndex?: number,
+  enableRadio = false
+): Promise<void> {
+  if (!isNativeApp()) return;
+  return invoke('set_playback_queue', { tracks, startIndex, enableRadio });
+}
+
+export async function enqueueTrack(track: Track, playNext = true): Promise<void> {
+  if (!isNativeApp()) return;
+  return invoke('enqueue_track', { track, playNext });
 }
 
 export async function play(): Promise<void> {

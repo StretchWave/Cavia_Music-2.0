@@ -1,8 +1,7 @@
-use std::collections::HashMap;
 use tauri::State;
 
 use crate::domain::Track;
-use crate::services::library::get_all_tracks;
+use crate::services::library::{get_track_by_id, get_tracks_by_ids};
 use crate::services::playback::PlaybackSnapshot;
 use crate::state::AppState;
 
@@ -14,6 +13,11 @@ pub async fn get_playback_state(state: State<'_, AppState>) -> Result<PlaybackSn
 #[tauri::command]
 pub async fn play_track(state: State<'_, AppState>, track_id: String) -> Result<(), String> {
     state.playback.play_track(&track_id).await
+}
+
+#[tauri::command]
+pub async fn play_queue_index(state: State<'_, AppState>, index: usize) -> Result<(), String> {
+    state.playback.play_queue_index(index).await
 }
 
 #[tauri::command]
@@ -60,7 +64,7 @@ pub async fn toggle_mute(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn set_playback_speed(state: State<'_, AppState>, speed: f32) -> Result<(), String> {
-    if !speed.is_finite() || speed < 0.25 || speed > 4.0 {
+    if !speed.is_finite() || !(0.25..=4.0).contains(&speed) {
         return Err("Playback speed must be a finite number between 0.25 and 4.0".into());
     }
     state.playback.set_speed(speed).await
@@ -96,20 +100,7 @@ pub async fn set_queue(
         return state.playback.clear_queue().await;
     }
 
-    // Load full Track records from database preserving requested order
-    // Optimized to O(N + M) using HashMap lookup
-    let all_tracks = get_all_tracks(&state.database).await?;
-    let mut track_map: HashMap<String, Track> = HashMap::with_capacity(all_tracks.len());
-    for t in all_tracks {
-        track_map.insert(t.id.clone(), t);
-    }
-
-    let mut ordered_tracks = Vec::with_capacity(track_ids.len());
-    for tid in &track_ids {
-        if let Some(track) = track_map.get(tid) {
-            ordered_tracks.push(track.clone());
-        }
-    }
+    let ordered_tracks = get_tracks_by_ids(&state.database, &track_ids).await?;
 
     state
         .playback
@@ -118,11 +109,51 @@ pub async fn set_queue(
 }
 
 #[tauri::command]
+pub async fn set_playback_queue(
+    state: State<'_, AppState>,
+    tracks: Vec<Track>,
+    start_index: Option<usize>,
+    enable_radio: Option<bool>,
+) -> Result<(), String> {
+    if tracks.is_empty() {
+        return state.playback.clear_queue().await;
+    }
+
+    // Hydrate local tracks missing file_uri from SQLite without loading the full library.
+    let local_ids: Vec<String> = tracks
+        .iter()
+        .filter(|t| t.source_kind == "local" && t.file_uri.is_none())
+        .map(|t| t.id.clone())
+        .collect();
+
+    let hydrated_tracks = if local_ids.is_empty() {
+        tracks
+    } else {
+        let fetched = get_tracks_by_ids(&state.database, &local_ids).await?;
+        let by_id: std::collections::HashMap<String, Track> =
+            fetched.into_iter().map(|t| (t.id.clone(), t)).collect();
+        tracks
+            .into_iter()
+            .filter_map(|t| {
+                if t.source_kind == "local" && t.file_uri.is_none() {
+                    by_id.get(&t.id).cloned()
+                } else {
+                    Some(t)
+                }
+            })
+            .collect()
+    };
+
+    state
+        .playback
+        .set_mixed_queue(hydrated_tracks, start_index, enable_radio.unwrap_or(false))
+        .await
+}
+
+#[tauri::command]
 pub async fn add_to_queue(state: State<'_, AppState>, track_id: String) -> Result<(), String> {
-    let all_tracks = get_all_tracks(&state.database).await?;
-    let track = all_tracks
-        .into_iter()
-        .find(|t| t.id == track_id)
+    let track = get_track_by_id(&state.database, &track_id)
+        .await?
         .ok_or_else(|| format!("Track not found in database: {track_id}"))?;
 
     state.playback.add_to_queue(track).await
@@ -130,13 +161,32 @@ pub async fn add_to_queue(state: State<'_, AppState>, track_id: String) -> Resul
 
 #[tauri::command]
 pub async fn play_next(state: State<'_, AppState>, track_id: String) -> Result<(), String> {
-    let all_tracks = get_all_tracks(&state.database).await?;
-    let track = all_tracks
-        .into_iter()
-        .find(|t| t.id == track_id)
+    let track = get_track_by_id(&state.database, &track_id)
+        .await?
         .ok_or_else(|| format!("Track not found in database: {track_id}"))?;
 
     state.playback.play_next(track).await
+}
+
+#[tauri::command]
+pub async fn enqueue_track(
+    state: State<'_, AppState>,
+    track: Track,
+    play_next: Option<bool>,
+) -> Result<(), String> {
+    let resolved = if track.source_kind == "local" && track.file_uri.is_none() {
+        get_track_by_id(&state.database, &track.id)
+            .await?
+            .ok_or_else(|| format!("Track not found in database: {}", track.id))?
+    } else {
+        track
+    };
+
+    if play_next.unwrap_or(false) {
+        state.playback.play_next(resolved).await
+    } else {
+        state.playback.add_to_queue(resolved).await
+    }
 }
 
 #[tauri::command]

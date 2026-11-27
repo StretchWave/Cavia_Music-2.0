@@ -1,6 +1,7 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useRef, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { IconButton } from './IconButton';
+import { acquireOverlayLock, isTopOverlay, releaseOverlayLock } from '../lib/modalStack';
 
 interface ModalProps {
   isOpen: boolean;
@@ -23,7 +24,8 @@ export function Modal({
 }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousActiveElementRef = useRef<HTMLElement | null>(null);
-  const titleId = useRef(`modal-title-${Math.random().toString(36).slice(2, 9)}`).current;
+  const titleId = useId();
+  const overlayId = `modal-${titleId}`;
 
   // Keep the latest callback without re-running the open/close effect.
   // Callers commonly pass inline handlers, which would otherwise re-run the
@@ -37,7 +39,7 @@ export function Modal({
     if (!isOpen) return;
 
     previousActiveElementRef.current = document.activeElement as HTMLElement | null;
-    document.body.style.overflow = 'hidden';
+    acquireOverlayLock(overlayId);
 
     // Auto-focus first focusable element or dialog panel
     const focusTimer = setTimeout(() => {
@@ -64,6 +66,8 @@ export function Modal({
     }, 50);
 
     function handleKeyDown(e: KeyboardEvent) {
+      if (!isTopOverlay(overlayId)) return;
+
       if (e.key === 'Escape') {
         e.preventDefault();
         onCloseRef.current();
@@ -104,13 +108,13 @@ export function Modal({
 
     return () => {
       clearTimeout(focusTimer);
-      document.body.style.overflow = '';
+      releaseOverlayLock(overlayId);
       window.removeEventListener('keydown', handleKeyDown);
       if (previousActiveElementRef.current && typeof previousActiveElementRef.current.focus === 'function') {
         previousActiveElementRef.current.focus();
       }
     };
-  }, [isOpen]);
+  }, [isOpen, overlayId]);
 
   if (!isOpen) return null;
 

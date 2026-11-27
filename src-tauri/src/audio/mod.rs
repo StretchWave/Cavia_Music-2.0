@@ -86,7 +86,16 @@ impl AudioCapabilities {
 /// The common Cavia playback contract implemented by all platform audio engines.
 pub trait AudioBackend: Send {
     fn name(&self) -> &'static str;
+    /// Stable engine identifier used in diagnostics even when an output device is temporarily absent.
+    fn engine_id(&self) -> &'static str {
+        self.name()
+    }
     fn load(&mut self, file_path: &str, start_ms: u64) -> Result<(), PlaybackError>;
+    /// Loads a media source in a paused state without starting audio output.
+    fn load_paused(&mut self, file_path: &str, start_ms: u64) -> Result<(), PlaybackError> {
+        self.load(file_path, start_ms)?;
+        self.pause()
+    }
     fn set_metadata(
         &mut self,
         _title: &str,

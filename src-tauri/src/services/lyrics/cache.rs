@@ -1,6 +1,5 @@
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
-use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
 /// Negative cache lifetime. LRCLIB's documentation notes that missing tracks
@@ -69,7 +68,7 @@ fn file_identity(file_uri: Option<&str>) -> String {
     let Some(uri) = file_uri else {
         return "none".to_string();
     };
-    let path = local_path_from_uri(uri);
+    let path = crate::services::artwork::local_path_from_uri(uri);
     match std::fs::metadata(&path) {
         Ok(metadata) => {
             let mtime = metadata
@@ -84,20 +83,10 @@ fn file_identity(file_uri: Option<&str>) -> String {
     }
 }
 
-fn local_path_from_uri(uri: &str) -> PathBuf {
-    if let Some(rest) = uri.strip_prefix("file:///") {
-        PathBuf::from(rest)
-    } else if let Some(rest) = uri.strip_prefix("file://") {
-        PathBuf::from(rest)
-    } else {
-        PathBuf::from(uri)
-    }
-}
-
 fn normalized_uri(file_uri: Option<&str>) -> String {
     match file_uri {
         None => String::new(),
-        Some(uri) => local_path_from_uri(uri)
+        Some(uri) => crate::services::artwork::local_path_from_uri(uri)
             .to_string_lossy()
             .replace('\\', "/"),
     }
@@ -225,8 +214,9 @@ pub async fn delete_cached_lyrics(pool: &SqlitePool, track_id: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::artwork::local_path_from_uri;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

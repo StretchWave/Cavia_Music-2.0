@@ -88,6 +88,30 @@ impl AndroidMedia3Backend {
             self.snapshot = snapshot;
         }
     }
+    fn load_internal(
+        &mut self,
+        file_path: &str,
+        start_ms: u64,
+        auto_play: bool,
+    ) -> Result<(), PlaybackError> {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Args<'a> {
+            path: &'a str,
+            start_ms: u64,
+            auto_play: bool,
+        }
+        let _: serde_json::Value = self.command(
+            "load",
+            Args {
+                path: file_path,
+                start_ms,
+                auto_play,
+            },
+        )?;
+        self.refresh();
+        Ok(())
+    }
 }
 
 impl AudioBackend for AndroidMedia3Backend {
@@ -95,21 +119,10 @@ impl AudioBackend for AndroidMedia3Backend {
         "android_media3_exoplayer"
     }
     fn load(&mut self, file_path: &str, start_ms: u64) -> Result<(), PlaybackError> {
-        #[derive(serde::Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Args<'a> {
-            path: &'a str,
-            start_ms: u64,
-        }
-        let _: serde_json::Value = self.command(
-            "load",
-            Args {
-                path: file_path,
-                start_ms,
-            },
-        )?;
-        self.refresh();
-        Ok(())
+        self.load_internal(file_path, start_ms, true)
+    }
+    fn load_paused(&mut self, file_path: &str, start_ms: u64) -> Result<(), PlaybackError> {
+        self.load_internal(file_path, start_ms, false)
     }
     fn play(&mut self) -> Result<(), PlaybackError> {
         let _: serde_json::Value = self.command("play", ())?;
@@ -187,6 +200,16 @@ impl AudioBackend for AndroidMedia3Backend {
         }
     }
     fn validate_source(&self, path: &str) -> Result<(), PlaybackError> {
+        if path.starts_with("content://") {
+            return Ok(());
+        }
+        if let Ok(parsed) = url::Url::parse(path)
+            && parsed.scheme() == "file"
+            && let Ok(local_path) = parsed.to_file_path()
+            && local_path.is_file()
+        {
+            return Ok(());
+        }
         if std::path::Path::new(path).is_file() {
             Ok(())
         } else {

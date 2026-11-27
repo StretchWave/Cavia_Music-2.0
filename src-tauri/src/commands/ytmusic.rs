@@ -115,7 +115,7 @@ pub async fn ytmusic_play(
     let resolved = state.ytmusic.resolve_audio(&video_id).await?;
     let path = state
         .ytmusic
-        .ensure_cached(&video_id, &resolved.url)
+        .ensure_cached_with_mime(&video_id, &resolved.url, &resolved.mime_type)
         .await?;
 
     let track_id = format!("ytmusic:{video_id}");
@@ -143,14 +143,15 @@ pub async fn ytmusic_play(
         is_liked: false,
         play_count: 0,
         date_added: String::new(),
+        queue_entry_id: None,
+        contributor_id: None,
+        contributor_name: None,
+        priority_override: None,
     };
 
-    let playback_state = state.playback.snapshot();
-    let in_queue = playback_state.queue.iter().any(|t| t.id == track_id);
-    if !in_queue {
-        state.playback.add_to_queue(track).await?;
-    }
-    state.playback.play_track(&track_id).await?;
-    state.playback.play().await?;
+    state
+        .playback
+        .set_mixed_queue(vec![track], Some(0), true)
+        .await?;
     Ok(())
 }
