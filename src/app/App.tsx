@@ -60,6 +60,7 @@ import {
 import type {
   Album,
   Artist,
+  ConnectAccountHubSnapshot,
   ConnectSessionSnapshot,
   OfflineFallbackStatus,
   Page,
@@ -68,7 +69,9 @@ import type {
   Track,
 } from '../lib/types';
 import {
+  connectGetAccountHub,
   connectGetSession,
+  listenConnectAccountHub,
   listenConnectSession,
   listenOfflineStatus,
   listenPreloadStatus,
@@ -201,6 +204,7 @@ export function App() {
   const [preloadStatus, setPreloadStatus] = useState<PreloadStatusSnapshot | null>(null);
   const [offlineStatus, setOfflineStatus] = useState<OfflineFallbackStatus | null>(null);
   const [connectSession, setConnectSession] = useState<ConnectSessionSnapshot | null>(null);
+  const [connectHub, setConnectHub] = useState<ConnectAccountHubSnapshot | null>(null);
   const [offlineBusy, setOfflineBusy] = useState(false);
 
   // Add to Playlist modal state
@@ -433,10 +437,12 @@ export function App() {
     let unlistenPreload: (() => void) | undefined;
     let unlistenOffline: (() => void) | undefined;
     let unlistenConnect: (() => void) | undefined;
+    let unlistenConnectHub: (() => void) | undefined;
 
     preloadGetStatus().then((snap) => snap && setPreloadStatus(snap)).catch(console.error);
     offlineGetStatus().then((st) => st && setOfflineStatus(st)).catch(console.error);
     connectGetSession().then((sess) => setConnectSession(sess)).catch(console.error);
+    connectGetAccountHub().then((hub) => hub && setConnectHub(hub)).catch(console.error);
 
     listenPreloadStatus((snap) => setPreloadStatus(snap)).then((fn) => {
       unlistenPreload = fn;
@@ -447,6 +453,9 @@ export function App() {
     listenConnectSession((sess) => setConnectSession(sess)).then((fn) => {
       unlistenConnect = fn;
     });
+    listenConnectAccountHub((hub) => setConnectHub(hub)).then((fn) => {
+      unlistenConnectHub = fn;
+    });
 
     return () => {
       if (unlistenState) unlistenState();
@@ -455,6 +464,7 @@ export function App() {
       if (unlistenPreload) unlistenPreload();
       if (unlistenOffline) unlistenOffline();
       if (unlistenConnect) unlistenConnect();
+      if (unlistenConnectHub) unlistenConnectHub();
     };
   }, []);
 
@@ -1254,15 +1264,26 @@ export function App() {
 
             <button
               type="button"
-              className={`topbar-connect-btn ${connectSession ? 'is-active' : ''}`}
+              className={`topbar-connect-btn ${connectSession || connectHub?.profile.hosting ? 'is-active' : ''}`}
               onClick={() => setIsConnectOpen(true)}
               title="Open Cavia Connect collaborative session"
               aria-label="Open Cavia Connect"
             >
               <Radio size={14} aria-hidden="true" />
               <span className="topbar-connect-label">
-                {connectSession ? connectSession.joinCode : 'Connect'}
+                {connectHub?.profile.connectId
+                  ? `Connect · ${connectHub.profile.connectId}`
+                  : connectSession
+                    ? connectSession.joinCode
+                    : 'Connect'}
               </span>
+              {Boolean(
+                connectHub?.incomingRequests.some((r) => r.status === 'pending')
+              ) && (
+                <span className="nav-badge" aria-label="Pending connection requests">
+                  {connectHub!.incomingRequests.filter((r) => r.status === 'pending').length}
+                </span>
+              )}
             </button>
 
             <span
@@ -1411,10 +1432,13 @@ export function App() {
               onMotionChange={setMotion}
               preloadStatus={preloadStatus}
               onChangePreloadTarget={handleChangePreloadTarget}
+              connectHub={connectHub}
+              onConnectHubChanged={setConnectHub}
               onSyncConfigurationChanged={(enabled) => {
                 if (enabled) {
                   scheduleAutomaticSync(250);
                 } else cancelAutomaticSync();
+                connectGetAccountHub().then((hub) => hub && setConnectHub(hub)).catch(console.error);
               }}
             />
           )}
@@ -1499,9 +1523,11 @@ export function App() {
         isOpen={isConnectOpen}
         onClose={() => setIsConnectOpen(false)}
         session={connectSession}
+        hub={connectHub}
         isOffline={Boolean(offlineStatus?.isOffline)}
         localTracks={tracks}
         onSessionChanged={setConnectSession}
+        onHubChanged={setConnectHub}
         onNotify={pushToast}
       />
 

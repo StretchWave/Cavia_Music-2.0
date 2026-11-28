@@ -271,6 +271,10 @@ impl FairQueueEngine {
         self.queue_revision = queue_revision;
     }
 
+    pub fn all_entries(&self) -> &[SharedQueueEntry] {
+        &self.entries
+    }
+
     /// Pending song count for a participant (counts active Ready + PendingPreload entries).
     pub fn pending_count_for(&self, participant_id: &str) -> usize {
         self.entries
@@ -817,13 +821,16 @@ impl FairQueueEngine {
         }
 
         // Seed RNG deterministically from session seed + fixed structural signature of current pool
-        // so reconnects/sync produce identical sequences for identical queue state.
-        let pool_hash = pool_by_contributor
+        // in sorted sequence order so HashMap randomization never alters reconnect/sync determinism.
+        let mut pool_seqs: Vec<u64> = pool_by_contributor
             .values()
             .flatten()
-            .fold(self.session_seed, |acc, e| {
-                acc.wrapping_mul(31).wrapping_add(e.created_at_seq)
-            });
+            .map(|e| e.created_at_seq)
+            .collect();
+        pool_seqs.sort_unstable();
+        let pool_hash = pool_seqs.into_iter().fold(self.session_seed, |acc, seq| {
+            acc.wrapping_mul(31).wrapping_add(seq)
+        });
         let mut rng = DeterministicRng::new(pool_hash ^ self.session_seed);
 
         let preferred_gap = self.config.preferred_spacing;

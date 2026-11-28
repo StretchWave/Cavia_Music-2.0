@@ -5,6 +5,9 @@ use crate::services::connect::{
     ConnectContributionResult, ConnectPlaylistContributionResult, ConnectSessionSnapshot,
     ConnectSyncResult,
 };
+use crate::services::connect_accounts::{
+    ConnectAccountHubSnapshot, ConnectRequestSendOutcome, ConnectRespondOutcome, HostLookupResult,
+};
 use crate::services::fair_queue::ParticipantRole;
 use crate::services::offline::{OfflineFallbackStatus, probe_internet_connectivity};
 use crate::services::playback::{handle_connectivity_restored, restore_original_queue_now};
@@ -103,6 +106,18 @@ pub async fn connect_create_session(
         .connect
         .create_session(&name, &host_name, alpha)
         .await?;
+    let _ = state
+        .connect_accounts
+        .sync_host_session_started(
+            &snap.session_id,
+            &snap.join_code,
+            &snap.name,
+            snap.fairness_alpha,
+            snap.preload_target,
+            snap.queue_revision + 1,
+        )
+        .await;
+    sync_connect_metadata_to_playback(&state).await;
     sync_connect_into_playback(&state).await;
     Ok(snap)
 }
@@ -118,6 +133,25 @@ pub async fn connect_join_session(
         .connect
         .join_session(&join_code, participant_id.as_deref(), &display_name)
         .await?;
+    sync_connect_metadata_to_playback(&state).await;
+    sync_connect_into_playback(&state).await;
+    Ok(snap)
+}
+
+#[tauri::command]
+pub async fn connect_join_approved_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<ConnectSessionSnapshot, String> {
+    let hub = state.connect_accounts.get_hub_snapshot().await.ok();
+    let display_name = hub
+        .map(|h| h.profile.display_name)
+        .filter(|s| !s.trim().is_empty());
+    let snap = state
+        .connect
+        .join_approved_session(&session_id, display_name.as_deref())
+        .await?;
+    sync_connect_metadata_to_playback(&state).await;
     sync_connect_into_playback(&state).await;
     Ok(snap)
 }
@@ -258,7 +292,140 @@ pub async fn connect_sync_now(state: State<'_, AppState>) -> Result<ConnectSyncR
 
 #[tauri::command]
 pub async fn connect_end_session(state: State<'_, AppState>) -> Result<(), String> {
-    state.connect.end_session().await
+    state.connect.end_session().await?;
+    let _ = state
+        .connect_accounts
+        .update_profile_and_controls(None, None, Some(false), None, None, None)
+        .await;
+    let _ = state.playback.set_connect_metadata_tag(None).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn connect_get_account_hub(
+    state: State<'_, AppState>,
+) -> Result<ConnectAccountHubSnapshot, String> {
+    let hub = state.connect_accounts.get_hub_snapshot().await?;
+    sync_connect_metadata_to_playback(&state).await;
+    Ok(hub)
+}
+
+#[tauri::command]
+pub async fn connect_update_account_settings(
+    display_name: Option<String>,
+    avatar_url: Option<String>,
+    hosting: Option<bool>,
+    accept_join_requests: Option<bool>,
+    show_connect_id: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<ConnectAccountHubSnapshot, String> {
+    if hosting == Some(false) && state.connect.is_active() {
+        let _ = state.connect.end_session().await;
+    }
+    let hub = state
+        .connect_accounts
+        .update_profile_and_controls(
+            display_name.as_deref(),
+            avatar_url.as_deref(),
+            hosting,
+            accept_join_requests,
+            show_connect_id,
+            None,
+        )
+        .await?;
+    sync_connect_metadata_to_playback(&state).await;
+    Ok(hub)
+}
+
+#[tauri::command]
+pub async fn connect_lookup_host(
+    connect_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<HostLookupResult>, String> {
+    state.connect_accounts.lookup_host(&connect_id).await
+}
+
+#[tauri::command]
+pub async fn connect_send_join_request(
+    host_account_id: String,
+    state: State<'_, AppState>,
+) -> Result<ConnectRequestSendOutcome, String> {
+    state
+        .connect_accounts
+        .send_join_request(&host_account_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn connect_respond_request(
+    request_id: String,
+    action: String,
+    state: State<'_, AppState>,
+) -> Result<ConnectRespondOutcome, String> {
+    let outcome = state
+        .connect_accounts
+        .respond_to_request(&request_id, &action)
+        .await?;
+    if outcome.status == "accepted" {
+        let _ = state
+            .connect
+            .register_approved_guest(
+                &outcome.requester_account_id,
+                &outcome.requester_display_name,
+            )
+            .await;
+    }
+    Ok(outcome)
+}
+
+#[tauri::command]
+pub async fn connect_unignore_guest(
+    ignored_account_id: String,
+    state: State<'_, AppState>,
+) -> Result<ConnectAccountHubSnapshot, String> {
+    state
+        .connect_accounts
+        .unignore_guest(&ignored_account_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn connect_save_host(
+    host_account_id: String,
+    state: State<'_, AppState>,
+) -> Result<ConnectAccountHubSnapshot, String> {
+    state.connect_accounts.save_host(&host_account_id).await
+}
+
+#[tauri::command]
+pub async fn connect_remove_saved_host(
+    host_account_id: String,
+    state: State<'_, AppState>,
+) -> Result<ConnectAccountHubSnapshot, String> {
+    state
+        .connect_accounts
+        .remove_saved_host(&host_account_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn connect_to_saved_host(
+    host_account_id: String,
+    state: State<'_, AppState>,
+) -> Result<ConnectRequestSendOutcome, String> {
+    state
+        .connect_accounts
+        .connect_to_saved_host(&host_account_id)
+        .await
+}
+
+async fn sync_connect_metadata_to_playback(state: &AppState) {
+    let tag = if state.connect.is_active() {
+        state.connect_accounts.active_metadata_tag_if_shown().await
+    } else {
+        None
+    };
+    let _ = state.playback.set_connect_metadata_tag(tag).await;
 }
 
 async fn sync_connect_into_playback(state: &AppState) {

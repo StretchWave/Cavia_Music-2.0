@@ -213,3 +213,56 @@ export function formatArtworkUri(uri?: string): string | undefined {
   return uri;
 }
 
+export interface LibraryStorageSummary {
+  streamCacheBytes: number;
+  streamCacheFiles: number;
+  streamProtectedFiles: number;
+  streamCacheLimitBytes: number;
+  lyricsCacheEntries: number;
+  recentPlaysCount: number;
+}
+
+export interface StreamCacheCleanupResult {
+  deletedFiles: number;
+  reclaimedBytes: number;
+  skippedActiveTrack: boolean;
+}
+
+export async function getLibraryStorageSummary(): Promise<LibraryStorageSummary> {
+  if (!isNativeApp()) {
+    return {
+      streamCacheBytes: 0,
+      streamCacheFiles: 0,
+      streamProtectedFiles: 0,
+      streamCacheLimitBytes: 0,
+      lyricsCacheEntries: 0,
+      recentPlaysCount: 0,
+    };
+  }
+  return invoke<LibraryStorageSummary>('get_library_storage_summary');
+}
+
+export async function clearStreamCache(includeProtected = false): Promise<StreamCacheCleanupResult> {
+  if (!isNativeApp()) {
+    return { deletedFiles: 0, reclaimedBytes: 0, skippedActiveTrack: false };
+  }
+  return invoke<StreamCacheCleanupResult>('clear_stream_cache', { includeProtected });
+}
+
+export async function clearLyricsCache(): Promise<number> {
+  if (!isNativeApp()) return 0;
+  return invoke<number>('clear_lyrics_cache');
+}
+
+export async function clearArtworkCache(): Promise<{
+  deletedFiles: number;
+  reclaimedBytes: number;
+  skippedFiles: number;
+  failures: string[];
+}> {
+  if (!isNativeApp()) {
+    return { deletedFiles: 0, reclaimedBytes: 0, skippedFiles: 0, failures: [] };
+  }
+  return invoke('clear_artwork_cache');
+}
+

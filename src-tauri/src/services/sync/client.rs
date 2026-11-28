@@ -434,6 +434,177 @@ impl SupabaseRestClient {
 
         check_projection_response(resp, &format!("upsert {table}")).await
     }
+
+    pub async fn insert_table_rows_ignore_duplicates(
+        &self,
+        supabase_url: &str,
+        anon_key: &str,
+        access_token: &str,
+        table: &str,
+        rows: &serde_json::Value,
+        on_conflict: Option<&str>,
+    ) -> Result<(), String> {
+        let clean_url = supabase_url.trim_end_matches('/');
+        let endpoint = match on_conflict {
+            Some(cols) if !cols.trim().is_empty() => {
+                format!("{clean_url}/rest/v1/{table}?on_conflict={cols}")
+            }
+            _ => format!("{clean_url}/rest/v1/{table}"),
+        };
+
+        let resp = self
+            .client
+            .post(&endpoint)
+            .header("apikey", anon_key)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .header("Prefer", "resolution=ignore-duplicates,return=minimal")
+            .json(rows)
+            .send()
+            .await
+            .map_err(|e| format!("Network error pushing {table}: {e}"))?;
+
+        check_projection_response(resp, &format!("insert {table}")).await
+    }
+
+    pub async fn get_table_rows(
+        &self,
+        supabase_url: &str,
+        anon_key: &str,
+        access_token: &str,
+        table: &str,
+        query: &str,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let clean_url = supabase_url.trim_end_matches('/');
+        let endpoint = if query.trim().is_empty() {
+            format!("{clean_url}/rest/v1/{table}")
+        } else {
+            format!("{clean_url}/rest/v1/{table}?{query}")
+        };
+
+        let resp = self
+            .client
+            .get(&endpoint)
+            .header("apikey", anon_key)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .send()
+            .await
+            .map_err(|e| format!("Network error querying {table}: {e}"))?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err("Your session has expired. Please sign in again.".to_string());
+        }
+        if !status.is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(format!("Cloud query {table} failed ({status}): {err}"));
+        }
+
+        resp.json::<Vec<serde_json::Value>>()
+            .await
+            .map_err(|e| format!("Invalid JSON querying {table}: {e}"))
+    }
+
+    pub async fn patch_table_rows(
+        &self,
+        supabase_url: &str,
+        anon_key: &str,
+        access_token: &str,
+        table: &str,
+        filter_query: &str,
+        patch: &serde_json::Value,
+    ) -> Result<(), String> {
+        let clean_url = supabase_url.trim_end_matches('/');
+        let endpoint = format!("{clean_url}/rest/v1/{table}?{filter_query}");
+        let resp = self
+            .client
+            .patch(&endpoint)
+            .header("apikey", anon_key)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .header("Prefer", "return=minimal")
+            .json(patch)
+            .send()
+            .await
+            .map_err(|e| format!("Network error updating {table}: {e}"))?;
+
+        check_projection_response(resp, &format!("patch {table}")).await
+    }
+
+    pub async fn call_rpc<T: serde::de::DeserializeOwned>(
+        &self,
+        supabase_url: &str,
+        anon_key: &str,
+        access_token: &str,
+        function_name: &str,
+        params: &serde_json::Value,
+    ) -> Result<T, String> {
+        let clean_url = supabase_url.trim_end_matches('/');
+        let endpoint = format!("{clean_url}/rest/v1/rpc/{function_name}");
+        let resp = self
+            .client
+            .post(&endpoint)
+            .header("apikey", anon_key)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .header("Content-Type", "application/json")
+            .json(params)
+            .send()
+            .await
+            .map_err(|e| format!("Network error reaching Connect service: {e}"))?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err("Your account session has expired. Please sign in again.".to_string());
+        }
+        if !status.is_success() {
+            let err_text = resp.text().await.unwrap_or_default();
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&err_text)
+                && let Some(msg) = val.get("message").and_then(serde_json::Value::as_str)
+            {
+                return Err(msg.to_string());
+            }
+            return Err(format!("Connect request failed ({status}): {err_text}"));
+        }
+
+        resp.json::<T>()
+            .await
+            .map_err(|e| format!("Invalid response from Connect service: {e}"))
+    }
+
+    pub async fn call_rpc_void(
+        &self,
+        supabase_url: &str,
+        anon_key: &str,
+        access_token: &str,
+        function_name: &str,
+        params: &serde_json::Value,
+    ) -> Result<(), String> {
+        let clean_url = supabase_url.trim_end_matches('/');
+        let endpoint = format!("{clean_url}/rest/v1/rpc/{function_name}");
+        let resp = self
+            .client
+            .post(&endpoint)
+            .header("apikey", anon_key)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .header("Content-Type", "application/json")
+            .json(params)
+            .send()
+            .await
+            .map_err(|e| format!("Network error reaching Connect service: {e}"))?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err("Your account session has expired. Please sign in again.".to_string());
+        }
+        if !status.is_success() {
+            let err_text = resp.text().await.unwrap_or_default();
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&err_text)
+                && let Some(msg) = val.get("message").and_then(serde_json::Value::as_str)
+            {
+                return Err(msg.to_string());
+            }
+            return Err(format!("Connect request failed ({status}): {err_text}"));
+        }
+        Ok(())
+    }
 }
 
 async fn check_projection_response(resp: reqwest::Response, op: &str) -> Result<(), String> {

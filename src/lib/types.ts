@@ -252,3 +252,98 @@ export interface ConnectSyncResult {
   errorMessage?: string | null;
 }
 
+export interface ConnectAccountProfile {
+  authenticated: boolean;
+  backendConfigured: boolean;
+  accountId?: string | null;
+  connectId?: string | null;
+  displayName: string;
+  avatarUrl?: string | null;
+  hosting: boolean;
+  acceptJoinRequests: boolean;
+  showConnectId: boolean;
+  activeSessionId?: string | null;
+  offline: boolean;
+  errorMessage?: string | null;
+}
+
+export interface HostLookupResult {
+  hostAccountId: string;
+  connectId: string;
+  displayName: string;
+  avatarUrl?: string | null;
+  hosting: boolean;
+  acceptJoinRequests: boolean;
+  canRequest: boolean;
+  availabilityStatus: string;
+  alreadyApproved: boolean;
+  pendingRequest: boolean;
+}
+
+export interface ConnectRequestSendOutcome {
+  outcome: string;
+  requestId?: string | null;
+  sessionId?: string | null;
+  message: string;
+}
+
+export interface ConnectionRequestItem {
+  requestId: string;
+  sessionId: string;
+  requesterAccountId: string;
+  requesterConnectId: string;
+  requesterDisplayName: string;
+  requesterAvatarUrl?: string | null;
+  status: 'pending' | 'accepted' | 'declined' | 'ignored' | 'closed' | string;
+  createdAt: string;
+  respondedAt?: string | null;
+}
+
+export interface OutboundRequestItem {
+  requestId: string;
+  sessionId: string;
+  hostAccountId: string;
+  hostConnectId: string;
+  hostDisplayName: string;
+  hostAvatarUrl?: string | null;
+  status: 'pending' | 'accepted' | 'declined' | 'unavailable' | 'closed' | string;
+  createdAt: string;
+  respondedAt?: string | null;
+}
+
+export interface IgnoredAccountEntry {
+  ignoredAccountId: string;
+  connectId: string;
+  displayName: string;
+  avatarUrl?: string | null;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface SavedHostEntry {
+  hostAccountId: string;
+  hostConnectId: string;
+  hostDisplayName: string;
+  hostAvatarUrl?: string | null;
+  hosting: boolean;
+  acceptJoinRequests: boolean;
+  availabilityStatus: string;
+  savedAt: string;
+}
+
+export interface ConnectRespondOutcome {
+  requestId: string;
+  status: string;
+  requesterAccountId: string;
+  requesterDisplayName: string;
+  sessionId: string;
+}
+
+export interface ConnectAccountHubSnapshot {
+  profile: ConnectAccountProfile;
+  incomingRequests: ConnectionRequestItem[];
+  outboundRequests: OutboundRequestItem[];
+  ignoredAccounts: IgnoredAccountEntry[];
+  savedHosts: SavedHostEntry[];
+}
+

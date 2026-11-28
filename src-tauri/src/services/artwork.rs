@@ -682,6 +682,67 @@ impl ArtworkService {
         })
     }
 
+    /// Removes all managed artwork files from the cache directory while leaving track database rows intact
+    /// so artwork can still be repaired from embedded audio tags later.
+    pub async fn clear_all_cache(&self) -> Result<ArtworkCleanupResult, String> {
+        let _guard = self.op_lock.lock().await;
+        if !self.artworks_dir.exists() {
+            return Ok(ArtworkCleanupResult {
+                deleted_files: 0,
+                reclaimed_bytes: 0,
+                skipped_files: 0,
+                failures: Vec::new(),
+            });
+        }
+        let dir = self.artworks_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let canonical_dir = dir.canonicalize().ok();
+            let mut deleted_files = 0_u64;
+            let mut reclaimed_bytes = 0_u64;
+            let mut skipped_files = 0_u64;
+            let mut failures = Vec::new();
+            let entries = fs::read_dir(&dir)
+                .map_err(|e| format!("Failed to inspect artwork cache directory: {e}"))?;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !is_valid_artwork_filename(name) {
+                    skipped_files += 1;
+                    continue;
+                }
+                if let Some(canon_dir) = &canonical_dir
+                    && let Ok(canon_file) = path.canonicalize()
+                    && !canon_file.starts_with(canon_dir)
+                {
+                    skipped_files += 1;
+                    continue;
+                }
+                let len = path.metadata().map(|m| m.len()).unwrap_or(0);
+                match fs::remove_file(&path) {
+                    Ok(()) => {
+                        deleted_files += 1;
+                        reclaimed_bytes = reclaimed_bytes.saturating_add(len);
+                    }
+                    Err(e) if e.kind() == ErrorKind::NotFound => {}
+                    Err(e) => failures.push(format!("Failed to delete {}: {e}", path.display())),
+                }
+            }
+            Ok(ArtworkCleanupResult {
+                deleted_files,
+                reclaimed_bytes,
+                skipped_files,
+                failures,
+            })
+        })
+        .await
+        .map_err(|e| format!("Artwork cache clear task failed: {e}"))?
+    }
+
     /// Recovers missing artwork for a single track.
     pub async fn recover_track(&self, track_id: &str) -> Result<TrackRecoveryOutcome, String> {
         let _guard = self.op_lock.lock().await;

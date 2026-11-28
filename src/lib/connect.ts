@@ -2,10 +2,14 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isNativeApp } from './platform';
 import type {
+  ConnectAccountHubSnapshot,
   ConnectContributionResult,
   ConnectPlaylistContributionResult,
+  ConnectRequestSendOutcome,
+  ConnectRespondOutcome,
   ConnectSessionSnapshot,
   ConnectSyncResult,
+  HostLookupResult,
   OfflineFallbackStatus,
   ParticipantRole,
   PreloadStatusSnapshot,
@@ -33,7 +37,7 @@ export async function preloadRetry(): Promise<PreloadStatusSnapshot | null> {
 export async function listenPreloadStatus(
   callback: (snapshot: PreloadStatusSnapshot) => void
 ): Promise<UnlistenFn> {
-  if (!isNativeApp()) return () => {};
+  if (!isNativeApp()) return () => { };
   return listen<PreloadStatusSnapshot>('playback:preload-changed', (event) => {
     callback(event.payload);
   });
@@ -67,7 +71,7 @@ export async function offlineProbeReconnect(): Promise<OfflineFallbackStatus | n
 export async function listenOfflineStatus(
   callback: (status: OfflineFallbackStatus) => void
 ): Promise<UnlistenFn> {
-  if (!isNativeApp()) return () => {};
+  if (!isNativeApp()) return () => { };
   return listen<OfflineFallbackStatus>('playback:offline-changed', (event) => {
     callback(event.payload);
   });
@@ -102,6 +106,13 @@ export async function connectJoinSession(
     displayName,
     participantId,
   });
+}
+
+export async function connectJoinApprovedSession(
+  sessionId: string
+): Promise<ConnectSessionSnapshot | null> {
+  if (!isNativeApp()) return null;
+  return invoke<ConnectSessionSnapshot>('connect_join_approved_session', { sessionId });
 }
 
 export async function connectSetParticipantConnected(
@@ -176,8 +187,81 @@ export async function connectEndSession(): Promise<void> {
 export async function listenConnectSession(
   callback: (snapshot: ConnectSessionSnapshot | null) => void
 ): Promise<UnlistenFn> {
-  if (!isNativeApp()) return () => {};
+  if (!isNativeApp()) return () => { };
   return listen<ConnectSessionSnapshot | null>('connect:state-changed', (event) => {
+    callback(event.payload);
+  });
+}
+
+export async function connectGetAccountHub(): Promise<ConnectAccountHubSnapshot | null> {
+  if (!isNativeApp()) return null;
+  return invoke<ConnectAccountHubSnapshot>('connect_get_account_hub');
+}
+
+export async function connectUpdateAccountSettings(params: {
+  displayName?: string;
+  avatarUrl?: string;
+  hosting?: boolean;
+  acceptJoinRequests?: boolean;
+  showConnectId?: boolean;
+}): Promise<ConnectAccountHubSnapshot | null> {
+  if (!isNativeApp()) return null;
+  return invoke<ConnectAccountHubSnapshot>('connect_update_account_settings', params);
+}
+
+export async function connectLookupHost(connectId: string): Promise<HostLookupResult | null> {
+  if (!isNativeApp()) return null;
+  return invoke<HostLookupResult | null>('connect_lookup_host', { connectId });
+}
+
+export async function connectSendJoinRequest(
+  hostAccountId: string
+): Promise<ConnectRequestSendOutcome | null> {
+  if (!isNativeApp()) return null;
+  return invoke<ConnectRequestSendOutcome>('connect_send_join_request', { hostAccountId });
+}
+
+export async function connectRespondRequest(
+  requestId: string,
+  action: 'accept' | 'decline' | 'ignore_1d'
+): Promise<ConnectRespondOutcome | null> {
+  if (!isNativeApp()) return null;
+  return invoke<ConnectRespondOutcome>('connect_respond_request', { requestId, action });
+}
+
+export async function connectUnignoreGuest(
+  ignoredAccountId: string
+): Promise<ConnectAccountHubSnapshot | null> {
+  if (!isNativeApp()) return null;
+  return invoke<ConnectAccountHubSnapshot>('connect_unignore_guest', { ignoredAccountId });
+}
+
+export async function connectSaveHost(
+  hostAccountId: string
+): Promise<ConnectAccountHubSnapshot | null> {
+  if (!isNativeApp()) return null;
+  return invoke<ConnectAccountHubSnapshot>('connect_save_host', { hostAccountId });
+}
+
+export async function connectRemoveSavedHost(
+  hostAccountId: string
+): Promise<ConnectAccountHubSnapshot | null> {
+  if (!isNativeApp()) return null;
+  return invoke<ConnectAccountHubSnapshot>('connect_remove_saved_host', { hostAccountId });
+}
+
+export async function connectToSavedHost(
+  hostAccountId: string
+): Promise<ConnectRequestSendOutcome | null> {
+  if (!isNativeApp()) return null;
+  return invoke<ConnectRequestSendOutcome>('connect_to_saved_host', { hostAccountId });
+}
+
+export async function listenConnectAccountHub(
+  callback: (snapshot: ConnectAccountHubSnapshot) => void
+): Promise<UnlistenFn> {
+  if (!isNativeApp()) return () => { };
+  return listen<ConnectAccountHubSnapshot>('connect:account-changed', (event) => {
     callback(event.payload);
   });
 }

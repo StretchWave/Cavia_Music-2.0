@@ -211,6 +211,21 @@ pub async fn delete_cached_lyrics(pool: &SqlitePool, track_id: &str) -> Result<(
     Ok(())
 }
 
+/// Counts cached lyrics records in SQLite.
+pub async fn count_cached_lyrics(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT COUNT(*) FROM lyrics_cache")
+        .fetch_one(pool)
+        .await
+}
+
+/// Clears all cached lyrics entries from SQLite.
+pub async fn clear_all_cached_lyrics(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM lyrics_cache")
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

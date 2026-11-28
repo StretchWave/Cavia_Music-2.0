@@ -25,6 +25,7 @@ pub struct AppState {
     pub import_manager: Arc<crate::services::spotify::ImportManager>,
     pub preload: Arc<crate::services::preload::PreloadCoordinator>,
     pub connect: Arc<crate::services::connect::ConnectService>,
+    pub connect_accounts: Arc<crate::services::connect_accounts::ConnectAccountService>,
     pub offline: Arc<crate::services::offline::OfflineFallbackService>,
 }
 
@@ -42,6 +43,7 @@ impl AppState {
         import_manager: Arc<crate::services::spotify::ImportManager>,
         preload: Arc<crate::services::preload::PreloadCoordinator>,
         connect: Arc<crate::services::connect::ConnectService>,
+        connect_accounts: Arc<crate::services::connect_accounts::ConnectAccountService>,
         offline: Arc<crate::services::offline::OfflineFallbackService>,
     ) -> Self {
         Self {
@@ -57,6 +59,7 @@ impl AppState {
             import_manager,
             preload,
             connect,
+            connect_accounts,
             offline,
         }
     }

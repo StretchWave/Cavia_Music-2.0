@@ -39,3 +39,12 @@
 - Preserve the original queue intact during internet outages; shuffle only decoder-verified cached streaming tracks plus verified local library tracks.
 
 **Reason:** Collaborative listening stays fair across bursts and disconnects, upcoming tracks prepare sequentially without starving active playback, and offline recovery resumes seamlessly without mutating the user's queue.
+
+## ADR-007 — Account-Based Cavia Connect Identity, Requests, 24h Ignores & Saved Hosts
+
+**Decision:**
+- Issue each authenticated account a permanent, globally unique, immutable 6-character Connect ID from the unambiguous 32-character alphabet (`ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, omitting `0`, `O`, `1`, `I`) strictly for host discovery — never as an authentication secret or authorization grant.
+- Enforce join requests, duplicate pending suppression (`UNIQUE` partial index), host-specific 24-hour temporary ignores, rate limits, and participant approval server-side in Supabase `SECURITY DEFINER` RPCs and Postgres RLS (`20261128000000_connect_accounts_requests_ignores.sql`), caching read-only state locally (`0011_connect_accounts_requests_ignores.sql`).
+- Keep **Hosting**, **Accept Join Requests**, and **Show Connect ID** strictly independent, and require explicit host approval for saved-host reconnects rather than implicit auto-approval.
+
+**Reason:** Reconnects, saved hosts, and 24-hour ignores survive device switches and reinstalls safely without credential leakage, ambiguous characters, or privilege escalation.

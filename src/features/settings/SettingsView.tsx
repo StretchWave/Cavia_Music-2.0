@@ -7,6 +7,7 @@ import {
   Database,
   DownloadCloud,
   HardDrive,
+  History,
   Info,
   Layers,
   Lock,
@@ -15,7 +16,9 @@ import {
   Music2,
   Palette,
   Plus,
+  Radio,
   RefreshCw,
+  ShieldBan,
   ShieldCheck,
   Sliders,
   Trash2,
@@ -29,8 +32,16 @@ import { Button } from '../../components/Button';
 import { Modal } from '../../components/Modal';
 import type { PlatformHealth } from '../../lib/platform';
 import type { MotionSetting } from '../../lib/motion';
-import type { PreloadStatusSnapshot, SyncAccountStatus, SyncConfigDTO } from '../../lib/types';
-import { MAX_PRELOAD_TARGET } from '../../lib/connect';
+import type {
+  ConnectAccountHubSnapshot,
+  PreloadStatusSnapshot,
+  SyncAccountStatus,
+} from '../../lib/types';
+import {
+  connectUnignoreGuest,
+  connectUpdateAccountSettings,
+  MAX_PRELOAD_TARGET,
+} from '../../lib/connect';
 import {
   getArtworkCacheSummary,
   cleanOrphanedArtwork,
@@ -40,7 +51,16 @@ import {
   type ArtworkCleanupResult,
   type ArtworkRecoveryResult,
 } from '../../lib/artwork';
-import { isNativeApp } from '../../lib/library';
+import {
+  clearArtworkCache,
+  clearLyricsCache,
+  clearRecentPlays,
+  clearStreamCache,
+  getLibraryStorageSummary,
+  isNativeApp,
+  type LibraryStorageSummary,
+} from '../../lib/library';
+import { clearCompletedImports } from '../../lib/spotify';
 import {
   formatSmtcDiagnostic,
   getPersistenceBadgeConfig,
@@ -53,8 +73,6 @@ import {
   toggleSync,
   syncNow,
   deleteCloudData,
-  getSyncConfig,
-  setSyncConfig as saveSyncConfig,
 } from '../../lib/sync';
 
 interface SettingsViewProps {
@@ -66,15 +84,17 @@ interface SettingsViewProps {
   onSyncConfigurationChanged: (enabled: boolean) => void;
   preloadStatus?: PreloadStatusSnapshot | null;
   onChangePreloadTarget?: (target: number) => void;
+  connectHub?: ConnectAccountHubSnapshot | null;
+  onConnectHubChanged?: (hub: ConnectAccountHubSnapshot | null) => void;
 }
 
-type SettingsSection = 'appearance' | 'audio' | 'library' | 'account' | 'about';
+type SettingsSection = 'appearance' | 'audio' | 'library' | 'profile' | 'about';
 
 const SECTIONS: Array<{ id: SettingsSection; label: string; icon: typeof Palette }> = [
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'audio', label: 'Audio', icon: Volume2 },
   { id: 'library', label: 'Library', icon: Database },
-  { id: 'account', label: 'Account', icon: Cloud },
+  { id: 'profile', label: 'Profile', icon: User },
   { id: 'about', label: 'About', icon: Info },
 ];
 
@@ -87,96 +107,111 @@ export const SettingsView = memo(function SettingsView({
   onSyncConfigurationChanged,
   preloadStatus,
   onChangePreloadTarget,
+  connectHub,
+  onConnectHubChanged,
 }: SettingsViewProps) {
   const [activeSection, setActiveSection] = useState<SettingsSection>('appearance');
 
-  // Artwork cache management
+  // Preload preference memory when toggling off -> on
+  const [lastPreloadTarget, setLastPreloadTarget] = useState(10);
+
+  // Library storage & cache management
+  const [storageSummary, setStorageSummary] = useState<LibraryStorageSummary | null>(null);
   const [artworkSummary, setArtworkSummary] = useState<ArtworkCacheSummary | null>(null);
-  const [artworkLoading, setArtworkLoading] = useState(false);
-  const [artworkError, setArtworkError] = useState<string | null>(null);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryError, setLibraryError] = useState<string | null>(null);
+  const [librarySuccessMsg, setLibrarySuccessMsg] = useState<string | null>(null);
   const [isCleaning, setIsCleaning] = useState(false);
   const [isRepairing, setIsRepairing] = useState(false);
   const [showCleanupModal, setShowCleanupModal] = useState(false);
+  const [showClearAllDownloadsModal, setShowClearAllDownloadsModal] = useState(false);
+  const [showClearAllArtworkModal, setShowClearAllArtworkModal] = useState(false);
   const [cleanupResult, setCleanupResult] = useState<ArtworkCleanupResult | null>(null);
   const [recoveryResult, setRecoveryResult] = useState<ArtworkRecoveryResult | null>(null);
 
-  // Cloud sync
+  // Profile, Cloud Sync & Cavia Connect identity
   const [syncStatus, setSyncStatus] = useState<SyncAccountStatus | null>(null);
-  const [syncConfig, setSyncBackendConfig] = useState<SyncConfigDTO | null>(null);
-  const [syncUrl, setSyncUrl] = useState('');
-  const [syncAnonKey, setSyncAnonKey] = useState('');
-  const [isSavingSyncConfig, setIsSavingSyncConfig] = useState(false);
-  const [syncError, setSyncError] = useState<string | null>(null);
-  const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileSuccessMsg, setProfileSuccessMsg] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [showDeleteCloudModal, setShowDeleteCloudModal] = useState(false);
   const [isDeletingCloud, setIsDeletingCloud] = useState(false);
+  const [connectDisplayNameDraft, setConnectDisplayNameDraft] = useState(
+    connectHub?.profile.displayName ?? ''
+  );
+  const [connectSettingsBusy, setConnectSettingsBusy] = useState(false);
 
-  const fetchArtworkSummary = async () => {
-    setArtworkLoading(true);
-    setArtworkError(null);
+  useEffect(() => {
+    if (preloadStatus?.targetCount && preloadStatus.targetCount > 0) {
+      setLastPreloadTarget(preloadStatus.targetCount);
+    }
+  }, [preloadStatus?.targetCount]);
+
+  useEffect(() => {
+    if (connectHub?.profile.displayName) {
+      setConnectDisplayNameDraft(connectHub.profile.displayName);
+    }
+  }, [connectHub?.profile.displayName]);
+
+  const showLibraryNotice = (msg: string) => {
+    setLibrarySuccessMsg(msg);
+    setTimeout(() => setLibrarySuccessMsg(null), 4000);
+  };
+
+  const fetchLibraryStorage = async () => {
+    setLibraryLoading(true);
+    setLibraryError(null);
     try {
-      const summary = await getArtworkCacheSummary();
-      setArtworkSummary(summary);
+      const [storage, artwork] = await Promise.all([
+        getLibraryStorageSummary(),
+        getArtworkCacheSummary(),
+      ]);
+      setStorageSummary(storage);
+      setArtworkSummary(artwork);
     } catch (err) {
-      setArtworkError(err instanceof Error ? err.message : String(err));
+      setLibraryError(err instanceof Error ? err.message : String(err));
     } finally {
-      setArtworkLoading(false);
+      setLibraryLoading(false);
     }
   };
 
-  const fetchSyncInfo = async () => {
+  const fetchProfileInfo = async () => {
     try {
       const status = await getSyncStatus();
       setSyncStatus(status);
     } catch (e) {
-      console.error('Failed to load sync info:', e);
-      setSyncError(e instanceof Error ? e.message : String(e));
+      console.error('Failed to load profile status:', e);
+      setProfileError(e instanceof Error ? e.message : String(e));
     }
   };
 
   useEffect(() => {
     let active = true;
-
-    // Cache and sync diagnostics are native-only. The browser design preview
-    // has no Tauri backend, so querying it would only throw.
     if (!isNativeApp()) {
       return () => {
         active = false;
       };
     }
 
-    getArtworkCacheSummary()
-      .then((summary) => {
-        if (active) setArtworkSummary(summary);
+    Promise.all([getLibraryStorageSummary(), getArtworkCacheSummary()])
+      .then(([storage, artwork]) => {
+        if (!active) return;
+        setStorageSummary(storage);
+        setArtworkSummary(artwork);
       })
       .catch((err) => {
-        if (active) setArtworkError(err instanceof Error ? err.message : String(err));
+        if (active) setLibraryError(err instanceof Error ? err.message : String(err));
       });
 
     getSyncStatus()
       .then((status) => {
-        if (!active) return;
-        setSyncStatus(status);
+        if (active) setSyncStatus(status);
       })
       .catch((e) => {
-        if (!active) return;
-        setSyncError(e instanceof Error ? e.message : String(e));
-      });
-
-    getSyncConfig()
-      .then((config) => {
-        if (!active) return;
-        setSyncBackendConfig(config);
-        setSyncUrl(config.supabaseUrl);
-        setSyncAnonKey(config.supabaseAnonKey);
-      })
-      .catch((e) => {
-        if (!active) return;
-        setSyncError(e instanceof Error ? e.message : String(e));
+        if (active) setProfileError(e instanceof Error ? e.message : String(e));
       });
 
     return () => {
@@ -184,25 +219,33 @@ export const SettingsView = memo(function SettingsView({
     };
   }, []);
 
-  const handleSaveSyncConfig = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!syncUrl.trim() || !syncAnonKey.trim() || isSavingSyncConfig) return;
-
-    setIsSavingSyncConfig(true);
-    setSyncError(null);
+  const handleSaveConnectSettings = async (patch: {
+    displayName?: string;
+    acceptJoinRequests?: boolean;
+    showConnectId?: boolean;
+  }) => {
+    setConnectSettingsBusy(true);
+    setProfileError(null);
     try {
-      await saveSyncConfig(syncUrl.trim(), syncAnonKey.trim());
-      const [config, status] = await Promise.all([getSyncConfig(), getSyncStatus()]);
-      setSyncBackendConfig(config);
-      setSyncUrl(config.supabaseUrl);
-      setSyncAnonKey(config.supabaseAnonKey);
-      setSyncStatus(status);
-      setSyncSuccessMsg('Sync backend saved');
-      setTimeout(() => setSyncSuccessMsg(null), 3000);
+      const next = await connectUpdateAccountSettings(patch);
+      if (next) onConnectHubChanged?.(next);
     } catch (err) {
-      setSyncError(err instanceof Error ? err.message : String(err));
+      setProfileError(err instanceof Error ? err.message : String(err));
     } finally {
-      setIsSavingSyncConfig(false);
+      setConnectSettingsBusy(false);
+    }
+  };
+
+  const handleSettingsUnignore = async (ignoredAccountId: string) => {
+    setConnectSettingsBusy(true);
+    setProfileError(null);
+    try {
+      const next = await connectUnignoreGuest(ignoredAccountId);
+      if (next) onConnectHubChanged?.(next);
+    } catch (err) {
+      setProfileError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setConnectSettingsBusy(false);
     }
   };
 
@@ -212,15 +255,15 @@ export const SettingsView = memo(function SettingsView({
     const password = authPassword;
     setAuthPassword('');
     setIsAuthenticating(true);
-    setSyncError(null);
+    setProfileError(null);
     try {
       const status = await syncLogin(authEmail.trim(), password);
       setSyncStatus(status);
       onSyncConfigurationChanged(true);
-      setSyncSuccessMsg('Signed in');
-      setTimeout(() => setSyncSuccessMsg(null), 3000);
+      setProfileSuccessMsg('Signed in. Cloud sync and Cavia Connect are ready.');
+      setTimeout(() => setProfileSuccessMsg(null), 3500);
     } catch (err) {
-      setSyncError(err instanceof Error ? err.message : String(err));
+      setProfileError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsAuthenticating(false);
     }
@@ -231,15 +274,15 @@ export const SettingsView = memo(function SettingsView({
     const password = authPassword;
     setAuthPassword('');
     setIsAuthenticating(true);
-    setSyncError(null);
+    setProfileError(null);
     try {
       const status = await syncSignup(authEmail.trim(), password);
       setSyncStatus(status);
       onSyncConfigurationChanged(true);
-      setSyncSuccessMsg('Account created');
-      setTimeout(() => setSyncSuccessMsg(null), 3000);
+      setProfileSuccessMsg('Profile created. Cloud sync and Cavia Connect are ready.');
+      setTimeout(() => setProfileSuccessMsg(null), 3500);
     } catch (err) {
-      setSyncError(err instanceof Error ? err.message : String(err));
+      setProfileError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsAuthenticating(false);
     }
@@ -248,37 +291,39 @@ export const SettingsView = memo(function SettingsView({
   const handleLogout = async () => {
     try {
       await syncLogout();
-      await fetchSyncInfo();
+      await fetchProfileInfo();
       onSyncConfigurationChanged(false);
     } catch (err) {
-      setSyncError(err instanceof Error ? err.message : String(err));
+      setProfileError(err instanceof Error ? err.message : String(err));
     }
   };
 
   const handleToggleSync = async (enabled: boolean) => {
     try {
       await toggleSync(enabled);
-      await fetchSyncInfo();
+      await fetchProfileInfo();
       onSyncConfigurationChanged(enabled);
     } catch (err) {
-      setSyncError(err instanceof Error ? err.message : String(err));
+      setProfileError(err instanceof Error ? err.message : String(err));
     }
   };
 
   const handleSyncNow = async () => {
     setIsSyncing(true);
-    setSyncError(null);
+    setProfileError(null);
     try {
       const result = await syncNow();
       if (result.success) {
-        setSyncSuccessMsg(`Sync complete: ${result.pushedCount} pushed, ${result.pulledCount} pulled`);
-        setTimeout(() => setSyncSuccessMsg(null), 4000);
+        setProfileSuccessMsg(
+          `Sync complete: ${result.pushedCount} pushed, ${result.pulledCount} pulled`
+        );
+        setTimeout(() => setProfileSuccessMsg(null), 4000);
       } else if (result.errorMessage) {
-        setSyncError(result.errorMessage);
+        setProfileError(result.errorMessage);
       }
-      await fetchSyncInfo();
+      await fetchProfileInfo();
     } catch (err) {
-      setSyncError(err instanceof Error ? err.message : String(err));
+      setProfileError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsSyncing(false);
     }
@@ -286,46 +331,149 @@ export const SettingsView = memo(function SettingsView({
 
   const handleConfirmDeleteCloudData = async () => {
     setIsDeletingCloud(true);
-    setSyncError(null);
+    setProfileError(null);
     try {
       await deleteCloudData();
       setShowDeleteCloudModal(false);
-      setSyncSuccessMsg('Cloud data deleted. Local library remains intact.');
-      setTimeout(() => setSyncSuccessMsg(null), 4000);
-      await fetchSyncInfo();
+      setProfileSuccessMsg('Cloud data deleted. Local library remains intact.');
+      setTimeout(() => setProfileSuccessMsg(null), 4000);
+      await fetchProfileInfo();
     } catch (err) {
-      setSyncError(err instanceof Error ? err.message : String(err));
+      setProfileError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsDeletingCloud(false);
     }
   };
 
-  const handleConfirmClean = async () => {
+  const handleTogglePreloadFeature = (enabled: boolean) => {
+    if (!onChangePreloadTarget) return;
+    if (enabled) {
+      onChangePreloadTarget(Math.max(1, Math.min(MAX_PRELOAD_TARGET, lastPreloadTarget || 10)));
+    } else {
+      if (preloadStatus?.targetCount && preloadStatus.targetCount > 0) {
+        setLastPreloadTarget(preloadStatus.targetCount);
+      }
+      onChangePreloadTarget(0);
+    }
+  };
+
+  const handleClearUnusedDownloads = async () => {
     setIsCleaning(true);
-    setArtworkError(null);
+    setLibraryError(null);
     try {
-      const result = await cleanOrphanedArtwork();
-      setCleanupResult(result);
-      setShowCleanupModal(false);
-      await fetchArtworkSummary();
+      const result = await clearStreamCache(false);
+      showLibraryNotice(
+        `Removed ${result.deletedFiles} unused cached audio files (${formatBytes(result.reclaimedBytes)} freed).`
+      );
+      await fetchLibraryStorage();
     } catch (err) {
-      setArtworkError(err instanceof Error ? err.message : String(err));
+      setLibraryError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsCleaning(false);
     }
   };
 
-  const handleRepairMissing = async () => {
+  const handleConfirmClearAllDownloads = async () => {
+    setIsCleaning(true);
+    setLibraryError(null);
+    try {
+      const result = await clearStreamCache(true);
+      setShowClearAllDownloadsModal(false);
+      showLibraryNotice(
+        `Removed ${result.deletedFiles} downloaded audio files (${formatBytes(result.reclaimedBytes)} freed).`
+      );
+      await fetchLibraryStorage();
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
+  const handleConfirmCleanOrphanedArtwork = async () => {
+    setIsCleaning(true);
+    setLibraryError(null);
+    try {
+      const result = await cleanOrphanedArtwork();
+      setCleanupResult(result);
+      setShowCleanupModal(false);
+      await fetchLibraryStorage();
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
+  const handleConfirmClearAllArtwork = async () => {
+    setIsCleaning(true);
+    setLibraryError(null);
+    try {
+      const result = await clearArtworkCache();
+      setShowClearAllArtworkModal(false);
+      showLibraryNotice(
+        `Cleared ${result.deletedFiles} cached artwork files (${formatBytes(result.reclaimedBytes)} freed).`
+      );
+      await fetchLibraryStorage();
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
+  const handleRepairMissingArtwork = async () => {
     setIsRepairing(true);
-    setArtworkError(null);
+    setLibraryError(null);
     try {
       const result = await recoverMissingArtwork();
       setRecoveryResult(result);
-      await fetchArtworkSummary();
+      await fetchLibraryStorage();
     } catch (err) {
-      setArtworkError(err instanceof Error ? err.message : String(err));
+      setLibraryError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsRepairing(false);
+    }
+  };
+
+  const handleClearLyricsCache = async () => {
+    setIsCleaning(true);
+    setLibraryError(null);
+    try {
+      const removed = await clearLyricsCache();
+      showLibraryNotice(`Cleared ${removed} cached lyrics entries.`);
+      await fetchLibraryStorage();
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
+  const handleClearRecentHistory = async () => {
+    setIsCleaning(true);
+    setLibraryError(null);
+    try {
+      await clearRecentPlays();
+      showLibraryNotice('Cleared recent listening history.');
+      await fetchLibraryStorage();
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsCleaning(false);
+    }
+  };
+
+  const handleClearFinishedImports = async () => {
+    setIsCleaning(true);
+    setLibraryError(null);
+    try {
+      await clearCompletedImports();
+      showLibraryNotice('Cleared completed playlist import records.');
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsCleaning(false);
     }
   };
 
@@ -526,7 +674,7 @@ export const SettingsView = memo(function SettingsView({
                   <Database size={18} className="card-icon" />
                   <div>
                     <h3>Session persistence</h3>
-                    <p>Playback state is written to SQLite off the UI thread.</p>
+                    <p>Playback state is saved locally off the UI thread.</p>
                   </div>
                 </div>
                 <div className="setting-status-line">
@@ -543,58 +691,6 @@ export const SettingsView = memo(function SettingsView({
                   </span>
                 </div>
               </div>
-
-              {onChangePreloadTarget && (
-                <div className="settings-card">
-                  <div className="card-head">
-                    <DownloadCloud size={18} className="card-icon" />
-                    <div>
-                      <h3>Queue preload window</h3>
-                      <p>
-                        Sequential verified cache for upcoming tracks (0–20). Set to 0 to disable and hide the Now Playing pill.
-                      </p>
-                    </div>
-                  </div>
-                  <div className="setting-status-line">
-                    <div className="queue-preload-stepper">
-                      <button
-                        type="button"
-                        className="preload-step-btn"
-                        disabled={!preloadStatus || preloadStatus.targetCount <= 0}
-                        onClick={() =>
-                          onChangePreloadTarget(
-                            Math.max(0, (preloadStatus?.targetCount ?? 0) - 1)
-                          )
-                        }
-                        aria-label="Decrease preload count"
-                      >
-                        <Minus size={12} />
-                      </button>
-                      <span className="queue-preload-num">
-                        {preloadStatus?.targetCount ?? 10} tracks
-                      </span>
-                      <button
-                        type="button"
-                        className="preload-step-btn"
-                        disabled={(preloadStatus?.targetCount ?? 10) >= MAX_PRELOAD_TARGET}
-                        onClick={() =>
-                          onChangePreloadTarget(
-                            Math.min(MAX_PRELOAD_TARGET, (preloadStatus?.targetCount ?? 0) + 1)
-                          )
-                        }
-                        aria-label="Increase preload count"
-                      >
-                        <Plus size={12} />
-                      </button>
-                    </div>
-                    <span className="text-muted-xs">
-                      {preloadStatus?.enabled
-                        ? `${preloadStatus.readyCount}/${preloadStatus.targetCount} ready (${formatBytes(preloadStatus.cacheUsedBytes)} used)`
-                        : 'Disabled'}
-                    </span>
-                  </div>
-                </div>
-              )}
             </div>
           </section>
 
@@ -604,114 +700,144 @@ export const SettingsView = memo(function SettingsView({
           >
             <h2 id="settings-library" className="settings-section-title">Library</h2>
 
-            <div className="settings-card">
-              <div className="card-head">
-                <Database size={18} className="card-icon" />
-                <div>
-                  <h3>SQLite database</h3>
-                  <p>Rust-owned connection with forward-only migrations.</p>
+            {librarySuccessMsg && (
+              <div className="sync-alert sync-alert-success">
+                <CheckCircle2 size={15} />
+                <span>{librarySuccessMsg}</span>
+              </div>
+            )}
+
+            {libraryError && (
+              <div className="cavia-banner banner-error settings-inline-banner">
+                <AlertTriangle size={16} className="text-error" />
+                <div className="banner-content">
+                  <strong>Operation error</strong>
+                  <p>{libraryError}</p>
                 </div>
               </div>
-              <div className="sqlite-stats-grid">
-                <div className="sqlite-stat-box">
-                  <span className="box-label">CONNECTION</span>
-                  <strong className="box-val text-ready">
-                    {health?.database_connected ? 'CONNECTED' : 'DISCONNECTED'}
-                  </strong>
-                </div>
-                <div className="sqlite-stat-box">
-                  <span className="box-label">MIGRATION</span>
-                  <strong className="box-val">{health?.active_migration ?? '—'}</strong>
-                </div>
-                <div className="sqlite-stat-box">
-                  <span className="box-label">JOURNAL</span>
-                  <strong className="box-val">WAL</strong>
+            )}
+
+            {cleanupResult && (
+              <div className="cavia-banner banner-info settings-inline-banner">
+                <CheckCircle2 size={16} className="text-ready" />
+                <div className="banner-content">
+                  <strong>Cleanup complete</strong>
+                  <p>
+                    Reclaimed {formatBytes(cleanupResult.reclaimedBytes)} by removing{' '}
+                    {cleanupResult.deletedFiles} orphaned files.
+                  </p>
                 </div>
               </div>
-            </div>
+            )}
+
+            {recoveryResult && (
+              <div className="cavia-banner banner-info settings-inline-banner">
+                <CheckCircle2 size={16} className="text-ready" />
+                <div className="banner-content">
+                  <strong>Recovery complete</strong>
+                  <p>
+                    {recoveryResult.recoveredTracks} restored, {recoveryResult.alreadyValidTracks} already
+                    valid, {recoveryResult.noEmbeddedArtwork} without embedded artwork.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {onChangePreloadTarget && (
+              <div className="settings-card">
+                <div className="card-head">
+                  <DownloadCloud size={18} className="card-icon text-vermilion" />
+                  <div>
+                    <h3>Preload queue</h3>
+                    <p>
+                      Preload upcoming tracks sequentially so playback stays resilient through brief drops.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="setting-row">
+                  <div className="setting-info">
+                    <label htmlFor="library-preload-toggle" className="setting-label">
+                      Enable queue preload
+                    </label>
+                    <span className="setting-desc">
+                      When turned off, upcoming streaming tracks are fetched only on demand and the Now Playing pill hides.
+                    </span>
+                  </div>
+                  <input
+                    id="library-preload-toggle"
+                    type="checkbox"
+                    className="cavia-toggle"
+                    checked={Boolean(preloadStatus?.enabled && (preloadStatus?.targetCount ?? 0) > 0)}
+                    disabled={!preloadStatus}
+                    onChange={(e) => handleTogglePreloadFeature(e.target.checked)}
+                  />
+                </div>
+
+                <div className="setting-status-line" style={{ marginTop: 12 }}>
+                  <div className="queue-preload-stepper" aria-label="Queue preload window">
+                    <button
+                      type="button"
+                      className="preload-step-btn"
+                      disabled={!preloadStatus || preloadStatus.targetCount <= 0}
+                      onClick={() =>
+                        onChangePreloadTarget(
+                          Math.max(0, (preloadStatus?.targetCount ?? 0) - 1)
+                        )
+                      }
+                      aria-label="Decrease preload count"
+                    >
+                      <Minus size={12} />
+                    </button>
+                    <span className="queue-preload-num">
+                      {preloadStatus?.targetCount ?? 10} tracks
+                    </span>
+                    <button
+                      type="button"
+                      className="preload-step-btn"
+                      disabled={(preloadStatus?.targetCount ?? 10) >= MAX_PRELOAD_TARGET}
+                      onClick={() =>
+                        onChangePreloadTarget(
+                          Math.min(MAX_PRELOAD_TARGET, (preloadStatus?.targetCount ?? 0) + 1)
+                        )
+                      }
+                      aria-label="Increase preload count"
+                    >
+                      <Plus size={12} />
+                    </button>
+                  </div>
+                  <span className="text-muted-xs">
+                    {preloadStatus?.enabled
+                      ? `${preloadStatus.readyCount}/${preloadStatus.targetCount} ready (${formatBytes(preloadStatus.cacheUsedBytes)} used)`
+                      : 'Disabled'}
+                  </span>
+                </div>
+              </div>
+            )}
 
             <div className="settings-card">
               <div className="card-head">
                 <HardDrive size={18} className="card-icon" />
                 <div>
-                  <h3>Artwork cache</h3>
-                  <p>Managed local artwork with SHA-256 deduplication.</p>
+                  <h3>Downloaded audio &amp; stream cache</h3>
+                  <p>Preloaded and streamed audio stored locally for instant playback and offline fallback.</p>
                 </div>
               </div>
 
-              {artworkSummary && !artworkSummary.cacheDirExists && (
-                <div className="cavia-banner banner-warn settings-inline-banner">
-                  <AlertTriangle size={16} className="text-warn" />
-                  <div className="banner-content">
-                    <strong>Cache directory inaccessible</strong>
-                    <p><code>{artworkSummary.cacheDirPath}</code></p>
-                  </div>
-                </div>
-              )}
-
-              {artworkError && (
-                <div className="cavia-banner banner-error settings-inline-banner">
-                  <AlertTriangle size={16} className="text-error" />
-                  <div className="banner-content">
-                    <strong>Operation error</strong>
-                    <p>{artworkError}</p>
-                  </div>
-                </div>
-              )}
-
-              {cleanupResult && (
-                <div className="cavia-banner banner-info settings-inline-banner">
-                  <CheckCircle2 size={16} className="text-ready" />
-                  <div className="banner-content">
-                    <strong>Cleanup complete</strong>
-                    <p>
-                      Reclaimed {formatBytes(cleanupResult.reclaimedBytes)} by removing{' '}
-                      {cleanupResult.deletedFiles} orphaned files.
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {recoveryResult && (
-                <div className="cavia-banner banner-info settings-inline-banner">
-                  <CheckCircle2 size={16} className="text-ready" />
-                  <div className="banner-content">
-                    <strong>Recovery complete</strong>
-                    <p>
-                      {recoveryResult.recoveredTracks} restored, {recoveryResult.alreadyValidTracks} already
-                      valid, {recoveryResult.noEmbeddedArtwork} without embedded artwork.
-                    </p>
-                  </div>
-                </div>
-              )}
-
               <div className="sqlite-stats-grid">
                 <div className="sqlite-stat-box">
-                  <span className="box-label">CACHE USAGE</span>
+                  <span className="box-label">DOWNLOADED AUDIO</span>
                   <strong className="box-val">
-                    {artworkLoading ? 'Scanning…' : formatBytes(artworkSummary?.totalBytes ?? 0)}
+                    {libraryLoading ? 'Scanning…' : formatBytes(storageSummary?.streamCacheBytes ?? 0)}
                   </strong>
-                  <span className="box-subval">{artworkSummary?.totalFiles ?? 0} files</span>
+                  <span className="box-subval">{storageSummary?.streamCacheFiles ?? 0} files</span>
                 </div>
                 <div className="sqlite-stat-box">
-                  <span className="box-label">REFERENCED</span>
+                  <span className="box-label">QUEUED / PROTECTED</span>
                   <strong className="box-val text-ready">
-                    {artworkLoading ? '…' : `${artworkSummary?.referencedFiles ?? 0} active`}
+                    {libraryLoading ? '…' : `${storageSummary?.streamProtectedFiles ?? 0} tracks`}
                   </strong>
-                </div>
-                <div className="sqlite-stat-box">
-                  <span className="box-label">ORPHANED</span>
-                  <strong className={`box-val ${(artworkSummary?.orphanedFiles ?? 0) > 0 ? 'text-warn' : 'text-ready'}`}>
-                    {artworkLoading ? '…' : `${artworkSummary?.orphanedFiles ?? 0} files`}
-                  </strong>
-                  <span className="box-subval">{formatBytes(artworkSummary?.reclaimableBytes ?? 0)} reclaimable</span>
-                </div>
-                <div className="sqlite-stat-box">
-                  <span className="box-label">MISSING</span>
-                  <strong className={`box-val ${(artworkSummary?.missingReferencedFiles ?? 0) > 0 ? 'text-error' : 'text-ready'}`}>
-                    {artworkLoading ? '…' : `${artworkSummary?.missingReferencedFiles ?? 0} tracks`}
-                  </strong>
-                  <span className="box-subval">Repairable from audio</span>
+                  <span className="box-subval">In active preload window</span>
                 </div>
               </div>
 
@@ -719,158 +845,212 @@ export const SettingsView = memo(function SettingsView({
                 <Button
                   variant="outline"
                   size="sm"
-                  icon={<RefreshCw size={13} className={artworkLoading ? 'cavia-spin' : undefined} />}
-                  onClick={fetchArtworkSummary}
-                  disabled={artworkLoading || isCleaning || isRepairing}
+                  icon={<RefreshCw size={13} className={libraryLoading ? 'cavia-spin' : undefined} />}
+                  onClick={fetchLibraryStorage}
+                  disabled={libraryLoading || isCleaning || isRepairing}
                 >
-                  {artworkLoading ? 'Inspecting…' : 'Refresh'}
+                  {libraryLoading ? 'Refreshing…' : 'Refresh'}
                 </Button>
                 <Button
-                  variant={(artworkSummary?.orphanedFiles ?? 0) > 0 ? 'primary' : 'outline'}
+                  variant="outline"
+                  size="sm"
+                  icon={<Trash2 size={13} />}
+                  onClick={handleClearUnusedDownloads}
+                  disabled={
+                    libraryLoading ||
+                    isCleaning ||
+                    (storageSummary?.streamCacheFiles ?? 0) <= (storageSummary?.streamProtectedFiles ?? 0)
+                  }
+                >
+                  Clear unused cache
+                </Button>
+                <Button
+                  variant={(storageSummary?.streamCacheFiles ?? 0) > 0 ? 'vermilion-subtle' : 'outline'}
+                  size="sm"
+                  icon={<Trash2 size={13} />}
+                  onClick={() => setShowClearAllDownloadsModal(true)}
+                  disabled={libraryLoading || isCleaning || (storageSummary?.streamCacheFiles ?? 0) === 0}
+                >
+                  Remove all downloads
+                </Button>
+              </div>
+            </div>
+
+            <div className="settings-card">
+              <div className="card-head">
+                <Database size={18} className="card-icon" />
+                <div>
+                  <h3>Artwork &amp; lyrics cache</h3>
+                  <p>Cached cover art and synced lyrics stored on this device.</p>
+                </div>
+              </div>
+
+              <div className="sqlite-stats-grid">
+                <div className="sqlite-stat-box">
+                  <span className="box-label">ARTWORK CACHE</span>
+                  <strong className="box-val">
+                    {libraryLoading ? 'Scanning…' : formatBytes(artworkSummary?.totalBytes ?? 0)}
+                  </strong>
+                  <span className="box-subval">
+                    {artworkSummary?.totalFiles ?? 0} files ({artworkSummary?.orphanedFiles ?? 0} unused)
+                  </span>
+                </div>
+                <div className="sqlite-stat-box">
+                  <span className="box-label">CACHED LYRICS</span>
+                  <strong className="box-val">
+                    {libraryLoading ? '…' : `${storageSummary?.lyricsCacheEntries ?? 0} tracks`}
+                  </strong>
+                  <span className="box-subval">Refetched automatically if cleared</span>
+                </div>
+              </div>
+
+              <div className="settings-button-row">
+                <Button
+                  variant="outline"
                   size="sm"
                   icon={<Trash2 size={13} />}
                   onClick={() => setShowCleanupModal(true)}
-                  disabled={artworkLoading || isCleaning || isRepairing || (artworkSummary?.orphanedFiles ?? 0) === 0}
+                  disabled={libraryLoading || isCleaning || (artworkSummary?.orphanedFiles ?? 0) === 0}
                 >
-                  Clean orphaned
+                  Clean orphaned artwork
                 </Button>
                 <Button
-                  variant={(artworkSummary?.missingReferencedFiles ?? 0) > 0 ? 'primary' : 'outline'}
+                  variant="outline"
+                  size="sm"
+                  icon={<Trash2 size={13} />}
+                  onClick={() => setShowClearAllArtworkModal(true)}
+                  disabled={libraryLoading || isCleaning || (artworkSummary?.totalFiles ?? 0) === 0}
+                >
+                  Clear artwork cache
+                </Button>
+                <Button
+                  variant="outline"
                   size="sm"
                   icon={<Wrench size={13} />}
-                  onClick={handleRepairMissing}
+                  onClick={handleRepairMissingArtwork}
                   disabled={
-                    artworkLoading ||
+                    libraryLoading ||
                     isCleaning ||
                     isRepairing ||
                     (artworkSummary?.missingReferencedFiles ?? 0) === 0
                   }
                 >
-                  {isRepairing ? 'Repairing…' : 'Repair missing'}
+                  {isRepairing ? 'Repairing…' : 'Repair missing artwork'}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  icon={<Trash2 size={13} />}
+                  onClick={handleClearLyricsCache}
+                  disabled={libraryLoading || isCleaning || (storageSummary?.lyricsCacheEntries ?? 0) === 0}
+                >
+                  Clear lyrics cache
+                </Button>
+              </div>
+            </div>
+
+            <div className="settings-card">
+              <div className="card-head">
+                <History size={18} className="card-icon" />
+                <div>
+                  <h3>Listening history &amp; imports</h3>
+                  <p>Remove local recently-played records or completed playlist import tasks.</p>
+                </div>
+              </div>
+
+              <div className="settings-button-row">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  icon={<Trash2 size={13} />}
+                  onClick={handleClearRecentHistory}
+                  disabled={libraryLoading || isCleaning || (storageSummary?.recentPlaysCount ?? 0) === 0}
+                >
+                  Clear recent history ({storageSummary?.recentPlaysCount ?? 0})
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  icon={<Trash2 size={13} />}
+                  onClick={handleClearFinishedImports}
+                  disabled={libraryLoading || isCleaning}
+                >
+                  Clear finished imports
                 </Button>
               </div>
             </div>
           </section>
 
           <section
-            className={`settings-section ${activeSection === 'account' ? 'is-active' : ''}`}
-            aria-labelledby="settings-account"
+            className={`settings-section ${activeSection === 'profile' ? 'is-active' : ''}`}
+            aria-labelledby="settings-profile"
           >
-            <h2 id="settings-account" className="settings-section-title">Account</h2>
+            <h2 id="settings-profile" className="settings-section-title">Profile</h2>
 
-            <div className="cavia-banner banner-info">
-              <Cloud size={16} className="banner-icon text-ready" />
-              <div className="banner-content">
-                <strong>Optional cloud sync</strong>
-                <p>Playlists and likes can sync. Audio files and local paths never leave this device.</p>
-              </div>
-            </div>
-
-            {syncSuccessMsg && (
+            {profileSuccessMsg && (
               <div className="sync-alert sync-alert-success">
                 <CheckCircle2 size={15} />
-                <span>{syncSuccessMsg}</span>
+                <span>{profileSuccessMsg}</span>
               </div>
             )}
 
-            {syncError && (
+            {profileError && (
               <div className="sync-alert sync-alert-error">
                 <AlertTriangle size={15} />
-                <span>{syncError}</span>
+                <span>{profileError}</span>
               </div>
             )}
-
-            <div className="settings-card">
-              <div className="card-head">
-                <Cloud size={18} className="card-icon" />
-                <div>
-                  <h3>Sync backend</h3>
-                  <p>Point Cavia at your Supabase project. Only the publishable anon key is accepted.</p>
-                </div>
-              </div>
-
-              <div className="setting-status-line">
-                <Badge variant={syncConfig?.isConfigured ? 'ready' : 'outline'} size="sm">
-                  {syncConfig?.isConfigured ? 'CONFIGURED' : 'NOT CONFIGURED'}
-                </Badge>
-                {syncConfig?.isConfigured && (
-                  <span className="text-muted-xs">
-                    {syncConfig.supabaseUrl}
-                  </span>
-                )}
-              </div>
-
-              <form onSubmit={handleSaveSyncConfig} className="sync-auth-form">
-                <div className="form-field">
-                  <label htmlFor="sync-backend-url">Project URL</label>
-                  <input
-                    id="sync-backend-url"
-                    type="url"
-                    className="cavia-text-input"
-                    placeholder="https://your-project.supabase.co"
-                    value={syncUrl}
-                    onChange={(e) => setSyncUrl(e.target.value)}
-                    disabled={isSavingSyncConfig}
-                    required
-                  />
-                </div>
-
-                <div className="form-field">
-                  <label htmlFor="sync-backend-key">Publishable anon key</label>
-                  <input
-                    id="sync-backend-key"
-                    type="password"
-                    className="cavia-text-input"
-                    placeholder="eyJhbGciOi…"
-                    value={syncAnonKey}
-                    onChange={(e) => setSyncAnonKey(e.target.value)}
-                    disabled={isSavingSyncConfig}
-                    autoComplete="off"
-                    required
-                  />
-                </div>
-
-                <p className="text-muted-xs">
-                  The anon key is stored in the local app database. Your session refresh token stays in
-                  the OS credential manager.
-                </p>
-
-                <div className="sync-auth-actions">
-                  <Button
-                    type="submit"
-                    variant="primary"
-                    size="sm"
-                    disabled={isSavingSyncConfig || !syncUrl.trim() || !syncAnonKey.trim()}
-                  >
-                    {isSavingSyncConfig ? 'Saving…' : 'Save backend'}
-                  </Button>
-                </div>
-              </form>
-            </div>
 
             <div className="settings-card">
               <div className="card-head">
                 <User size={18} className="card-icon text-vermilion" />
                 <div>
-                  <h3>Cavia account</h3>
-                  <p>Sign in to synchronize your library metadata.</p>
+                  <h3>Cavia Profile</h3>
+                  <p>
+                    Sign in to synchronize playlists and likes across devices and unlock Cavia Connect collaborative sessions.
+                  </p>
                 </div>
               </div>
 
               {syncStatus && !syncStatus.backendConfigured && (
                 <p className="text-muted-xs" role="status">
-                  Account sync is unavailable right now. Everything else in Cavia keeps working
-                  offline.
+                  Online profile, cloud sync, and Connect services are unavailable in this build. Local library and offline playback continue working normally.
                 </p>
               )}
 
               {syncStatus?.authenticated ? (
                 <div className="settings-stack">
                   <div className="setting-status-line">
-                    <Badge variant="ready" size="sm">AUTHENTICATED</Badge>
+                    <Badge variant="ready" size="sm">SIGNED IN</Badge>
                     <span className="text-muted-xs font-mono">
                       {syncStatus.accountEmail || syncStatus.accountId}
                     </span>
+                    <Badge variant="vermilion" size="sm">
+                      {connectHub?.profile.connectId
+                        ? `CONNECT ID: ${connectHub.profile.connectId}`
+                        : 'SYNCING ID…'}
+                    </Badge>
+                  </div>
+
+                  <div className="connect-search-row">
+                    <input
+                      type="text"
+                      className="cavia-text-input"
+                      value={connectDisplayNameDraft}
+                      onChange={(e) => setConnectDisplayNameDraft(e.target.value)}
+                      placeholder="Public Connect display name"
+                      maxLength={64}
+                    />
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={connectSettingsBusy || !connectDisplayNameDraft.trim()}
+                      onClick={() =>
+                        handleSaveConnectSettings({ displayName: connectDisplayNameDraft.trim() })
+                      }
+                    >
+                      Save name
+                    </Button>
                   </div>
 
                   <div className="sync-diagnostic-grid">
@@ -893,39 +1073,48 @@ export const SettingsView = memo(function SettingsView({
               ) : (
                 <form onSubmit={handleLogin} className="sync-auth-form">
                   <div className="form-field">
-                    <label htmlFor="sync-email">Email</label>
+                    <label htmlFor="profile-email">Email</label>
                     <input
-                      id="sync-email"
+                      id="profile-email"
                       type="email"
                       className="cavia-text-input"
                       placeholder="you@example.com"
                       value={authEmail}
                       onChange={(e) => setAuthEmail(e.target.value)}
-                      disabled={isAuthenticating}
+                      disabled={isAuthenticating || (syncStatus != null && !syncStatus.backendConfigured)}
                       required
                     />
                   </div>
 
                   <div className="form-field">
-                    <label htmlFor="sync-password">Password</label>
+                    <label htmlFor="profile-password">Password</label>
                     <input
-                      id="sync-password"
+                      id="profile-password"
                       type="password"
                       className="cavia-text-input"
                       placeholder="••••••••"
                       value={authPassword}
                       onChange={(e) => setAuthPassword(e.target.value)}
-                      disabled={isAuthenticating}
+                      disabled={isAuthenticating || (syncStatus != null && !syncStatus.backendConfigured)}
                       required
                     />
                   </div>
+
+                  <p className="text-muted-xs">
+                    Signing in is optional. You can browse local music and play offline anytime without an account.
+                  </p>
 
                   <div className="sync-auth-actions">
                     <Button
                       type="submit"
                       variant="primary"
                       size="sm"
-                      disabled={isAuthenticating || !authEmail.trim() || !authPassword}
+                      disabled={
+                        isAuthenticating ||
+                        !authEmail.trim() ||
+                        !authPassword ||
+                        (syncStatus != null && !syncStatus.backendConfigured)
+                      }
                     >
                       {isAuthenticating ? 'Signing in…' : 'Sign in'}
                     </Button>
@@ -934,7 +1123,12 @@ export const SettingsView = memo(function SettingsView({
                       variant="outline"
                       size="sm"
                       onClick={handleSignup}
-                      disabled={isAuthenticating || !authEmail.trim() || !authPassword}
+                      disabled={
+                        isAuthenticating ||
+                        !authEmail.trim() ||
+                        !authPassword ||
+                        (syncStatus != null && !syncStatus.backendConfigured)
+                      }
                     >
                       Create account
                     </Button>
@@ -943,121 +1137,199 @@ export const SettingsView = memo(function SettingsView({
               )}
             </div>
 
-            <div className="settings-card">
-              <div className="card-head">
-                <Cloud size={18} className="card-icon" />
-                <div>
-                  <h3>Synchronization</h3>
-                  <p>Playlist structure and favorites only.</p>
-                </div>
-              </div>
-
-              <div className="settings-stack">
-                <div className="setting-row">
-                  <div className="setting-info">
-                    <label htmlFor="enable-cloud-sync" className="setting-label">
-                      Enable sync
-                    </label>
-                    <span className="setting-desc">Requires a signed-in account.</span>
+            {syncStatus?.authenticated && (
+              <>
+                <div className="settings-card">
+                  <div className="card-head">
+                    <Cloud size={18} className="card-icon" />
+                    <div>
+                      <h3>Cloud synchronization</h3>
+                      <p>Keep playlists and liked tracks synced across devices. Local audio files stay on your device.</p>
+                    </div>
                   </div>
-                  <input
-                    id="enable-cloud-sync"
-                    type="checkbox"
-                    className="cavia-toggle"
-                    checked={syncStatus?.syncEnabled ?? false}
-                    onChange={(e) => handleToggleSync(e.target.checked)}
-                    disabled={!syncStatus?.authenticated}
-                    aria-label="Enable cloud synchronization"
-                  />
-                </div>
 
-                <div className="sync-diagnostic-grid">
-                  <div className="sync-diag-item">
-                    <span className="sync-diag-label">LAST SYNCED</span>
-                    <strong className="sync-diag-value">
-                      {syncStatus?.lastSyncedAt ? new Date(syncStatus.lastSyncedAt).toLocaleString() : 'Never'}
-                    </strong>
+                  <div className="settings-stack">
+                    <div className="setting-row">
+                      <div className="setting-info">
+                        <label htmlFor="cloud-sync-toggle" className="setting-label">
+                          Enable cloud sync
+                        </label>
+                        <span className="setting-desc">
+                          Automatically mirror playlist metadata and favorites across signed-in devices.
+                        </span>
+                      </div>
+                      <input
+                        id="cloud-sync-toggle"
+                        type="checkbox"
+                        className="cavia-toggle"
+                        checked={syncStatus.syncEnabled}
+                        onChange={(e) => handleToggleSync(e.target.checked)}
+                        aria-label="Enable cloud synchronization"
+                      />
+                    </div>
+
+                    <div className="sync-diagnostic-grid">
+                      <div className="sync-diag-item">
+                        <span className="sync-diag-label">LAST SYNCED</span>
+                        <strong className="sync-diag-value">
+                          {syncStatus.lastSyncedAt
+                            ? new Date(syncStatus.lastSyncedAt).toLocaleString()
+                            : 'Never'}
+                        </strong>
+                      </div>
+                      <div className="sync-diag-item">
+                        <span className="sync-diag-label">PENDING</span>
+                        <strong className="sync-diag-value">{syncStatus.pendingOutboxCount} changes</strong>
+                      </div>
+                    </div>
+
+                    {syncStatus.lastError && (
+                      <div className="sync-alert sync-alert-error">
+                        <AlertTriangle size={15} />
+                        <span>{syncStatus.lastError}</span>
+                      </div>
+                    )}
+
+                    <div className="settings-button-row">
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        icon={<RefreshCw size={14} className={isSyncing ? 'animate-spin' : ''} />}
+                        onClick={handleSyncNow}
+                        disabled={isSyncing || !syncStatus.syncEnabled}
+                      >
+                        {isSyncing ? 'Synchronizing…' : 'Sync now'}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setShowDeleteCloudModal(true)}
+                        style={{ color: 'var(--status-error)', borderColor: 'rgba(223, 88, 73, 0.4)' }}
+                      >
+                        Delete cloud data
+                      </Button>
+                    </div>
+
+                    <div className="sync-boundary-grid">
+                      <div className="sync-boundary-box">
+                        <strong className="sync-boundary-title ready">
+                          <CheckCircle2 size={14} /> Synchronized
+                        </strong>
+                        <ul className="sync-boundary-list">
+                          <li>Playlist titles, descriptions, and order</li>
+                          <li>Track metadata snapshots &amp; liked tracks</li>
+                          <li>Connect profile &amp; saved hosts</li>
+                        </ul>
+                      </div>
+
+                      <div className="sync-boundary-box">
+                        <strong className="sync-boundary-title warn">
+                          <Lock size={14} /> Local only
+                        </strong>
+                        <ul className="sync-boundary-list">
+                          <li>Audio files, file paths &amp; drive letters</li>
+                          <li>Artwork &amp; stream caches</li>
+                          <li>Playback queue &amp; volume</li>
+                        </ul>
+                      </div>
+                    </div>
                   </div>
-                  <div className="sync-diag-item">
-                    <span className="sync-diag-label">PENDING</span>
-                    <strong className="sync-diag-value">{syncStatus?.pendingOutboxCount ?? 0} changes</strong>
+                </div>
+
+                <div className="settings-card">
+                  <div className="card-head">
+                    <Radio size={18} className="card-icon text-vermilion" />
+                    <div>
+                      <h3>Cavia Connect preferences</h3>
+                      <p>
+                        Separate controls for accepting guest requests and Now Playing / Bluetooth metadata display.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="settings-stack">
+                    <div className="setting-row">
+                      <div className="setting-info">
+                        <label htmlFor="connect-accept-requests" className="setting-label">
+                          Accept Join Requests
+                        </label>
+                        <span className="setting-desc">
+                          Disabled state blocks new guest &amp; saved-host requests without disconnecting current guests.
+                        </span>
+                      </div>
+                      <input
+                        id="connect-accept-requests"
+                        type="checkbox"
+                        className="cavia-toggle"
+                        checked={Boolean(connectHub?.profile.acceptJoinRequests)}
+                        disabled={connectSettingsBusy}
+                        onChange={(e) =>
+                          handleSaveConnectSettings({ acceptJoinRequests: e.target.checked })
+                        }
+                      />
+                    </div>
+
+                    <div className="setting-row">
+                      <div className="setting-info">
+                        <label htmlFor="connect-show-id-meta" className="setting-label">
+                          Show Connect ID in Now Playing &amp; Bluetooth metadata
+                        </label>
+                        <span className="setting-desc">
+                          Controls Windows SMTC / Android Media3 metadata visibility only; saved hosts can still find you while hosting.
+                        </span>
+                      </div>
+                      <input
+                        id="connect-show-id-meta"
+                        type="checkbox"
+                        className="cavia-toggle"
+                        checked={Boolean(connectHub?.profile.showConnectId)}
+                        disabled={connectSettingsBusy}
+                        onChange={(e) =>
+                          handleSaveConnectSettings({ showConnectId: e.target.checked })
+                        }
+                      />
+                    </div>
                   </div>
                 </div>
 
-                {syncStatus?.lastError && (
-                  <div className="sync-alert sync-alert-error">
-                    <AlertTriangle size={15} />
-                    <span>{syncStatus.lastError}</span>
+                <div className="settings-card">
+                  <div className="card-head">
+                    <ShieldBan size={18} className="card-icon" />
+                    <div>
+                      <h3>Ignored Accounts</h3>
+                      <p>
+                        Accounts ignored for 24 hours cannot send new join requests to your sessions until the timer expires or you unignore them.
+                      </p>
+                    </div>
                   </div>
-                )}
 
-                <div>
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    icon={<RefreshCw size={14} className={isSyncing ? 'animate-spin' : ''} />}
-                    onClick={handleSyncNow}
-                    disabled={isSyncing || !syncStatus?.authenticated || !syncStatus?.syncEnabled}
-                  >
-                    {isSyncing ? 'Synchronizing…' : 'Sync now'}
-                  </Button>
+                  {(connectHub?.ignoredAccounts.length ?? 0) === 0 ? (
+                    <p className="text-muted-xs">No accounts are currently ignored.</p>
+                  ) : (
+                    <ul className="connect-pick-list">
+                      {(connectHub?.ignoredAccounts ?? []).map((ign) => (
+                        <li key={ign.ignoredAccountId} className="connect-pick-row">
+                          <div className="queue-item-meta">
+                            <strong className="queue-item-title">{ign.displayName}</strong>
+                            <span className="queue-item-artist">
+                              ID: {ign.connectId} · Expires {new Date(ign.expiresAt).toLocaleString()}
+                            </span>
+                          </div>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={connectSettingsBusy}
+                            onClick={() => handleSettingsUnignore(ign.ignoredAccountId)}
+                          >
+                            Unignore
+                          </Button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
-              </div>
-            </div>
-
-            <div className="settings-card">
-              <div className="card-head">
-                <ShieldCheck size={18} className="card-icon text-ready" />
-                <div>
-                  <h3>Data boundary</h3>
-                  <p>Metadata syncs. Audio and local paths stay here.</p>
-                </div>
-              </div>
-
-              <div className="sync-boundary-grid">
-                <div className="sync-boundary-box">
-                  <strong className="sync-boundary-title ready">
-                    <CheckCircle2 size={14} /> Synchronized
-                  </strong>
-                  <ul className="sync-boundary-list">
-                    <li>Playlist titles, descriptions, and order</li>
-                    <li>Track metadata snapshots</li>
-                    <li>Liked tracks</li>
-                    <li>Device identifier</li>
-                  </ul>
-                </div>
-
-                <div className="sync-boundary-box">
-                  <strong className="sync-boundary-title warn">
-                    <Lock size={14} /> Local only
-                  </strong>
-                  <ul className="sync-boundary-list">
-                    <li>Audio files and streams</li>
-                    <li>File paths and drive letters</li>
-                    <li>Artwork cache</li>
-                    <li>Playback queue and volume</li>
-                  </ul>
-                </div>
-              </div>
-
-              {syncStatus?.authenticated && (
-                <div className="sync-danger-row">
-                  <div className="sync-danger-info">
-                    <strong className="sync-danger-title">Delete cloud data</strong>
-                    <span className="sync-danger-desc">Removes synchronized playlists and likes. Local files stay intact.</span>
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setShowDeleteCloudModal(true)}
-                    style={{ color: 'var(--status-error)', borderColor: 'rgba(223, 88, 73, 0.4)' }}
-                  >
-                    Delete
-                  </Button>
-                </div>
-              )}
-            </div>
-
+              </>
+            )}
           </section>
 
           <section
@@ -1130,7 +1402,7 @@ export const SettingsView = memo(function SettingsView({
             <Button variant="ghost" size="sm" onClick={() => setShowCleanupModal(false)} disabled={isCleaning}>
               Cancel
             </Button>
-            <Button variant="primary" size="sm" icon={<Trash2 size={14} />} onClick={handleConfirmClean} disabled={isCleaning}>
+            <Button variant="primary" size="sm" icon={<Trash2 size={14} />} onClick={handleConfirmCleanOrphanedArtwork} disabled={isCleaning}>
               {isCleaning ? 'Cleaning…' : 'Delete files'}
             </Button>
           </div>
@@ -1149,6 +1421,52 @@ export const SettingsView = memo(function SettingsView({
             <strong className="text-ready">{formatBytes(artworkSummary?.reclaimableBytes ?? 0)}</strong>
           </div>
           <p className="modal-text modal-text-muted">Referenced artwork remains intact.</p>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={showClearAllArtworkModal}
+        onClose={() => setShowClearAllArtworkModal(false)}
+        title="Clear all artwork cache"
+        size="sm"
+        footer={
+          <div className="modal-actions-right">
+            <Button variant="ghost" size="sm" onClick={() => setShowClearAllArtworkModal(false)} disabled={isCleaning}>
+              Cancel
+            </Button>
+            <Button variant="primary" size="sm" icon={<Trash2 size={14} />} onClick={handleConfirmClearAllArtwork} disabled={isCleaning}>
+              {isCleaning ? 'Clearing…' : 'Clear artwork'}
+            </Button>
+          </div>
+        }
+      >
+        <div className="modal-stack">
+          <p className="modal-text">
+            Deletes all cached cover art files ({formatBytes(artworkSummary?.totalBytes ?? 0)}). Embedded artwork on local audio files can be repaired again anytime.
+          </p>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={showClearAllDownloadsModal}
+        onClose={() => setShowClearAllDownloadsModal(false)}
+        title="Remove all downloaded audio"
+        size="sm"
+        footer={
+          <div className="modal-actions-right">
+            <Button variant="ghost" size="sm" onClick={() => setShowClearAllDownloadsModal(false)} disabled={isCleaning}>
+              Cancel
+            </Button>
+            <Button variant="primary" size="sm" icon={<Trash2 size={14} />} onClick={handleConfirmClearAllDownloads} disabled={isCleaning}>
+              {isCleaning ? 'Removing…' : 'Remove downloads'}
+            </Button>
+          </div>
+        }
+      >
+        <div className="modal-stack">
+          <p className="modal-text">
+            Deletes all preloaded and cached streaming audio files ({formatBytes(storageSummary?.streamCacheBytes ?? 0)}) from this device. Your local music files remain untouched.
+          </p>
         </div>
       </Modal>
 

@@ -175,6 +175,11 @@ pub fn run() {
                 Some(ytmusic.clone()),
                 Some(sync.clone()),
             );
+            let connect_accounts = services::connect_accounts::ConnectAccountService::new(
+                pool.clone(),
+                sync.clone(),
+                Some(app.handle().clone()),
+            );
 
             let preload_target = tauri::async_runtime::block_on(
                 services::preload::PreloadCoordinator::load_persisted_target(&pool),
@@ -229,12 +234,15 @@ pub fn run() {
             ))
             .map_err(io::Error::other)?;
 
-            if let Ok(Some(_)) = tauri::async_runtime::block_on(connect.restore_active_session())
-                && let Some((cur, up)) = connect.upcoming_playback_tracks()
-            {
-                let _ = tauri::async_runtime::block_on(
-                    playback.apply_collaborative_sequence(cur, up, false),
-                );
+            if let Ok(Some(_)) = tauri::async_runtime::block_on(connect.restore_active_session()) {
+                if let Some((cur, up)) = connect.upcoming_playback_tracks() {
+                    let _ = tauri::async_runtime::block_on(
+                        playback.apply_collaborative_sequence(cur, up, false),
+                    );
+                }
+                let tag =
+                    tauri::async_runtime::block_on(connect_accounts.active_metadata_tag_if_shown());
+                let _ = tauri::async_runtime::block_on(playback.set_connect_metadata_tag(tag));
             }
 
             app.manage(AppState::new(
@@ -249,6 +257,7 @@ pub fn run() {
                 import_manager,
                 preload,
                 connect,
+                connect_accounts,
                 offline,
             ));
             Ok(())
@@ -305,6 +314,15 @@ pub fn run() {
             commands::library::scan_music_directory,
             commands::library::pick_android_music_folder,
             commands::library::cancel_scan,
+            commands::library::get_library_storage_summary,
+            commands::library::clear_stream_cache,
+            commands::library::clear_lyrics_cache,
+            commands::library::clear_artwork_cache,
+            commands::library::toggle_playlist_pinned,
+            commands::library::quick_add_track_to_playlist,
+            commands::library::remove_playlist_entry_by_id,
+            commands::library::get_recent_play_events,
+            commands::library::trigger_haptic_feedback,
             commands::sync::sync_get_status,
             commands::sync::credential_storage_self_test,
             commands::sync::sync_signup,
@@ -353,6 +371,7 @@ pub fn run() {
             commands::connect::connect_get_session,
             commands::connect::connect_create_session,
             commands::connect::connect_join_session,
+            commands::connect::connect_join_approved_session,
             commands::connect::connect_set_participant_connected,
             commands::connect::connect_contribute_track,
             commands::connect::connect_contribute_ytmusic_playlist,
@@ -361,6 +380,15 @@ pub fn run() {
             commands::connect::connect_set_alpha,
             commands::connect::connect_sync_now,
             commands::connect::connect_end_session,
+            commands::connect::connect_get_account_hub,
+            commands::connect::connect_update_account_settings,
+            commands::connect::connect_lookup_host,
+            commands::connect::connect_send_join_request,
+            commands::connect::connect_respond_request,
+            commands::connect::connect_unignore_guest,
+            commands::connect::connect_save_host,
+            commands::connect::connect_remove_saved_host,
+            commands::connect::connect_to_saved_host,
         ])
         .build(tauri::generate_context!())
         .expect("Cavia Music failed to build");

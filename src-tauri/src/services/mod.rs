@@ -1,5 +1,6 @@
 pub mod artwork;
 pub mod connect;
+pub mod connect_accounts;
 pub mod credentials;
 pub mod fair_queue;
 pub mod library;

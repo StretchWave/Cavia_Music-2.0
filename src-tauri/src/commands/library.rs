@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, State};
 
-use crate::domain::{Album, Artist, Playlist, ScanResult, SearchResultsDTO, Track};
+use crate::domain::{
+    Album, Artist, Playlist, QuickAddPlaylistResult, RecentPlayEvent, ScanResult,
+    SearchResultsDTO, Track,
+};
 use crate::services::library as lib_service;
 use crate::services::scanner;
 use crate::services::search as search_service;
@@ -288,4 +291,136 @@ pub async fn delete_recent_play(
     track_id: String,
 ) -> Result<(), String> {
     lib_service::delete_recent_play(&state.database, &track_id).await
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryStorageSummary {
+    pub stream_cache_bytes: u64,
+    pub stream_cache_files: usize,
+    pub stream_protected_files: usize,
+    pub stream_cache_limit_bytes: u64,
+    pub lyrics_cache_entries: i64,
+    pub recent_plays_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamCacheCleanupResult {
+    pub deleted_files: usize,
+    pub reclaimed_bytes: u64,
+    pub skipped_active_track: bool,
+}
+
+#[tauri::command]
+pub async fn get_library_storage_summary(
+    state: State<'_, AppState>,
+) -> Result<LibraryStorageSummary, String> {
+    let (stream_cache_bytes, stream_cache_files, stream_protected_files) =
+        state.ytmusic.cache_summary();
+    let (_, stream_cache_limit_bytes) = state.ytmusic.cache_usage_bytes();
+    let lyrics_cache_entries = crate::services::lyrics::cache::count_cached_lyrics(&state.database)
+        .await
+        .unwrap_or(0);
+    let recent_plays_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM recent_plays")
+        .fetch_one(&state.database)
+        .await
+        .unwrap_or(0);
+    Ok(LibraryStorageSummary {
+        stream_cache_bytes,
+        stream_cache_files,
+        stream_protected_files,
+        stream_cache_limit_bytes,
+        lyrics_cache_entries,
+        recent_plays_count,
+    })
+}
+
+#[tauri::command]
+pub async fn clear_stream_cache(
+    include_protected: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<StreamCacheCleanupResult, String> {
+    let active_vid = state
+        .playback
+        .snapshot()
+        .current_track
+        .as_ref()
+        .and_then(crate::services::preload::extract_ytmusic_video_id);
+    let (deleted_files, reclaimed_bytes) = state
+        .ytmusic
+        .clear_cache(active_vid.as_deref(), include_protected.unwrap_or(false))
+        .map_err(|e| format!("Failed to clear cached audio streams: {e}"))?;
+    state.preload.refresh_snapshot();
+    Ok(StreamCacheCleanupResult {
+        deleted_files,
+        reclaimed_bytes,
+        skipped_active_track: active_vid.is_some(),
+    })
+}
+
+#[tauri::command]
+pub async fn clear_lyrics_cache(state: State<'_, AppState>) -> Result<u64, String> {
+    crate::services::lyrics::cache::clear_all_cached_lyrics(&state.database)
+        .await
+        .map_err(|e| format!("Failed to clear cached lyrics: {e}"))
+}
+
+#[tauri::command]
+pub async fn clear_artwork_cache(
+    state: State<'_, AppState>,
+) -> Result<crate::services::artwork::ArtworkCleanupResult, String> {
+    state.artwork.clear_all_cache().await
+}
+
+#[tauri::command]
+pub async fn toggle_playlist_pinned(
+    state: State<'_, AppState>,
+    playlist_id: String,
+    pinned: bool,
+) -> Result<Playlist, String> {
+    lib_service::toggle_playlist_pinned(&state.database, &playlist_id, pinned).await
+}
+
+#[tauri::command]
+pub async fn quick_add_track_to_playlist(
+    state: State<'_, AppState>,
+    playlist_id: String,
+    track: Track,
+) -> Result<QuickAddPlaylistResult, String> {
+    lib_service::quick_add_track_to_playlist(&state.database, &playlist_id, &track).await
+}
+
+#[tauri::command]
+pub async fn remove_playlist_entry_by_id(
+    state: State<'_, AppState>,
+    playlist_id: String,
+    entry_id: String,
+) -> Result<(), String> {
+    lib_service::remove_playlist_entry_by_id(&state.database, &playlist_id, &entry_id).await
+}
+
+#[tauri::command]
+pub async fn get_recent_play_events(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+) -> Result<Vec<RecentPlayEvent>, String> {
+    lib_service::get_recent_play_events(&state.database, limit.unwrap_or(100)).await
+}
+
+#[tauri::command]
+pub async fn trigger_haptic_feedback(app: AppHandle, kind: Option<String>) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let handle = app.state::<crate::audio::android_media3::Media3PluginHandle>();
+        let payload = serde_json::json!({ "kind": kind.unwrap_or_else(|| "enter".to_string()) });
+        let _ = handle
+            .0
+            .run_mobile_plugin_async::<serde_json::Value>("triggerHaptic", payload)
+            .await;
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = (app, kind);
+    Ok(())
 }

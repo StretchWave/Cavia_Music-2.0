@@ -61,3 +61,65 @@ test('Now Playing integrates compact PreloadPill and Queue/Settings expose re-en
   assert.match(afterglowCss, /\.cavia-sidebar:has\(:focus-visible\)/);
   assert.doesNotMatch(afterglowCss, /\.cavia-sidebar:focus-within/);
 });
+
+test('Cavia Connect exposes permanent Connect IDs, requests, ignored accounts, saved hosts, and independent controls', () => {
+  const drawerSrc = fs.readFileSync(
+    path.join(repoRoot, 'src/features/connect/ConnectDrawer.tsx'),
+    'utf8'
+  );
+  const libSrc = fs.readFileSync(path.join(repoRoot, 'src/lib/connect.ts'), 'utf8');
+  const settingsSrc = fs.readFileSync(
+    path.join(repoRoot, 'src/features/settings/SettingsView.tsx'),
+    'utf8'
+  );
+
+  for (const fnName of [
+    'connectGetAccountHub',
+    'connectUpdateAccountSettings',
+    'connectLookupHost',
+    'connectSendJoinRequest',
+    'connectRespondRequest',
+    'connectUnignoreGuest',
+    'connectSaveHost',
+    'connectRemoveSavedHost',
+    'connectToSavedHost',
+    'connectJoinApprovedSession',
+  ]) {
+    assert.match(libSrc, new RegExp(`export async function ${fnName}\\(`));
+  }
+
+  // Independent host connection controls (hosting vs acceptJoinRequests vs showConnectId)
+  assert.match(drawerSrc, /Hosting Session/);
+  assert.match(drawerSrc, /Accept Join Requests/);
+  assert.match(drawerSrc, /Show Connect ID/);
+  assert.match(drawerSrc, /handleToggleAcceptRequests/);
+  assert.match(drawerSrc, /handleToggleShowConnectId/);
+
+  // Permanent ID lookup, independent Save Host, Send Join Request, Saved Hosts
+  assert.match(drawerSrc, /FIND HOST BY PERMANENT ID/);
+  assert.match(drawerSrc, /Save Host/);
+  assert.match(drawerSrc, /Send Join Request/);
+  assert.match(drawerSrc, /SAVED HOSTS/);
+  assert.match(drawerSrc, /Join Session/);
+
+  // Incoming Request actions: Accept, Decline, Ignore 1d + Ignored Accounts Unignore
+  assert.match(drawerSrc, /handleRespondRequest\(req\.requestId, 'accept'\)/);
+  assert.match(drawerSrc, /handleRespondRequest\(req\.requestId, 'decline'\)/);
+  assert.match(drawerSrc, /handleRespondRequest\(req\.requestId, 'ignore_1d'\)/);
+  assert.match(drawerSrc, /IGNORED ACCOUNTS/);
+  assert.match(drawerSrc, /Unignore/);
+
+  // Settings View controls, Profile login, Library cache/preload controls & no Supabase jargon
+  assert.match(settingsSrc, /label: 'Profile'/);
+  assert.doesNotMatch(settingsSrc, /supabase/i);
+  assert.doesNotMatch(settingsSrc, /sync-backend-url/);
+  assert.match(settingsSrc, /library-preload-toggle/);
+  assert.match(settingsSrc, /Remove all downloads/);
+  assert.match(settingsSrc, /Clear artwork cache/);
+  assert.match(settingsSrc, /Clear lyrics cache/);
+  assert.match(settingsSrc, /connect-accept-requests/);
+  assert.match(settingsSrc, /connect-show-id-meta/);
+  assert.match(settingsSrc, /Ignored Accounts/);
+  assert.match(settingsSrc, /handleSettingsUnignore/);
+  assert.match(drawerSrc, /Settings &rarr; Profile/);
+});

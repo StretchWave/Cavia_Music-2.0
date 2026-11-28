@@ -41,6 +41,7 @@ class LoadArgs {
 @InvokeArg class VolumeArgs { var volume: Double = 1.0 }
 @InvokeArg class SpeedArgs { var speed: Double = 1.0 }
 @InvokeArg class MetadataArgs { lateinit var title: String; lateinit var artist: String; lateinit var album: String }
+@InvokeArg class HapticArgs { var kind: String = "enter" }
 @InvokeArg class CredentialArgs {
   lateinit var service: String
   lateinit var account: String
@@ -329,6 +330,28 @@ class Media3Plugin(private val activity: Activity) : Plugin(activity) {
       state.put("ended", player?.playbackState == androidx.media3.common.Player.STATE_ENDED)
       state.put("deviceReady", service != null && player?.playerError == null)
       invoke.resolve(state)
+    }
+  }
+
+  @Command fun triggerHaptic(invoke: Invoke) {
+    val kind = try {
+      invoke.parseArgs(HapticArgs::class.java).kind
+    } catch (_: Exception) {
+      "enter"
+    }
+    main.post {
+      try {
+        val view = activity.window?.decorView
+        val constant = if (kind == "commit") {
+          android.view.HapticFeedbackConstants.CONTEXT_CLICK
+        } else {
+          android.view.HapticFeedbackConstants.CLOCK_TICK
+        }
+        view?.performHapticFeedback(constant)
+      } catch (_: Exception) {
+        // Ignore devices/OS modes where haptic feedback is disabled
+      }
+      invoke.resolve(JSObject())
     }
   }
 }

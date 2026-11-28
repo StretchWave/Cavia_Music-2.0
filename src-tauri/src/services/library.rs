@@ -425,11 +425,13 @@ pub async fn get_playlists(pool: &SqlitePool) -> Result<Vec<Playlist>, String> {
             p.description,
             p.artwork_uri,
             p.source_provider,
+            p.is_pinned,
+            p.last_used_at,
             p.created_at,
             (SELECT COUNT(*) FROM playlist_tracks pt LEFT JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND (t.is_deleted IS NULL OR t.is_deleted = 0)) AS track_count
         FROM playlists p
         WHERE p.is_deleted = 0
-        ORDER BY p.created_at DESC
+        ORDER BY p.is_pinned DESC, COALESCE(p.last_used_at, p.updated_at) DESC, p.created_at DESC
         "#,
     )
     .fetch_all(pool)
@@ -445,6 +447,8 @@ pub async fn get_playlists(pool: &SqlitePool) -> Result<Vec<Playlist>, String> {
             artwork_uri: row.get("artwork_uri"),
             source_provider: row.get("source_provider"),
             track_count: row.get("track_count"),
+            is_pinned: row.get::<i64, _>("is_pinned") == 1,
+            last_used_at: row.get("last_used_at"),
             created_at: row.get("created_at"),
             tracks: None,
         })
@@ -538,7 +542,9 @@ pub async fn create_playlist(
         .await
         .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
-    sqlx::query("INSERT INTO playlists (id, name, description) VALUES (?, ?, ?)")
+    sqlx::query(
+        "INSERT INTO playlists (id, name, description, last_used_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+    )
         .bind(&id)
         .bind(name)
         .bind(description)
@@ -546,7 +552,7 @@ pub async fn create_playlist(
         .await
         .map_err(|e| format!("Failed to create playlist: {e}"))?;
 
-    let row = sqlx::query("SELECT created_at FROM playlists WHERE id = ?")
+    let row = sqlx::query("SELECT created_at, is_pinned, last_used_at FROM playlists WHERE id = ?")
         .bind(&id)
         .fetch_one(&mut *tx)
         .await
@@ -571,6 +577,8 @@ pub async fn create_playlist(
         artwork_uri: None,
         source_provider: None,
         track_count: 0,
+        is_pinned: row.get::<i64, _>("is_pinned") == 1,
+        last_used_at: row.get("last_used_at"),
         created_at: row.get("created_at"),
         tracks: Some(vec![]),
     })
@@ -683,7 +691,7 @@ pub async fn add_track_to_playlist(
     )
     .await;
 
-    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP, last_used_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(playlist_id)
         .execute(&mut *tx)
         .await
@@ -711,6 +719,33 @@ pub async fn add_provider_track_to_playlist(
     duration_ms: i64,
     artwork_uri: Option<&str>,
 ) -> Result<(), String> {
+    add_provider_track_to_playlist_with_entry_id(
+        pool,
+        playlist_id,
+        provider_id,
+        provider_track_id,
+        title,
+        artist,
+        album,
+        duration_ms,
+        artwork_uri,
+    )
+    .await
+    .map(|_| ())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn add_provider_track_to_playlist_with_entry_id(
+    pool: &SqlitePool,
+    playlist_id: &str,
+    provider_id: &str,
+    provider_track_id: &str,
+    title: &str,
+    artist: &str,
+    album: &str,
+    duration_ms: i64,
+    artwork_uri: Option<&str>,
+) -> Result<String, String> {
     let mut tx = pool
         .begin()
         .await
@@ -763,7 +798,7 @@ pub async fn add_provider_track_to_playlist(
     )
     .await;
 
-    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP, last_used_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(playlist_id)
         .execute(&mut *tx)
         .await
@@ -773,7 +808,199 @@ pub async fn add_provider_track_to_playlist(
         .await
         .map_err(|e| format!("Failed to commit provider track transaction: {e}"))?;
 
+    Ok(entry_id)
+}
+
+pub async fn quick_add_track_to_playlist(
+    pool: &SqlitePool,
+    playlist_id: &str,
+    track: &Track,
+) -> Result<crate::domain::QuickAddPlaylistResult, String> {
+    let playlist_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM playlists WHERE id = ? AND is_deleted = 0")
+            .bind(playlist_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("Failed to verify playlist: {e}"))?;
+
+    let Some(playlist_name) = playlist_name else {
+        return Err(format!("Playlist '{playlist_id}' not found or deleted"));
+    };
+
+    let is_provider = track.source_kind == "provider" || track.id.starts_with("ytmusic:");
+    if is_provider {
+        let provider_id = track.provider_id.as_deref().unwrap_or("youtube_music");
+        let provider_track_id = track.id.strip_prefix("ytmusic:").unwrap_or(&track.id);
+        let already_exists: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT id FROM playlist_tracks
+            WHERE playlist_id = ? AND provider_id = ? AND provider_track_id = ?
+            LIMIT 1
+            "#,
+        )
+        .bind(playlist_id)
+        .bind(provider_id)
+        .bind(provider_track_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to check duplicate playlist track: {e}"))?;
+
+        if already_exists.is_some() {
+            let _ = sqlx::query("UPDATE playlists SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?")
+                .bind(playlist_id)
+                .execute(pool)
+                .await;
+            return Ok(crate::domain::QuickAddPlaylistResult {
+                status: "already_present".to_string(),
+                entry_id: None,
+                playlist_id: playlist_id.to_string(),
+                playlist_name,
+            });
+        }
+
+        let entry_id = add_provider_track_to_playlist_with_entry_id(
+            pool,
+            playlist_id,
+            provider_id,
+            provider_track_id,
+            &track.title,
+            &track.artist,
+            &track.album,
+            track.duration_ms,
+            track.artwork_uri.as_deref(),
+        )
+        .await?;
+
+        Ok(crate::domain::QuickAddPlaylistResult {
+            status: "added".to_string(),
+            entry_id: Some(entry_id),
+            playlist_id: playlist_id.to_string(),
+            playlist_name,
+        })
+    } else {
+        let already_exists: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM playlist_tracks WHERE playlist_id = ? AND track_id = ? LIMIT 1",
+        )
+        .bind(playlist_id)
+        .bind(&track.id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to check duplicate playlist track: {e}"))?;
+
+        if already_exists.is_some() {
+            let _ = sqlx::query("UPDATE playlists SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?")
+                .bind(playlist_id)
+                .execute(pool)
+                .await;
+            return Ok(crate::domain::QuickAddPlaylistResult {
+                status: "already_present".to_string(),
+                entry_id: None,
+                playlist_id: playlist_id.to_string(),
+                playlist_name,
+            });
+        }
+
+        let entry_id = add_track_to_playlist(pool, playlist_id, &track.id).await?;
+        Ok(crate::domain::QuickAddPlaylistResult {
+            status: "added".to_string(),
+            entry_id: Some(entry_id),
+            playlist_id: playlist_id.to_string(),
+            playlist_name,
+        })
+    }
+}
+
+pub async fn remove_playlist_entry_by_id(
+    pool: &SqlitePool,
+    playlist_id: &str,
+    entry_id: &str,
+) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start undo transaction: {e}"))?;
+
+    sqlx::query("DELETE FROM playlist_tracks WHERE id = ? AND playlist_id = ?")
+        .bind(entry_id)
+        .bind(playlist_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to undo playlist track addition: {e}"))?;
+
+    recompact_playlist_positions_in_tx(&mut tx, playlist_id).await?;
+
+    let _ =
+        crate::services::sync::outbox::OutboxService::record_track_remove(&mut tx, playlist_id, entry_id)
+            .await;
+
+    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(playlist_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to update playlist timestamp: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit undo playlist removal: {e}"))?;
+
     Ok(())
+}
+
+pub async fn toggle_playlist_pinned(
+    pool: &SqlitePool,
+    playlist_id: &str,
+    pinned: bool,
+) -> Result<Playlist, String> {
+    let res = sqlx::query(
+        r#"
+        UPDATE playlists
+        SET is_pinned = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND is_deleted = 0
+        "#,
+    )
+    .bind(if pinned { 1 } else { 0 })
+    .bind(playlist_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to update playlist pin state: {e}"))?;
+
+    if res.rows_affected() == 0 {
+        return Err(format!("Playlist '{playlist_id}' not found or deleted"));
+    }
+
+    let row = sqlx::query(
+        r#"
+        SELECT
+            p.id,
+            p.name,
+            p.description,
+            p.artwork_uri,
+            p.source_provider,
+            p.is_pinned,
+            p.last_used_at,
+            p.created_at,
+            (SELECT COUNT(*) FROM playlist_tracks pt LEFT JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND (t.is_deleted IS NULL OR t.is_deleted = 0)) AS track_count
+        FROM playlists p
+        WHERE p.id = ? AND p.is_deleted = 0
+        "#,
+    )
+    .bind(playlist_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to load updated playlist: {e}"))?;
+
+    Ok(Playlist {
+        id: row.get("id"),
+        name: row.get("name"),
+        description: row.get("description"),
+        artwork_uri: row.get("artwork_uri"),
+        source_provider: row.get("source_provider"),
+        track_count: row.get("track_count"),
+        is_pinned: row.get::<i64, _>("is_pinned") == 1,
+        last_used_at: row.get("last_used_at"),
+        created_at: row.get("created_at"),
+        tracks: None,
+    })
 }
 
 /// Finds a local track for a track that came from another service. The title
@@ -814,11 +1041,39 @@ pub async fn find_local_track_id(pool: &SqlitePool, title: &str, artist: &str) -
     if tokens.is_empty() { title_only } else { None }
 }
 
-/// Remembers that a track actually started playing. Repeats update the
-/// timestamp and count instead of creating duplicate rows.
+/// Records intentional user-selected playback after audio actually starts.
+/// Automatic progressions (queue advance, autoplay, shuffle, recommendations)
+/// are filtered out centrally and never enter `recent_plays` or `recent_play_events`.
+pub async fn record_intentional_play(
+    pool: &SqlitePool,
+    track: &crate::domain::Track,
+    origin: crate::domain::PlaybackOrigin,
+) -> Result<bool, String> {
+    if !origin.is_intentional() {
+        return Ok(false);
+    }
+    record_intentional_play_internal(pool, track, origin).await?;
+    Ok(true)
+}
+
+/// Remembers that a track actually started playing intentionally. Repeats update
+/// the summary row and append a timestamped event row cleanly.
 pub async fn record_recent_play(
     pool: &SqlitePool,
     track: &crate::domain::Track,
+) -> Result<(), String> {
+    record_intentional_play_internal(
+        pool,
+        track,
+        crate::domain::PlaybackOrigin::SearchSelection,
+    )
+    .await
+}
+
+async fn record_intentional_play_internal(
+    pool: &SqlitePool,
+    track: &crate::domain::Track,
+    origin: crate::domain::PlaybackOrigin,
 ) -> Result<(), String> {
     // If local track, verify and query authoritative data from tracks table and increment play_count
     let (title, artist, album, duration_ms, artwork_uri, source_kind, provider_id) = if track
@@ -872,12 +1127,13 @@ pub async fn record_recent_play(
         )
     };
 
+    let origin_str = origin.as_str();
     sqlx::query(
         r#"
         INSERT INTO recent_plays (
             track_id, source_kind, title, artist, album, duration_ms,
-            artwork_uri, provider_id, play_count, played_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+            artwork_uri, provider_id, play_count, last_origin, played_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(track_id) DO UPDATE SET
             source_kind = excluded.source_kind,
             title = excluded.title,
@@ -887,22 +1143,75 @@ pub async fn record_recent_play(
             artwork_uri = COALESCE(excluded.artwork_uri, recent_plays.artwork_uri),
             provider_id = COALESCE(excluded.provider_id, recent_plays.provider_id),
             play_count = recent_plays.play_count + 1,
+            last_origin = excluded.last_origin,
             played_at = CURRENT_TIMESTAMP
         "#,
     )
     .bind(&track.id)
-    .bind(source_kind)
-    .bind(title)
-    .bind(artist)
-    .bind(album)
+    .bind(&source_kind)
+    .bind(&title)
+    .bind(&artist)
+    .bind(&album)
     .bind(duration_ms)
-    .bind(artwork_uri)
-    .bind(provider_id)
+    .bind(&artwork_uri)
+    .bind(&provider_id)
+    .bind(origin_str)
     .execute(pool)
     .await
     .map_err(|e| format!("Failed to record playback history: {e}"))?;
 
+    sqlx::query(
+        r#"
+        INSERT INTO recent_play_events (
+            track_id, source_kind, title, artist, album, duration_ms, playback_origin, played_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        "#,
+    )
+    .bind(&track.id)
+    .bind(&source_kind)
+    .bind(&title)
+    .bind(&artist)
+    .bind(&album)
+    .bind(duration_ms)
+    .bind(origin_str)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to record intentional play event: {e}"))?;
+
     Ok(())
+}
+
+pub async fn get_recent_play_events(
+    pool: &SqlitePool,
+    limit: i64,
+) -> Result<Vec<crate::domain::RecentPlayEvent>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, track_id, source_kind, title, artist, album, duration_ms, playback_origin, played_at
+        FROM recent_play_events
+        ORDER BY id DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(limit.clamp(1, 500))
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to read playback history events: {e}"))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| crate::domain::RecentPlayEvent {
+            id: row.get("id"),
+            track_id: row.get("track_id"),
+            source_kind: row.get("source_kind"),
+            title: row.get("title"),
+            artist: row.get("artist"),
+            album: row.get("album"),
+            duration_ms: row.get("duration_ms"),
+            playback_origin: row.get("playback_origin"),
+            played_at: row.get("played_at"),
+        })
+        .collect())
 }
 
 /// Most recently played tracks, newest first. Catalogue entries are included
@@ -1040,7 +1349,7 @@ pub async fn remove_track_from_playlist(
     .await
     .map_err(|e| format!("Failed to compact positions in phase 2: {e}"))?;
 
-    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP, last_used_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(playlist_id)
         .execute(&mut *tx)
         .await
@@ -1122,7 +1431,7 @@ pub async fn remove_tracks_from_playlist(
             .await;
     }
 
-    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP, last_used_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(playlist_id)
         .execute(&mut *tx)
         .await
@@ -1310,7 +1619,7 @@ pub async fn reorder_playlist_tracks(
     .await;
 
     // Step 4: Update playlists.updated_at
-    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP, last_used_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(playlist_id)
         .execute(&mut *tx)
         .await
@@ -1373,6 +1682,8 @@ pub async fn update_playlist(
             p.description,
             p.artwork_uri,
             p.source_provider,
+            p.is_pinned,
+            p.last_used_at,
             p.created_at,
             (SELECT COUNT(*) FROM playlist_tracks pt LEFT JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND (t.is_deleted IS NULL OR t.is_deleted = 0)) AS track_count
         FROM playlists p
@@ -1391,6 +1702,8 @@ pub async fn update_playlist(
         artwork_uri: row.get("artwork_uri"),
         source_provider: row.get("source_provider"),
         track_count: row.get("track_count"),
+        is_pinned: row.get::<i64, _>("is_pinned") == 1,
+        last_used_at: row.get("last_used_at"),
         created_at: row.get("created_at"),
         tracks: None,
     })
@@ -1841,7 +2154,7 @@ pub async fn clear_playlist_tracks(pool: &SqlitePool, playlist_id: &str) -> Resu
         .await;
     }
 
-    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    sqlx::query("UPDATE playlists SET updated_at = CURRENT_TIMESTAMP, last_used_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(playlist_id)
         .execute(&mut *tx)
         .await
@@ -1860,6 +2173,10 @@ pub async fn delete_recent_play(pool: &SqlitePool, track_id: &str) -> Result<(),
         .execute(pool)
         .await
         .map_err(|e| format!("Failed to delete recent play: {e}"))?;
+    let _ = sqlx::query("DELETE FROM recent_play_events WHERE track_id = ?")
+        .bind(track_id)
+        .execute(pool)
+        .await;
     Ok(())
 }
 
@@ -1868,6 +2185,9 @@ pub async fn clear_recent_plays(pool: &SqlitePool) -> Result<(), String> {
         .execute(pool)
         .await
         .map_err(|e| format!("Failed to clear recent plays: {e}"))?;
+    let _ = sqlx::query("DELETE FROM recent_play_events")
+        .execute(pool)
+        .await;
     Ok(())
 }
 

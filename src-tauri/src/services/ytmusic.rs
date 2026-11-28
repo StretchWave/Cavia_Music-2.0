@@ -203,10 +203,19 @@ impl YtMusicService {
 
     /// Total finalized cache size and configured limit (`MAX_TOTAL_CACHE_BYTES`).
     pub fn cache_usage_bytes(&self) -> (u64, u64) {
+        let (bytes, _, _) = self.cache_summary();
+        (bytes, MAX_TOTAL_CACHE_BYTES)
+    }
+
+    /// Returns `(total_bytes, total_files, protected_files)` of finalized cached streaming audio files.
+    pub fn cache_summary(&self) -> (u64, usize, usize) {
         let Ok(entries) = std::fs::read_dir(&self.cache_dir) else {
-            return (0, MAX_TOTAL_CACHE_BYTES);
+            return (0, 0, 0);
         };
-        let mut total = 0_u64;
+        let protected = self.protected_video_ids();
+        let mut total_bytes = 0_u64;
+        let mut total_files = 0_usize;
+        let mut protected_files = 0_usize;
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file()
@@ -216,10 +225,58 @@ impl YtMusicService {
                     .is_some_and(|ext| CACHE_EXTENSIONS.contains(&ext))
                 && let Ok(meta) = path.metadata()
             {
-                total = total.saturating_add(meta.len());
+                total_bytes = total_bytes.saturating_add(meta.len());
+                total_files = total_files.saturating_add(1);
+                if path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|stem| protected.contains(stem))
+                {
+                    protected_files = protected_files.saturating_add(1);
+                }
             }
         }
-        (total, MAX_TOTAL_CACHE_BYTES)
+        (total_bytes, total_files, protected_files)
+    }
+
+    /// Clears finalized cached audio streams from disk while preserving `.part` files in flight
+    /// and any currently playing track.
+    pub fn clear_cache(
+        &self,
+        active_video_id: Option<&str>,
+        include_unplaying_protected: bool,
+    ) -> Result<(usize, u64), std::io::Error> {
+        if !self.cache_dir.exists() {
+            return Ok((0, 0));
+        }
+        let protected = self.protected_video_ids();
+        let mut deleted = 0_usize;
+        let mut reclaimed = 0_u64;
+        for entry in std::fs::read_dir(&self.cache_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file()
+                || !path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| CACHE_EXTENSIONS.contains(&ext))
+            {
+                continue;
+            }
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if active_video_id == Some(stem) {
+                continue;
+            }
+            if !include_unplaying_protected && protected.contains(stem) {
+                continue;
+            }
+            let len = path.metadata().map(|m| m.len()).unwrap_or(0);
+            if std::fs::remove_file(&path).is_ok() {
+                deleted = deleted.saturating_add(1);
+                reclaimed = reclaimed.saturating_add(len);
+            }
+        }
+        Ok((deleted, reclaimed))
     }
 
     /// Returns `true` when protected active/preloaded tracks alone already saturate the cache cap.
@@ -2207,6 +2264,49 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cache_summary_and_clear_cache_preserve_active_and_partials() {
+        let dir = test_cache_dir("clear-cache");
+        let service = YtMusicService::new(dir.clone()).expect("service");
+        std::fs::write(dir.join("vidActive001.m4a"), vec![1u8; 128]).expect("write active");
+        std::fs::write(dir.join("vidProtect02.webm"), vec![2u8; 256]).expect("write protected");
+        std::fs::write(dir.join("vidUnused003.ogg"), vec![3u8; 64]).expect("write unused");
+        std::fs::write(dir.join("inFlight0004.part"), vec![4u8; 32]).expect("write partial");
+
+        let mut protected = std::collections::HashSet::new();
+        protected.insert("vidActive001".to_string());
+        protected.insert("vidProtect02".to_string());
+        service.set_protected_video_ids(protected);
+
+        let (bytes, files, prot_files) = service.cache_summary();
+        assert_eq!(bytes, 128 + 256 + 64);
+        assert_eq!(files, 3);
+        assert_eq!(prot_files, 2);
+
+        // Clearing unused cache removes only vidUnused003 while sparing protected & .part files.
+        let (deleted_unused, freed_unused) = service
+            .clear_cache(Some("vidActive001"), false)
+            .expect("clear unused");
+        assert_eq!(deleted_unused, 1);
+        assert_eq!(freed_unused, 64);
+        assert!(dir.join("vidActive001.m4a").exists());
+        assert!(dir.join("vidProtect02.webm").exists());
+        assert!(!dir.join("vidUnused003.ogg").exists());
+        assert!(dir.join("inFlight0004.part").exists());
+
+        // Clearing all downloads removes protected queue entries too while still sparing active playing & .part.
+        let (deleted_all, freed_all) = service
+            .clear_cache(Some("vidActive001"), true)
+            .expect("clear all");
+        assert_eq!(deleted_all, 1);
+        assert_eq!(freed_all, 256);
+        assert!(dir.join("vidActive001.m4a").exists());
+        assert!(!dir.join("vidProtect02.webm").exists());
+        assert!(dir.join("inFlight0004.part").exists());
+
         let _ = std::fs::remove_dir_all(dir);
     }
 }

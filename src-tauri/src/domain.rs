@@ -64,6 +64,73 @@ pub struct SearchResultsDTO {
     pub total_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackOrigin {
+    SearchSelection,
+    ManualLibrarySelection,
+    ManualPlaylistSelection,
+    ManualQueueSelection,
+    AutomaticQueueProgression,
+    Autoplay,
+    AutomaticShuffle,
+    AutomaticRecommendation,
+}
+
+impl Default for PlaybackOrigin {
+    fn default() -> Self {
+        Self::AutomaticQueueProgression
+    }
+}
+
+impl PlaybackOrigin {
+    pub fn is_intentional(self) -> bool {
+        matches!(
+            self,
+            Self::SearchSelection
+                | Self::ManualLibrarySelection
+                | Self::ManualPlaylistSelection
+                | Self::ManualQueueSelection
+        )
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SearchSelection => "search_selection",
+            Self::ManualLibrarySelection => "manual_library_selection",
+            Self::ManualPlaylistSelection => "manual_playlist_selection",
+            Self::ManualQueueSelection => "manual_queue_selection",
+            Self::AutomaticQueueProgression => "automatic_queue_progression",
+            Self::Autoplay => "autoplay",
+            Self::AutomaticShuffle => "automatic_shuffle",
+            Self::AutomaticRecommendation => "automatic_recommendation",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickAddPlaylistResult {
+    pub status: String, // "added" | "already_present"
+    pub entry_id: Option<String>,
+    pub playlist_id: String,
+    pub playlist_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentPlayEvent {
+    pub id: i64,
+    pub track_id: String,
+    pub source_kind: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration_ms: i64,
+    pub playback_origin: String,
+    pub played_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Playlist {
@@ -73,6 +140,10 @@ pub struct Playlist {
     pub artwork_uri: Option<String>,
     pub source_provider: Option<String>,
     pub track_count: i64,
+    #[serde(default)]
+    pub is_pinned: bool,
+    #[serde(default)]
+    pub last_used_at: Option<String>,
     pub created_at: String,
     pub tracks: Option<Vec<Track>>,
 }

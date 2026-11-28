@@ -252,6 +252,8 @@ async fn search_like_fallback(
                 p.description,
                 p.artwork_uri,
                 p.source_provider,
+                p.is_pinned,
+                p.last_used_at,
                 p.created_at,
                 (SELECT COUNT(*) FROM playlist_tracks pt LEFT JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND (t.is_deleted IS NULL OR t.is_deleted = 0)) AS track_count
             FROM playlists p
@@ -384,6 +386,8 @@ async fn search_fts5(
                 p.description,
                 p.artwork_uri,
                 p.source_provider,
+                p.is_pinned,
+                p.last_used_at,
                 p.created_at,
                 (SELECT COUNT(*) FROM playlist_tracks pt LEFT JOIN tracks t ON pt.track_id = t.id WHERE pt.playlist_id = p.id AND (t.is_deleted IS NULL OR t.is_deleted = 0)) AS track_count
             FROM playlists p
@@ -483,6 +487,8 @@ fn map_playlists(rows: Vec<sqlx::sqlite::SqliteRow>) -> Vec<Playlist> {
             artwork_uri: row.get("artwork_uri"),
             source_provider: row.get("source_provider"),
             track_count: row.get("track_count"),
+            is_pinned: row.get::<i64, _>("is_pinned") == 1,
+            last_used_at: row.get("last_used_at"),
             created_at: row.get("created_at"),
             tracks: None,
         })

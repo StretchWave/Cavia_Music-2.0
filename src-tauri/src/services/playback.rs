@@ -492,6 +492,10 @@ pub enum PlaybackCommand {
         auto_play: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    SetConnectMetadataTag {
+        tag: Option<String>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Shutdown {
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -531,6 +535,20 @@ pub struct PlaybackCore {
     fallback_active: bool,
     fallback_restore_armed: Arc<AtomicBool>,
     last_window_signature: Mutex<Vec<String>>,
+    connect_metadata_tag: Option<String>,
+}
+
+fn format_album_for_os_metadata(base_album: &str, connect_tag: Option<&str>) -> String {
+    match connect_tag.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => {
+            if base_album.trim().is_empty() {
+                format!("Cavia Connect · {id}")
+            } else {
+                format!("{} · Connect: {id}", base_album.trim())
+            }
+        }
+        None => base_album.to_string(),
+    }
 }
 
 impl PlaybackCore {
@@ -579,6 +597,7 @@ impl PlaybackCore {
             fallback_active: false,
             fallback_restore_armed: Arc::new(AtomicBool::new(false)),
             last_window_signature: Mutex::new(Vec::new()),
+            connect_metadata_tag: None,
         };
         core.update_snapshot_cache();
         core
@@ -790,9 +809,11 @@ impl PlaybackCore {
             return Err(err);
         }
 
+        let os_album =
+            format_album_for_os_metadata(&track.album, self.connect_metadata_tag.as_deref());
         if let Err(error) = self
             .backend
-            .set_metadata(&track.title, &track.artist, &track.album)
+            .set_metadata(&track.title, &track.artist, &os_album)
         {
             self.last_error = Some(format!(
                 "Track loaded, but system media metadata could not be updated: {error}"
@@ -1881,13 +1902,28 @@ impl PlaybackCore {
         }
     }
 
+    pub fn set_connect_metadata_tag(&mut self, tag: Option<String>) -> Result<(), String> {
+        self.connect_metadata_tag = tag.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        if let Some(track) = self.queue.current_track().cloned() {
+            let os_album =
+                format_album_for_os_metadata(&track.album, self.connect_metadata_tag.as_deref());
+            let _ = self
+                .backend
+                .set_metadata(&track.title, &track.artist, &os_album);
+            let _ = self.update_media_metadata(&track);
+        }
+        Ok(())
+    }
+
     fn update_media_metadata(&mut self, track: &Track) -> Result<(), String> {
         if self.media_controls_host.is_some() {
             let cover_url = local_cover_url(track.artwork_uri.as_deref());
+            let os_album =
+                format_album_for_os_metadata(&track.album, self.connect_metadata_tag.as_deref());
             let metadata = MediaMetadataDTO {
                 title: Some(track.title.clone()),
                 artist: Some(track.artist.clone()),
-                album: Some(track.album.clone()),
+                album: Some(os_album),
                 duration: Some(Duration::from_millis(track.duration_ms.max(0) as u64)),
                 cover_url,
             };
@@ -2406,6 +2442,9 @@ impl PlaybackService {
                                     auto_play,
                                 ));
                             }
+                            PlaybackCommand::SetConnectMetadataTag { tag, reply } => {
+                                let _ = reply.send(core.set_connect_metadata_tag(tag));
+                            }
                             PlaybackCommand::Shutdown { reply } => {
                                 let res = core.shutdown();
                                 let is_ok = res.is_ok();
@@ -2610,6 +2649,13 @@ impl PlaybackService {
             auto_play,
             reply,
         })?;
+        rx.await
+            .map_err(|_| "Audio worker thread terminated unexpectedly".to_string())?
+    }
+
+    pub async fn set_connect_metadata_tag(&self, tag: Option<String>) -> Result<(), String> {
+        let rx =
+            self.send_command(|reply| PlaybackCommand::SetConnectMetadataTag { tag, reply })?;
         rx.await
             .map_err(|_| "Audio worker thread terminated unexpectedly".to_string())?
     }
@@ -5885,6 +5931,22 @@ pub mod tests {
         assert_eq!(core.queue.len(), 3, "Original queue items must stay intact");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn show_connect_id_controls_os_and_bluetooth_metadata_visibility() {
+        assert_eq!(
+            format_album_for_os_metadata("Random Access Memories", Some("H4K7MN")),
+            "Random Access Memories · Connect: H4K7MN"
+        );
+        assert_eq!(
+            format_album_for_os_metadata("", Some("H4K7MN")),
+            "Cavia Connect · H4K7MN"
+        );
+        assert_eq!(
+            format_album_for_os_metadata("Random Access Memories", None),
+            "Random Access Memories"
+        );
     }
 
     fn minimal_wav() -> Vec<u8> {

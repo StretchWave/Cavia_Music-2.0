@@ -137,6 +137,15 @@ impl ConnectService {
     }
 
     pub async fn local_participant_id(&self) -> Result<String, String> {
+        if let Some(sync) = &self.sync_engine
+            && let Ok(status) = sync.get_status().await
+            && status.authenticated
+            && let Some(account_id) = status.account_id
+            && !account_id.trim().is_empty()
+        {
+            return Ok(account_id);
+        }
+
         if let Some(row) =
             sqlx::query("SELECT value_json FROM app_settings WHERE key = 'connect_participant_id'")
                 .fetch_optional(&self.db)
@@ -547,20 +556,387 @@ impl ConnectService {
                 .ok_or_else(|| "Session not found after restore".to_string());
         }
 
-        // Attempt remote Supabase lookup if configured & signed in.
-        if let Some(sync) = &self.sync_engine
-            && let Ok(status) = sync.get_status().await
-            && status.authenticated
-            && status.backend_configured
+        // Attempt remote Supabase lookup & approved join if configured & signed in.
+        let safe_code = code
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect::<String>();
+        if let Some(snap) = self
+            .try_join_remote_session(
+                &format!("join_code=eq.{safe_code}&is_active=eq.true&limit=1"),
+                &guest_name,
+                participant_id,
+            )
+            .await?
         {
-            return Err(format!(
-                "Remote Supabase Cavia Connect lookup for join code {code} requires cloud session record (none returned from Supabase)."
-            ));
+            return Ok(snap);
         }
 
         Err(format!(
-            "No Cavia Connect session found for code \"{code}\""
+            "No active Cavia Connect session found for code \"{code}\""
         ))
+    }
+
+    pub async fn join_approved_session(
+        &self,
+        session_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<ConnectSessionSnapshot, String> {
+        let clean_sid: String = session_id
+            .trim()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if clean_sid.is_empty() {
+            return Err("Session ID is required".to_string());
+        }
+
+        if let Some(active) = self.get_snapshot().await?
+            && active.session_id == clean_sid
+        {
+            return self.sync_and_get_snapshot().await;
+        }
+
+        let fallback_name = display_name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Guest")
+            .to_string();
+
+        if let Some(snap) = self
+            .try_join_remote_session(
+                &format!("session_id=eq.{clean_sid}&is_active=eq.true&limit=1"),
+                &fallback_name,
+                None,
+            )
+            .await?
+        {
+            return Ok(snap);
+        }
+
+        Err("Host session is no longer active.".to_string())
+    }
+
+    async fn try_join_remote_session(
+        &self,
+        session_filter: &str,
+        fallback_display_name: &str,
+        explicit_pid: Option<&str>,
+    ) -> Result<Option<ConnectSessionSnapshot>, String> {
+        let Some(sync) = &self.sync_engine else {
+            return Ok(None);
+        };
+        let status = sync.get_status().await?;
+        if !status.authenticated || !status.backend_configured {
+            return Ok(None);
+        }
+        let Some((base_url, anon_key, access_token)) = sync.connect_auth_context().await? else {
+            return Err("Your account session has expired. Please sign in again.".to_string());
+        };
+        let account_id = status
+            .account_id
+            .clone()
+            .ok_or_else(|| "Sign in before joining a remote Connect session.".to_string())?;
+        let local_pid = explicit_pid
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&account_id)
+            .to_string();
+
+        let rest = crate::services::sync::client::SupabaseRestClient::new();
+        let sessions = rest
+            .get_table_rows(
+                &base_url,
+                &anon_key,
+                &access_token,
+                "connect_sessions",
+                session_filter,
+            )
+            .await?;
+
+        let Some(remote_session) = sessions.into_iter().next() else {
+            return Ok(None);
+        };
+
+        let sid = remote_session
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Malformed remote session record".to_string())?
+            .to_string();
+        let join_code = remote_session
+            .get("join_code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("CAVIA")
+            .to_string();
+        let name = remote_session
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Cavia Connect")
+            .to_string();
+        let host_user_id = remote_session
+            .get("host_user_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let host_participant_id = remote_session
+            .get("host_participant_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(host_user_id)
+            .to_string();
+        let host_display_name = remote_session
+            .get("host_display_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Host")
+            .to_string();
+        let alpha = remote_session
+            .get("fairness_alpha")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(DEFAULT_FAIRNESS_ALPHA)
+            .clamp(0.0, 5.0);
+        let preload_target = remote_session
+            .get("preload_target")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(10)
+            .clamp(0, 20);
+        let queue_revision = remote_session
+            .get("queue_revision")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let session_seed = remote_session
+            .get("session_seed")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(1)
+            .max(1);
+
+        let remote_participants = rest
+            .get_table_rows(
+                &base_url,
+                &anon_key,
+                &access_token,
+                "connect_participants",
+                &format!("session_id=eq.{sid}"),
+            )
+            .await?;
+
+        let is_host = host_user_id == account_id;
+        let approved_participant = remote_participants.iter().any(|p| {
+            p.get("user_id").and_then(serde_json::Value::as_str) == Some(account_id.as_str())
+        });
+
+        if !is_host && !approved_participant {
+            return Err(
+                "Host approval is required before joining this session. Send a join request using the host's permanent Connect ID first."
+                    .to_string(),
+            );
+        }
+
+        let remote_entries = rest
+            .get_table_rows(
+                &base_url,
+                &anon_key,
+                &access_token,
+                "connect_queue_entries",
+                &format!("session_id=eq.{sid}&order=created_at_seq.asc"),
+            )
+            .await?;
+
+        let local_role_str = if is_host { "host" } else { "guest" };
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| format!("Failed to begin remote join transaction: {e}"))?;
+
+        sqlx::query("UPDATE connect_sessions SET is_active = 0 WHERE session_id <> ?")
+            .bind(&sid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to deactivate previous local sessions: {e}"))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO connect_sessions (
+                session_id, join_code, name, host_participant_id, host_display_name,
+                local_participant_id, local_role, fairness_alpha, preload_target,
+                queue_revision, session_seed, is_active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(session_id) DO UPDATE SET
+                join_code = excluded.join_code,
+                name = excluded.name,
+                host_participant_id = excluded.host_participant_id,
+                host_display_name = excluded.host_display_name,
+                local_participant_id = excluded.local_participant_id,
+                local_role = excluded.local_role,
+                fairness_alpha = excluded.fairness_alpha,
+                preload_target = excluded.preload_target,
+                queue_revision = excluded.queue_revision,
+                is_active = 1,
+                updated_at = CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(&sid)
+        .bind(&join_code)
+        .bind(&name)
+        .bind(&host_participant_id)
+        .bind(&host_display_name)
+        .bind(&local_pid)
+        .bind(local_role_str)
+        .bind(alpha)
+        .bind(preload_target)
+        .bind(queue_revision)
+        .bind(session_seed)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to store joined remote connect session: {e}"))?;
+
+        for p in &remote_participants {
+            let pid = p
+                .get("participant_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if pid.is_empty() {
+                continue;
+            }
+            let pname = p
+                .get("display_name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(fallback_display_name);
+            let prole = p
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("guest");
+            let connected = if p
+                .get("is_connected")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+            {
+                1
+            } else {
+                0
+            };
+            let penalty = p
+                .get("penalty_credits")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            sqlx::query(
+                r#"
+                INSERT INTO connect_participants (session_id, participant_id, display_name, role, is_connected, penalty_credits)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, participant_id) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    role = excluded.role,
+                    is_connected = excluded.is_connected,
+                    penalty_credits = excluded.penalty_credits,
+                    last_seen_at = CURRENT_TIMESTAMP
+                "#,
+            )
+            .bind(&sid)
+            .bind(pid)
+            .bind(pname)
+            .bind(prole)
+            .bind(connected)
+            .bind(penalty)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to store remote connect participant: {e}"))?;
+        }
+
+        for row in &remote_entries {
+            let Some(qid) = row
+                .get("queue_entry_id")
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let track_val = row.get("track_json").cloned().unwrap_or_else(|| json!({}));
+            let track_json_str = serde_json::to_string(&track_val).unwrap_or_else(|_| "{}".into());
+            let track_id = row
+                .get("track_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let provider_id = row.get("provider_id").and_then(serde_json::Value::as_str);
+            let canonical = row
+                .get("canonical_provider_id")
+                .and_then(serde_json::Value::as_str);
+            let contributor_id = row
+                .get("contributor_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&host_participant_id);
+            let contributor_name = row
+                .get("contributor_name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Listener");
+            let status_str = row
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("ready");
+            let prio = if row
+                .get("priority_override")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                1
+            } else {
+                0
+            };
+            let manual_pos = row
+                .get("manual_position")
+                .and_then(serde_json::Value::as_i64);
+            let committed_rank = row
+                .get("committed_rank")
+                .and_then(serde_json::Value::as_i64);
+            let created_seq = row
+                .get("created_at_seq")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(1);
+
+            sqlx::query(
+                r#"
+                INSERT INTO connect_queue_entries (
+                    queue_entry_id, session_id, track_json, track_id, provider_id,
+                    canonical_provider_id, contributor_id, contributor_name, status,
+                    priority_override, manual_position, committed_rank, created_at_seq
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(queue_entry_id) DO UPDATE SET
+                    status = excluded.status,
+                    manual_position = excluded.manual_position,
+                    committed_rank = excluded.committed_rank,
+                    updated_at = CURRENT_TIMESTAMP
+                "#,
+            )
+            .bind(qid)
+            .bind(&sid)
+            .bind(&track_json_str)
+            .bind(track_id)
+            .bind(provider_id)
+            .bind(canonical)
+            .bind(contributor_id)
+            .bind(contributor_name)
+            .bind(status_str)
+            .bind(prio)
+            .bind(manual_pos)
+            .bind(committed_rank)
+            .bind(created_seq)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to store remote queue entry: {e}"))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| format!("Failed to commit joined remote session: {e}"))?;
+
+        let snap = self.restore_active_session().await?;
+        if let Some(ref s) = snap {
+            self.emit_snapshot(s);
+        }
+        Ok(snap)
+    }
+
+    async fn sync_and_get_snapshot(&self) -> Result<ConnectSessionSnapshot, String> {
+        let _ = self.sync_pending_events().await;
+        self.get_snapshot()
+            .await?
+            .ok_or_else(|| "Active connect session missing".to_string())
     }
 
     pub async fn set_participant_connected(
@@ -593,6 +969,48 @@ impl ConnectService {
             .await?
             .ok_or_else(|| "No active Cavia Connect session".to_string())?;
         self.emit_snapshot(&snap);
+        Ok(snap)
+    }
+
+    pub async fn register_approved_guest(
+        &self,
+        participant_id: &str,
+        display_name: &str,
+    ) -> Result<Option<ConnectSessionSnapshot>, String> {
+        let session_id = {
+            let mut guard = self.session.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(sess) = guard.as_mut() else {
+                return Ok(None);
+            };
+            sess.engine.upsert_participant(
+                participant_id,
+                display_name,
+                ParticipantRole::Guest,
+                true,
+            );
+            sess.session_id.clone()
+        };
+
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO connect_participants (session_id, participant_id, display_name, role, is_connected, penalty_credits)
+            VALUES (?, ?, ?, 'guest', 1, 0.0)
+            ON CONFLICT(session_id, participant_id) DO UPDATE SET
+                display_name = excluded.display_name,
+                is_connected = 1,
+                last_seen_at = CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(&session_id)
+        .bind(participant_id)
+        .bind(display_name)
+        .execute(&self.db)
+        .await;
+
+        let snap = self.get_snapshot().await?;
+        if let Some(s) = &snap {
+            self.emit_snapshot(s);
+        }
         Ok(snap)
     }
 
@@ -1018,7 +1436,16 @@ impl ConnectService {
     }
 
     pub async fn sync_pending_events(&self) -> Result<ConnectSyncResult, String> {
-        let (session_id, revision) = {
+        let (
+            session_id,
+            join_code,
+            session_name,
+            host_pid,
+            host_name,
+            local_pid,
+            local_role,
+            revision,
+        ) = {
             let guard = self.session.lock().unwrap_or_else(|p| p.into_inner());
             let Some(sess) = guard.as_ref() else {
                 return Ok(ConnectSyncResult {
@@ -1030,7 +1457,16 @@ impl ConnectService {
                     error_message: None,
                 });
             };
-            (sess.session_id.clone(), sess.engine.queue_revision)
+            (
+                sess.session_id.clone(),
+                sess.join_code.clone(),
+                sess.name.clone(),
+                sess.host_participant_id.clone(),
+                sess.host_display_name.clone(),
+                sess.local_participant_id.clone(),
+                sess.local_role,
+                sess.engine.queue_revision,
+            )
         };
 
         let pending_rows = sqlx::query(
@@ -1046,7 +1482,27 @@ impl ConnectService {
         .await
         .map_err(|e| format!("Failed to inspect connect outbox: {e}"))?;
 
-        if pending_rows.is_empty() {
+        let Some(sync) = &self.sync_engine else {
+            return Ok(ConnectSyncResult {
+                pushed_events: 0,
+                pulled_events: 0,
+                skipped_duplicates: 0,
+                revision,
+                offline: false,
+                error_message: None,
+            });
+        };
+        let Ok(status) = sync.get_status().await else {
+            return Ok(ConnectSyncResult {
+                pushed_events: 0,
+                pulled_events: 0,
+                skipped_duplicates: 0,
+                revision,
+                offline: false,
+                error_message: None,
+            });
+        };
+        if !status.authenticated || !status.backend_configured {
             return Ok(ConnectSyncResult {
                 pushed_events: 0,
                 pulled_events: 0,
@@ -1057,16 +1513,70 @@ impl ConnectService {
             });
         }
 
-        // Check whether remote cloud sync is configured & authenticated.
+        let account_id = match status.account_id {
+            Some(ref id) if !id.trim().is_empty() => id.clone(),
+            _ => {
+                return Ok(ConnectSyncResult {
+                    pushed_events: 0,
+                    pulled_events: 0,
+                    skipped_duplicates: 0,
+                    revision,
+                    offline: false,
+                    error_message: None,
+                });
+            }
+        };
+
+        let (base_url, anon_key, access_token) = match sync.connect_auth_context().await {
+            Ok(Some(ctx)) => ctx,
+            Ok(None) => {
+                return Ok(ConnectSyncResult {
+                    pushed_events: 0,
+                    pulled_events: 0,
+                    skipped_duplicates: 0,
+                    revision,
+                    offline: false,
+                    error_message: Some(
+                        "Your account session has expired. Please sign in again.".to_string(),
+                    ),
+                });
+            }
+            Err(err) => {
+                return Ok(ConnectSyncResult {
+                    pushed_events: 0,
+                    pulled_events: 0,
+                    skipped_duplicates: 0,
+                    revision,
+                    offline: is_connectivity_error(&err),
+                    error_message: Some(err),
+                });
+            }
+        };
+
+        let rest = crate::services::sync::client::SupabaseRestClient::new();
         let mut pushed_events = 0_usize;
-        if let Some(sync) = &self.sync_engine
-            && let Ok(status) = sync.get_status().await
-            && status.authenticated
-            && status.backend_configured
-        {
+        let mut pulled_events = 0_usize;
+        let mut skipped_duplicates = 0_usize;
+
+        // 1. Push local outbox events and own contributed queue entries.
+        if !pending_rows.is_empty() {
             let event_ids: Vec<String> = pending_rows.iter().map(|r| r.get("event_id")).collect();
             match self
-                .push_outbox_to_supabase(sync, &session_id, revision, &pending_rows)
+                .push_outbox_to_supabase(
+                    &rest,
+                    &base_url,
+                    &anon_key,
+                    &access_token,
+                    &account_id,
+                    &session_id,
+                    &join_code,
+                    &session_name,
+                    &host_pid,
+                    &host_name,
+                    local_role,
+                    revision,
+                    &pending_rows,
+                )
                 .await
             {
                 Ok(count) => {
@@ -1099,27 +1609,487 @@ impl ConnectService {
             }
         }
 
+        // 2. Push any own local queue entries not yet mirrored to Supabase.
+        let own_entries: Vec<SharedQueueEntry> = {
+            let guard = self.session.lock().unwrap_or_else(|p| p.into_inner());
+            guard
+                .as_ref()
+                .map(|sess| {
+                    sess.engine
+                        .all_entries()
+                        .iter()
+                        .filter(|e| {
+                            e.contributor_id == local_pid
+                                || e.contributor_id == account_id
+                                || (local_role == ParticipantRole::Host
+                                    && e.contributor_id == host_pid)
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        if !own_entries.is_empty() {
+            let rows_json: Vec<serde_json::Value> = own_entries
+                .iter()
+                .map(|e| {
+                    let status_str = match e.status {
+                        QueueEntryStatus::PendingPreload => "pending_preload",
+                        QueueEntryStatus::Ready => "ready",
+                        QueueEntryStatus::Playing => "playing",
+                        QueueEntryStatus::Played => "played",
+                        QueueEntryStatus::Removed => "removed",
+                    };
+                    json!({
+                        "queue_entry_id": e.queue_entry_id,
+                        "session_id": session_id,
+                        "track_json": e.track,
+                        "track_id": e.track.id,
+                        "provider_id": e.track.provider_id,
+                        "canonical_provider_id": e.canonical_provider_id,
+                        "contributor_id": account_id,
+                        "contributor_user_id": account_id,
+                        "contributor_name": e.contributor_name,
+                        "status": status_str,
+                        "priority_override": e.priority_override,
+                        "manual_position": e.manual_position.map(|v| v as i64),
+                        "committed_rank": e.committed_rank.map(|v| v as i64),
+                        "created_at_seq": e.created_at_seq as i64,
+                    })
+                })
+                .collect();
+            let _ = rest
+                .insert_table_rows_ignore_duplicates(
+                    &base_url,
+                    &anon_key,
+                    &access_token,
+                    "connect_queue_entries",
+                    &json!(rows_json),
+                    Some("queue_entry_id"),
+                )
+                .await;
+        }
+
+        // 3. Pull remote session & queue entries from Supabase.
+        let safe_sid: String = session_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        let remote_sessions = match rest
+            .get_table_rows(
+                &base_url,
+                &anon_key,
+                &access_token,
+                "connect_sessions",
+                &format!("session_id=eq.{safe_sid}&limit=1"),
+            )
+            .await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                return Ok(ConnectSyncResult {
+                    pushed_events,
+                    pulled_events: 0,
+                    skipped_duplicates: 0,
+                    revision,
+                    offline: is_connectivity_error(&err),
+                    error_message: Some(err),
+                });
+            }
+        };
+
+        if let Some(rs) = remote_sessions.first()
+            && !rs
+                .get("is_active")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+            && local_role == ParticipantRole::Guest
+        {
+            let _ = self.end_session().await;
+            return Ok(ConnectSyncResult {
+                pushed_events,
+                pulled_events: 0,
+                skipped_duplicates: 0,
+                revision,
+                offline: false,
+                error_message: Some("Host ended this Cavia Connect session.".to_string()),
+            });
+        }
+
+        let remote_participants = rest
+            .get_table_rows(
+                &base_url,
+                &anon_key,
+                &access_token,
+                "connect_participants",
+                &format!("session_id=eq.{safe_sid}"),
+            )
+            .await
+            .unwrap_or_default();
+
+        let remote_entries = rest
+            .get_table_rows(
+                &base_url,
+                &anon_key,
+                &access_token,
+                "connect_queue_entries",
+                &format!("session_id=eq.{safe_sid}&order=created_at_seq.asc"),
+            )
+            .await
+            .unwrap_or_default();
+
+        if local_role == ParticipantRole::Host {
+            let mut newly_accepted = Vec::new();
+            {
+                let mut guard = self.session.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(sess) = guard.as_mut() {
+                    for p in &remote_participants {
+                        let pid = p
+                            .get("participant_id")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default();
+                        if pid.is_empty() {
+                            continue;
+                        }
+                        let pname = p
+                            .get("display_name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("Guest");
+                        let prole =
+                            if p.get("role").and_then(serde_json::Value::as_str) == Some("host") {
+                                ParticipantRole::Host
+                            } else {
+                                ParticipantRole::Guest
+                            };
+                        let connected = p
+                            .get("is_connected")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true);
+                        sess.engine.upsert_participant(pid, pname, prole, connected);
+                    }
+
+                    for row in &remote_entries {
+                        let Some(qid) = row
+                            .get("queue_entry_id")
+                            .and_then(serde_json::Value::as_str)
+                        else {
+                            continue;
+                        };
+                        if sess
+                            .engine
+                            .all_entries()
+                            .iter()
+                            .any(|e| e.queue_entry_id == qid)
+                        {
+                            continue;
+                        }
+                        let status_raw = row
+                            .get("status")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("ready");
+                        if status_raw == "played" || status_raw == "removed" {
+                            continue;
+                        }
+                        let Ok(track) = serde_json::from_value::<Track>(
+                            row.get("track_json").cloned().unwrap_or_else(|| json!({})),
+                        ) else {
+                            continue;
+                        };
+                        let contributor_id = row
+                            .get("contributor_id")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or(&host_pid);
+                        let contributor_name = row
+                            .get("contributor_name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("Guest");
+                        let role = if contributor_id == host_pid {
+                            ParticipantRole::Host
+                        } else {
+                            ParticipantRole::Guest
+                        };
+                        let prio = row
+                            .get("priority_override")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        match sess.engine.contribute_track(
+                            contributor_id,
+                            contributor_name,
+                            role,
+                            track,
+                            prio,
+                            QueueEntryStatus::Ready,
+                            Some(qid.to_string()),
+                        ) {
+                            Ok(entry) => {
+                                pulled_events += 1;
+                                let penalty = sess
+                                    .engine
+                                    .participant(contributor_id)
+                                    .map(|p| p.penalty_credits)
+                                    .unwrap_or(0.0);
+                                newly_accepted.push((entry, penalty));
+                            }
+                            Err(_) => {
+                                skipped_duplicates += 1;
+                            }
+                        }
+                    }
+                    sess.last_sync_error = None;
+                }
+            }
+
+            for (entry, penalty) in newly_accepted {
+                let _ = self
+                    .persist_entry_and_event(
+                        &session_id,
+                        &entry,
+                        revision,
+                        penalty,
+                        &format!("pull-{}", entry.queue_entry_id),
+                    )
+                    .await;
+            }
+
+            // Host authoritatively patches statuses/ranks of queue entries + session revision in Supabase.
+            let all_entries_snapshot: Vec<SharedQueueEntry> = {
+                let guard = self.session.lock().unwrap_or_else(|p| p.into_inner());
+                guard
+                    .as_ref()
+                    .map(|sess| sess.engine.all_entries().to_vec())
+                    .unwrap_or_default()
+            };
+            for entry in all_entries_snapshot {
+                let status_str = match entry.status {
+                    QueueEntryStatus::PendingPreload => "pending_preload",
+                    QueueEntryStatus::Ready => "ready",
+                    QueueEntryStatus::Playing => "playing",
+                    QueueEntryStatus::Played => "played",
+                    QueueEntryStatus::Removed => "removed",
+                };
+                let safe_qid: String = entry
+                    .queue_entry_id
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                let _ = rest
+                    .patch_table_rows(
+                        &base_url,
+                        &anon_key,
+                        &access_token,
+                        "connect_queue_entries",
+                        &format!("queue_entry_id=eq.{safe_qid}"),
+                        &json!({
+                            "status": status_str,
+                            "manual_position": entry.manual_position.map(|v| v as i64),
+                            "committed_rank": entry.committed_rank.map(|v| v as i64),
+                        }),
+                    )
+                    .await;
+            }
+            if let Some(snap) = self.get_snapshot().await? {
+                self.emit_snapshot(&snap);
+                return Ok(ConnectSyncResult {
+                    pushed_events,
+                    pulled_events,
+                    skipped_duplicates,
+                    revision: snap.queue_revision,
+                    offline: false,
+                    error_message: None,
+                });
+            }
+        } else {
+            // Guest pulls authoritative session + queue entries from Supabase.
+            if !remote_entries.is_empty() || !remote_participants.is_empty() {
+                if let Some(rs) = remote_sessions.first() {
+                    let rev = rs
+                        .get("queue_revision")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(revision as i64);
+                    let alpha = rs
+                        .get("fairness_alpha")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(DEFAULT_FAIRNESS_ALPHA);
+                    let _ = sqlx::query(
+                        "UPDATE connect_sessions SET queue_revision = ?, fairness_alpha = ?, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
+                    )
+                    .bind(rev)
+                    .bind(alpha)
+                    .bind(&session_id)
+                    .execute(&self.db)
+                    .await;
+                }
+                for p in &remote_participants {
+                    let pid = p
+                        .get("participant_id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    if pid.is_empty() {
+                        continue;
+                    }
+                    let pname = p
+                        .get("display_name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("Listener");
+                    let prole = p
+                        .get("role")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("guest");
+                    let connected = if p
+                        .get("is_connected")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true)
+                    {
+                        1
+                    } else {
+                        0
+                    };
+                    let penalty = p
+                        .get("penalty_credits")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    let _ = sqlx::query(
+                        r#"
+                        INSERT INTO connect_participants (session_id, participant_id, display_name, role, is_connected, penalty_credits)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(session_id, participant_id) DO UPDATE SET
+                            display_name = excluded.display_name,
+                            role = excluded.role,
+                            is_connected = excluded.is_connected,
+                            penalty_credits = excluded.penalty_credits,
+                            last_seen_at = CURRENT_TIMESTAMP
+                        "#,
+                    )
+                    .bind(&session_id)
+                    .bind(pid)
+                    .bind(pname)
+                    .bind(prole)
+                    .bind(connected)
+                    .bind(penalty)
+                    .execute(&self.db)
+                    .await;
+                }
+                for row in &remote_entries {
+                    let Some(qid) = row
+                        .get("queue_entry_id")
+                        .and_then(serde_json::Value::as_str)
+                    else {
+                        continue;
+                    };
+                    let track_val = row.get("track_json").cloned().unwrap_or_else(|| json!({}));
+                    let track_json_str =
+                        serde_json::to_string(&track_val).unwrap_or_else(|_| "{}".into());
+                    let track_id = row
+                        .get("track_id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    let provider_id = row.get("provider_id").and_then(serde_json::Value::as_str);
+                    let canonical = row
+                        .get("canonical_provider_id")
+                        .and_then(serde_json::Value::as_str);
+                    let contributor_id = row
+                        .get("contributor_id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(&host_pid);
+                    let contributor_name = row
+                        .get("contributor_name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("Listener");
+                    let status_str = row
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("ready");
+                    let prio = if row
+                        .get("priority_override")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        1
+                    } else {
+                        0
+                    };
+                    let manual_pos = row
+                        .get("manual_position")
+                        .and_then(serde_json::Value::as_i64);
+                    let committed_rank = row
+                        .get("committed_rank")
+                        .and_then(serde_json::Value::as_i64);
+                    let created_seq = row
+                        .get("created_at_seq")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(1);
+                    let _ = sqlx::query(
+                        r#"
+                        INSERT INTO connect_queue_entries (
+                            queue_entry_id, session_id, track_json, track_id, provider_id,
+                            canonical_provider_id, contributor_id, contributor_name, status,
+                            priority_override, manual_position, committed_rank, created_at_seq
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(queue_entry_id) DO UPDATE SET
+                            status = excluded.status,
+                            manual_position = excluded.manual_position,
+                            committed_rank = excluded.committed_rank,
+                            updated_at = CURRENT_TIMESTAMP
+                        "#,
+                    )
+                    .bind(qid)
+                    .bind(&session_id)
+                    .bind(&track_json_str)
+                    .bind(track_id)
+                    .bind(provider_id)
+                    .bind(canonical)
+                    .bind(contributor_id)
+                    .bind(contributor_name)
+                    .bind(status_str)
+                    .bind(prio)
+                    .bind(manual_pos)
+                    .bind(committed_rank)
+                    .bind(created_seq)
+                    .execute(&self.db)
+                    .await;
+                    pulled_events += 1;
+                }
+                if let Some(snap) = self.restore_active_session().await? {
+                    self.emit_snapshot(&snap);
+                    return Ok(ConnectSyncResult {
+                        pushed_events,
+                        pulled_events,
+                        skipped_duplicates,
+                        revision: snap.queue_revision,
+                        offline: false,
+                        error_message: None,
+                    });
+                }
+            }
+        }
+
         Ok(ConnectSyncResult {
             pushed_events,
-            pulled_events: 0,
-            skipped_duplicates: 0,
+            pulled_events,
+            skipped_duplicates,
             revision,
             offline: false,
             error_message: None,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn push_outbox_to_supabase(
         &self,
-        sync: &SyncEngine,
+        rest: &crate::services::sync::client::SupabaseRestClient,
+        base_url: &str,
+        anon_key: &str,
+        access_token: &str,
+        account_id: &str,
         session_id: &str,
+        join_code: &str,
+        session_name: &str,
+        host_participant_id: &str,
+        host_display_name: &str,
+        local_role: ParticipantRole,
         revision: u64,
         rows: &[sqlx::sqlite::SqliteRow],
     ) -> Result<usize, String> {
-        let Some((base_url, anon_key, access_token)) = sync.connect_auth_context().await? else {
-            return Err("Supabase authentication expired".to_string());
-        };
-        let rest = crate::services::sync::client::SupabaseRestClient::new();
         let payload: Vec<serde_json::Value> = rows
             .iter()
             .map(|r| {
@@ -1130,6 +2100,7 @@ impl ConnectService {
                     "event_id": r.get::<String, _>("event_id"),
                     "session_id": session_id,
                     "participant_id": r.get::<String, _>("participant_id"),
+                    "user_id": account_id,
                     "action": r.get::<String, _>("action"),
                     "payload_json": parsed,
                     "base_revision": r.get::<i64, _>("base_revision"),
@@ -1137,29 +2108,50 @@ impl ConnectService {
             })
             .collect();
 
-        rest.upsert_table_rows(
-            &base_url,
-            &anon_key,
-            &access_token,
+        rest.insert_table_rows_ignore_duplicates(
+            base_url,
+            anon_key,
+            access_token,
             "connect_events",
             &json!(payload),
             Some("event_id"),
         )
         .await?;
 
-        let _ = rest
-            .upsert_table_rows(
-                &base_url,
-                &anon_key,
-                &access_token,
-                "connect_sessions",
-                &json!([{
-                    "session_id": session_id,
-                    "queue_revision": revision as i64,
-                }]),
-                Some("session_id"),
-            )
-            .await;
+        if local_role == ParticipantRole::Host {
+            let safe_sid: String = session_id
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            let _ = rest
+                .upsert_table_rows(
+                    base_url,
+                    anon_key,
+                    access_token,
+                    "connect_sessions",
+                    &json!([{
+                        "session_id": session_id,
+                        "join_code": join_code,
+                        "name": session_name,
+                        "host_user_id": account_id,
+                        "host_participant_id": host_participant_id,
+                        "host_display_name": host_display_name,
+                        "queue_revision": revision as i64,
+                    }]),
+                    Some("session_id"),
+                )
+                .await;
+            let _ = rest
+                .patch_table_rows(
+                    base_url,
+                    anon_key,
+                    access_token,
+                    "connect_sessions",
+                    &format!("session_id=eq.{safe_sid}"),
+                    &json!({ "queue_revision": revision as i64 }),
+                )
+                .await;
+        }
 
         Ok(rows.len())
     }

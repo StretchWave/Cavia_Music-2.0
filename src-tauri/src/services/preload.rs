@@ -353,6 +353,10 @@ impl PreloadCoordinator {
         }
     }
 
+    pub fn refresh_snapshot(&self) {
+        self.recompute_and_emit();
+    }
+
     pub fn retry_failed(&self) {
         {
             let mut guard = self.state.lock().unwrap_or_else(|p| p.into_inner());
